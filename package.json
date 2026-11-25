@@ -1,0 +1,48 @@
+{
+  "name": "conductor",
+  "productName": "Conductor",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "macOS desktop single-chat multi-agent orchestrator for Codex, AGY, and Claude with parallel Git worktree workers, auto-land, and a unified Chromium/Markdown/Image viewer.",
+  "main": "dist/main/index.cjs",
+  "type": "module",
+  "scripts": {
+    "build:main": "node scripts/build-main.mjs",
+    "build:renderer": "vite build",
+    "build": "pnpm build:main && pnpm build:renderer",
+    "start": "pnpm build && electron .",
+    "dev": "node scripts/dev.mjs",
+    "typecheck:main": "tsc -p tsconfig.main.json --noEmit",
+    "typecheck:renderer": "tsc -p tsconfig.renderer.json --noEmit",
+    "typecheck": "pnpm typecheck:main && pnpm typecheck:renderer",
+    "test": "vitest run",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "dependencies": {
+    "lucide-react": "^0.511.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.8",
+    "@types/node": "^22.15.29",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.5",
+    "@vitejs/plugin-react": "^4.5.2",
+    "electron": "^36.3.2",
+    "esbuild": "^0.25.5",
+    "tailwindcss": "^4.1.8",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.1.4"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  }
+}
