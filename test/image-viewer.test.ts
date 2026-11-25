@@ -93,12 +93,13 @@ describe("Local Image Viewer (main service)", () => {
     }
   });
 
-  it("resolves and reads relative, percent-encoded, Japanese, and query/hash image paths against baseFilePath", () => {
+  it("resolves and reads relative, percent-encoded, Japanese, query/hash, and repo-root image paths against baseFilePath", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "conductor-img-rel-"));
     try {
       const docsDir = path.join(tmpDir, "docs");
       const imagesDir = path.join(docsDir, "images");
       const assetsDir = path.join(tmpDir, "assets");
+      fs.mkdirSync(path.join(tmpDir, ".git"));
       fs.mkdirSync(imagesDir, { recursive: true });
       fs.mkdirSync(assetsDir, { recursive: true });
 
@@ -148,6 +149,11 @@ describe("Local Image Viewer (main service)", () => {
         pathToFileURL(readmePath).toString(),
       );
       expect(relWithFileUrlBase).toEqual({ ok: true, filePath: overviewPng });
+
+      // GitHub-style repo-root path (/docs/images/...) resolved via git root when absent at OS root
+      const repoRootRel = readLocalImageFile("/docs/images/overview.png", guidePath);
+      expect(repoRootRel.ok).toBe(true);
+      expect(repoRootRel.filePath).toBe(overviewPng);
 
       // Symlink to non-image file is still blocked even via relative path
       const secretPath = path.join(tmpDir, "secret.txt");

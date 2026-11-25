@@ -8,6 +8,7 @@ export const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
+  ".jfif": "image/jpeg",
   ".webp": "image/webp",
   ".gif": "image/gif",
   ".bmp": "image/bmp",
@@ -33,22 +34,6 @@ export type ResolvedImagePath =
   | { ok: true; filePath: string }
   | { ok: false; error: string };
 
-function resolveBaseDirectory(baseFilePath?: string): string | null {
-  const trimmed = baseFilePath?.trim();
-  if (!trimmed) return null;
-  if (/^file:\/\//i.test(trimmed)) {
-    try {
-      const parsed = new URL(trimmed);
-      parsed.hash = "";
-      parsed.search = "";
-      return path.dirname(fileURLToPath(parsed));
-    } catch {
-      return null;
-    }
-  }
-  return path.dirname(trimmed);
-}
-
 function expandHomePath(rawPath: string): string {
   if (rawPath === "~") {
     return os.homedir();
@@ -57,6 +42,26 @@ function expandHomePath(rawPath: string): string {
     return path.join(os.homedir(), rawPath.slice(2));
   }
   return rawPath;
+}
+
+function resolveBaseDirectory(baseFilePath?: string): string | null {
+  const trimmed = baseFilePath?.trim();
+  if (!trimmed || trimmed.includes("\0")) return null;
+  if (/^file:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      parsed.hash = "";
+      parsed.search = "";
+      const filePath = fileURLToPath(parsed);
+      if (filePath.includes("\0")) return null;
+      return path.dirname(path.resolve(filePath));
+    } catch {
+      return null;
+    }
+  }
+  const expanded = expandHomePath(trimmed);
+  if (!path.isAbsolute(expanded)) return null;
+  return path.dirname(path.resolve(expanded));
 }
 
 function stripQueryAndHashIfNotLiteral(rawPath: string, baseDir: string | null): string {
@@ -88,6 +93,61 @@ function resolveCandidatePath(rawPath: string, baseDir: string | null): string |
   }
   if (baseDir) {
     return path.resolve(baseDir, expanded);
+  }
+  return null;
+}
+
+function findGitRoot(startDir: string): string | null {
+  let current = path.resolve(startDir);
+  while (true) {
+    if (fs.existsSync(path.join(current, ".git"))) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+function resolveRepoRootFallback(rawInput: string, baseFilePath?: string): string | null {
+  const trimmed = rawInput.trim();
+  if (!trimmed.startsWith("/") || trimmed.startsWith("//") || /^file:\/\//i.test(trimmed)) {
+    return null;
+  }
+  const baseDir = resolveBaseDirectory(baseFilePath);
+  if (!baseDir) return null;
+
+  const cleaned = stripQueryAndHashIfNotLiteral(trimmed, baseDir);
+  const relSegment = cleaned.replace(/^\/+/, "");
+  if (!relSegment) return null;
+
+  const candidateRoots: string[] = [];
+  const gitRoot = findGitRoot(baseDir);
+  if (gitRoot) candidateRoots.push(gitRoot);
+  if (!candidateRoots.includes(baseDir)) candidateRoots.push(baseDir);
+
+  for (const root of candidateRoots) {
+    const literalCandidate = path.resolve(root, relSegment);
+    let candidate = literalCandidate;
+    if (relSegment.includes("%") && !fs.existsSync(literalCandidate)) {
+      try {
+        const decoded = decodeURIComponent(relSegment);
+        if (!decoded.includes("\0")) {
+          candidate = path.resolve(root, decoded);
+        }
+      } catch {
+        // keep literal candidate
+      }
+    }
+    const relFromRoot = path.relative(root, candidate);
+    if (relFromRoot.startsWith("..") || path.isAbsolute(relFromRoot)) {
+      continue;
+    }
+    if (isAllowedImageExtension(candidate) && fs.existsSync(candidate)) {
+      return candidate;
+    }
   }
   return null;
 }
@@ -167,7 +227,7 @@ export function readLocalImageFile(
     return { ok: false, filePath: input, error: resolved.error };
   }
 
-  const targetPath = resolved.filePath;
+  let targetPath = resolved.filePath;
 
   let realPath: string;
   try {
@@ -175,13 +235,28 @@ export function readLocalImageFile(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code === "ENOENT") {
-      return { ok: false, filePath: targetPath, error: "画像ファイルが見つかりません。" };
+      const repoFallback = resolveRepoRootFallback(input, baseFilePath);
+      if (repoFallback) {
+        targetPath = repoFallback;
+        try {
+          realPath = fs.realpathSync(targetPath);
+        } catch (fallbackErr) {
+          return {
+            ok: false,
+            filePath: targetPath,
+            error: `画像ファイルにアクセスできません: ${(fallbackErr as Error).message}`,
+          };
+        }
+      } else {
+        return { ok: false, filePath: targetPath, error: "画像ファイルが見つかりません。" };
+      }
+    } else {
+      return {
+        ok: false,
+        filePath: targetPath,
+        error: `画像ファイルにアクセスできません: ${(err as Error).message}`,
+      };
     }
-    return {
-      ok: false,
-      filePath: targetPath,
-      error: `画像ファイルにアクセスできません: ${(err as Error).message}`,
-    };
   }
 
   // Defense in depth: block symlinks pointing to non-image files

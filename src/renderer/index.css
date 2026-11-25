@@ -159,6 +159,13 @@
   cursor: pointer;
 }
 
+.conductor-mermaid-svg svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+
 .conductor-markdown input[type="checkbox"] {
   accent-color: #6366f1;
   margin-right: 0.45em;

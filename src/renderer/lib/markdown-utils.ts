@@ -28,6 +28,10 @@ const WINDOWS_DRIVE_PATH_RE = /^[a-zA-Z]:[\\/]/;
 const URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 const DATA_IMAGE_URL_RE = /^data:image\/[a-z0-9.+-]+(?:;[^,]*)?,/i;
 
+export function isSafeDataImageUrl(url: string): boolean {
+  return DATA_IMAGE_URL_RE.test(url.trim());
+}
+
 export function transformMarkdownUrl(
   url: string,
   key: string,
@@ -38,9 +42,9 @@ export function transformMarkdownUrl(
   if (key === "href" && /^file:\/\//i.test(trimmed)) {
     return trimmed;
   }
-  // Allow file://, inline data:image/*, blob:, and Windows drive paths on img src
+  // Allow file://, inline data:image/*, blob:, and Windows drive paths on img src / source srcSet
   // so our MarkdownImage renderer can resolve and load them safely.
-  if (key === "src") {
+  if (key === "src" || key === "srcSet") {
     if (
       /^file:\/\//i.test(trimmed) ||
       DATA_IMAGE_URL_RE.test(trimmed) ||
@@ -177,7 +181,7 @@ export function resolveMarkdownImagePath(rawSrc: string, baseFilePath?: string):
 }
 
 /**
- * Classifies a Markdown `![alt](src)` image source into:
+ * Classifies a Markdown `![alt](src)` or HTML `<img src="...">` image source into:
  * - `direct`: safe remote (`http://`, `https://`), inline `data:image/*`, or `blob:` URLs
  * - `local`: relative (with `baseFilePath`), absolute, `~/`, or `file://` local files to load via IPC
  * - `invalid`: empty, disallowed schemes (e.g. `javascript:`), or relative paths without `baseFilePath`
@@ -228,9 +232,11 @@ export function classifyMarkdownImageSrc(
     isWindowsDrive
   ) {
     const resolvedPath = resolveMarkdownImagePath(trimmed);
+    const trimmedBase = baseFilePath?.trim();
     return {
       kind: "local",
       target: trimmed,
+      ...(trimmedBase ? { baseFilePath: trimmedBase } : {}),
       resolvedPath,
       cacheKey: resolvedPath ?? trimmed,
     };

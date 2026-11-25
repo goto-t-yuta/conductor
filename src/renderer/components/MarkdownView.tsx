@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { Check, Copy, FileText, Image as ImageIcon, ImageOff, RotateCw } from "lucide-react";
 import {
@@ -13,6 +15,8 @@ import {
   transformMarkdownUrl,
   uniqueSlug,
 } from "../lib/markdown-utils.js";
+import { isMermaidLanguage } from "../lib/mermaid-renderer.js";
+import { MermaidBlock } from "./MermaidBlock.js";
 
 export interface MarkdownOpenedImage {
   src: string;
@@ -34,7 +38,22 @@ interface MarkdownViewProps {
   loadLocalImage?: LocalMarkdownImageLoader;
 }
 
-function conductorUrlTransform(url: string, key: string): string {
+export const CONDUCTOR_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  protocols: {
+    ...defaultSchema.protocols,
+    href: [...(defaultSchema.protocols?.href ?? []), "file"],
+    src: ["http", "https", "file", "data", "blob"],
+  },
+  attributes: {
+    ...defaultSchema.attributes,
+    code: [["className", /^language-./]],
+    img: [...(defaultSchema.attributes?.img ?? []), "loading", "decoding"],
+    source: [...(defaultSchema.attributes?.source ?? []), "srcSet", "media", "type", "sizes"],
+  },
+};
+
+export function conductorUrlTransform(url: string, key: string): string {
   return transformMarkdownUrl(url, key, defaultUrlTransform);
 }
 
@@ -47,6 +66,10 @@ interface MarkdownImageProps {
   src?: string;
   alt?: string;
   title?: string;
+  width?: number | string;
+  height?: number | string;
+  className?: string;
+  style?: React.CSSProperties;
   baseFilePath?: string;
   onOpenImage?: (image: MarkdownOpenedImage) => void;
   imageReloadVersion: number;
@@ -58,6 +81,10 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
   src,
   alt,
   title,
+  width,
+  height,
+  className,
+  style,
   baseFilePath,
   onOpenImage,
   imageReloadVersion,
@@ -143,6 +170,14 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
     onOpenImage({ src: resolvedSrc, alt, filePath });
   };
 
+  const mergedClassName = [
+    "max-w-full h-auto rounded-lg",
+    onOpenImage ? "cursor-zoom-in transition-opacity hover:opacity-95" : "",
+    className ?? "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   if (classified.kind === "direct") {
     if (directErrorKey === directKey) {
       return (
@@ -163,12 +198,14 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
         src={classified.src}
         alt={alt ?? ""}
         title={title ?? (onOpenImage ? "クリックで Image Viewer で拡大表示" : undefined)}
+        width={width}
+        height={height}
+        style={style}
         loading="lazy"
+        data-testid="markdown-image"
         onError={() => setDirectErrorKey(directKey)}
         onClick={handleOpen(classified.src)}
-        className={`max-w-full h-auto rounded-lg ${
-          onOpenImage ? "cursor-zoom-in transition-opacity hover:opacity-95" : ""
-        }`}
+        className={mergedClassName}
       />
     );
   }
@@ -209,6 +246,10 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
         src={activeState.dataUrl}
         alt={alt ?? ""}
         title={title ?? (onOpenImage ? "クリックで Image Viewer で拡大表示" : activeState.filePath)}
+        width={width}
+        height={height}
+        style={style}
+        data-testid="markdown-image"
         data-markdown-image-path={activeState.filePath}
         onError={() =>
           setLocalState({
@@ -219,9 +260,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
           })
         }
         onClick={handleOpen(activeState.dataUrl, activeState.filePath)}
-        className={`max-w-full h-auto rounded-lg ${
-          onOpenImage ? "cursor-zoom-in transition-opacity hover:opacity-95" : ""
-        }`}
+        className={mergedClassName}
       />
     );
   }
@@ -270,6 +309,96 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
       <span className="truncate">{alt || classified.target} を読み込み中...</span>
     </span>
   );
+};
+
+interface MarkdownPictureSourceProps extends React.SourceHTMLAttributes<HTMLSourceElement> {
+  baseFilePath?: string;
+  imageReloadVersion: number;
+  imageCache: MarkdownImageCache;
+  loadLocalImage?: LocalMarkdownImageLoader;
+}
+
+/**
+ * Resolves local <source srcset="..."> entries inside GitHub-style <picture> blocks.
+ * Returns null while unresolved so the fallback <img> inside <picture> renders cleanly.
+ */
+const MarkdownPictureSource: React.FC<MarkdownPictureSourceProps> = ({
+  srcSet,
+  baseFilePath,
+  imageReloadVersion,
+  imageCache,
+  loadLocalImage,
+  ...rest
+}) => {
+  const parsed = useMemo(() => {
+    if (!srcSet) return null;
+    const firstCandidate = srcSet.split(",")[0]?.trim();
+    if (!firstCandidate) return null;
+    const parts = firstCandidate.split(/\s+/);
+    const url = parts[0];
+    const descriptor = parts.slice(1).join(" ");
+    return { url, descriptor };
+  }, [srcSet]);
+
+  const classified = useMemo(
+    () => (parsed ? classifyMarkdownImageSrc(parsed.url, baseFilePath) : null),
+    [parsed, baseFilePath],
+  );
+
+  const requestKey =
+    classified?.kind === "local" ? `${classified.cacheKey}::${imageReloadVersion}` : "";
+
+  const [loadedSrc, setLoadedSrc] = useState<{ key: string; dataUrl: string } | null>(null);
+
+  useEffect(() => {
+    if (!classified || classified.kind !== "local") return;
+    const cached = imageCache.get(classified.cacheKey);
+    if (cached) {
+      setLoadedSrc({ key: requestKey, dataUrl: cached.dataUrl });
+      return;
+    }
+
+    let cancelled = false;
+    void imageCache
+      .load({
+        target: classified.target,
+        baseFilePath: classified.baseFilePath,
+        cacheKey: classified.cacheKey,
+        loader: loadLocalImage,
+      })
+      .then((res) => {
+        if (!cancelled && res.ok && res.dataUrl) {
+          setLoadedSrc({ key: requestKey, dataUrl: res.dataUrl });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [classified, imageCache, loadLocalImage, requestKey]);
+
+  if (!parsed || !classified || classified.kind === "invalid") {
+    return null;
+  }
+
+  let resolvedUrl: string | null = null;
+  if (classified.kind === "direct") {
+    resolvedUrl = classified.src;
+  } else {
+    const syncCached = imageCache.get(classified.cacheKey);
+    if (loadedSrc && loadedSrc.key === requestKey) {
+      resolvedUrl = loadedSrc.dataUrl;
+    } else if (syncCached) {
+      resolvedUrl = syncCached.dataUrl;
+    }
+  }
+
+  if (!resolvedUrl) {
+    return null;
+  }
+
+  const finalSrcSet = parsed.descriptor ? `${resolvedUrl} ${parsed.descriptor}` : resolvedUrl;
+  return <source {...rest} srcSet={finalSrcSet} />;
 };
 
 function extractNodeText(node: React.ReactNode): string {
@@ -342,11 +471,23 @@ export const MarkdownView: React.FC<MarkdownViewProps> = ({
   };
 
   const renderImage = useCallback(
-    ({ src, alt, title }: React.ImgHTMLAttributes<HTMLImageElement>) => (
+    ({
+      src,
+      alt,
+      title,
+      width,
+      height,
+      className,
+      style,
+    }: React.ImgHTMLAttributes<HTMLImageElement>) => (
       <MarkdownImage
         src={typeof src === "string" ? src : undefined}
         alt={alt}
         title={title}
+        width={width}
+        height={height}
+        className={className}
+        style={style}
         baseFilePath={baseFilePath}
         onOpenImage={onOpenImage}
         imageReloadVersion={imageReloadVersion}
@@ -357,6 +498,22 @@ export const MarkdownView: React.FC<MarkdownViewProps> = ({
     [baseFilePath, onOpenImage, imageReloadVersion, imageCache, loadLocalImage],
   );
 
+  const renderSource = useCallback(
+    ({ srcSet, media, type, sizes }: React.SourceHTMLAttributes<HTMLSourceElement>) => (
+      <MarkdownPictureSource
+        srcSet={srcSet}
+        media={media}
+        type={type}
+        sizes={sizes}
+        baseFilePath={baseFilePath}
+        imageReloadVersion={imageReloadVersion}
+        imageCache={imageCache}
+        loadLocalImage={loadLocalImage}
+      />
+    ),
+    [baseFilePath, imageReloadVersion, imageCache, loadLocalImage],
+  );
+
   return (
     <div
       className={`conductor-markdown ${
@@ -365,6 +522,7 @@ export const MarkdownView: React.FC<MarkdownViewProps> = ({
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, CONDUCTOR_SANITIZE_SCHEMA]]}
         urlTransform={conductorUrlTransform}
         components={{
           h1: makeHeading("h1"),
@@ -374,6 +532,7 @@ export const MarkdownView: React.FC<MarkdownViewProps> = ({
           h5: makeHeading("h5"),
           h6: makeHeading("h6"),
           img: renderImage,
+          source: renderSource,
           a({ href, children }) {
             const classified = classifyLinkHref(href, baseFilePath);
             const isLocalMd = classified.kind === "markdown" && Boolean(onOpenMarkdownFile);
@@ -415,14 +574,33 @@ export const MarkdownView: React.FC<MarkdownViewProps> = ({
             );
           },
           pre({ children }) {
-            const child = React.Children.only(children) as React.ReactElement<{
-              className?: string;
-              children?: React.ReactNode;
-            }>;
-            const className = child?.props?.className ?? "";
+            const childArray = React.Children.toArray(children);
+            const firstChild =
+              childArray.length === 1 && React.isValidElement<{
+                className?: string;
+                children?: React.ReactNode;
+              }>(childArray[0])
+                ? childArray[0]
+                : null;
+
+            if (!firstChild || firstChild.type !== "code") {
+              return (
+                <pre className="my-2.5 overflow-x-auto p-3 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50 dark:bg-[#14171f] text-[12.5px] leading-relaxed font-mono select-text">
+                  {children}
+                </pre>
+              );
+            }
+
+            const className = firstChild.props?.className ?? "";
             const match = /language-([^\s]+)/.exec(className);
-            const code = String(child?.props?.children ?? "").replace(/\n$/, "");
-            return <CodeBlock language={match?.[1] ?? ""} code={code} />;
+            const language = match?.[1] ?? "";
+            const code = extractNodeText(firstChild.props?.children).replace(/\n$/, "");
+
+            if (isMermaidLanguage(language)) {
+              return <MermaidBlock code={code} />;
+            }
+
+            return <CodeBlock language={language} code={code} />;
           },
         }}
       >
