@@ -371,11 +371,19 @@ export type ExplicitMentionTarget =
       kind: "project";
       projectId: string | null;
       projectName?: string;
+      projectPath?: string | null;
+      projectColorHex?: string;
     }
   | {
       kind: "task";
       taskId: string;
       taskNumber?: number;
+      taskTitle?: string;
+      taskStatus?: AgentTaskStatus;
+      projectId?: string | null;
+      projectName?: string;
+      projectPath?: string | null;
+      projectColorHex?: string;
     };
 
 export interface SendMessagePayload {

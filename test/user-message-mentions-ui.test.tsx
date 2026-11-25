@@ -1,8 +1,27 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentTask, AppSnapshot, ChatMessage, Project } from "../src/shared/types.js";
-import { resolveMessageMentionBadges } from "../src/shared/mentions.js";
+import type { BrowserManager } from "../src/main/browser-manager.js";
+import { ConductorController } from "../src/main/conductor-controller.js";
+import { StateStore } from "../src/main/state-store.js";
+import type {
+  AgentTask,
+  AppSnapshot,
+  ChatMessage,
+  ExplicitMentionTarget,
+  Project,
+} from "../src/shared/types.js";
+import {
+  addExplicitMentionTarget,
+  detectActiveMention,
+  getMentionSuggestions,
+  removeActiveMentionQuery,
+  resolveMessageMentionBadges,
+  suggestionToExplicitMentionTarget,
+} from "../src/shared/mentions.js";
 import {
   UserMessageMentionBadges,
   formatMentionBadgeTooltip,
@@ -93,10 +112,10 @@ function makeSnapshot(messages: ChatMessage[]): AppSnapshot {
   };
 }
 
-function renderUnifiedChat(messages: ChatMessage[]): string {
+function renderUnifiedChat(messages: ChatMessage[], snapshotOverride?: AppSnapshot): string {
   return renderToStaticMarkup(
     <UnifiedChat
-      snapshot={makeSnapshot(messages)}
+      snapshot={snapshotOverride ?? makeSnapshot(messages)}
       composerText=""
       attachments={[]}
       onComposerTextChange={vi.fn()}
@@ -294,5 +313,123 @@ describe("User message mention badges UI", () => {
     expect(html).not.toContain("@T6");
     expect(html).not.toContain("@web_dashboard");
     expect(html).not.toContain("@agent_terminal_2");
+  });
+
+  it("retains structured mention chips end-to-end from @xxx composer selection through sendMessage, immediate snapshot broadcast, and reload restore", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "conductor-e2e-mention-badges-"));
+    try {
+      const store = new StateStore(tmpDir);
+      const initial = store.load();
+      store.save({
+        ...initial,
+        projects: SAMPLE_PROJECTS,
+        tasks: SAMPLE_TASKS,
+        nextTaskNumber: 7,
+      });
+
+      const fakeBrowser = {
+        getTabs: () => [],
+        getActiveTabId: () => null,
+        getActiveTab: () => null,
+        isPickingElement: () => false,
+        restore: () => {},
+      } as unknown as BrowserManager;
+
+      const broadcastedSnapshots: AppSnapshot[] = [];
+      const controller = new ConductorController({
+        store,
+        browser: fakeBrowser,
+        onSnapshot: (snap) => broadcastedSnapshots.push(snap),
+      });
+      (
+        controller as unknown as {
+          dispatchParallelResponderTurn: () => Promise<void>;
+        }
+      ).dispatchParallelResponderTurn = async () => {};
+
+      // 1. Simulate selecting `@web_dashboard` and `@T6` in the composer (stripping @xxx from text)
+      let composerText = "@web_dashboard";
+      let selectedMentions: ExplicitMentionTarget[] = [];
+
+      const qProj = detectActiveMention(composerText, composerText.length)!;
+      const projSuggestion = getMentionSuggestions(
+        qProj,
+        SAMPLE_PROJECTS,
+        SAMPLE_TASKS,
+      ).suggestions.find((s) => s.kind === "project" && s.project.id === "proj-2")!;
+      selectedMentions = addExplicitMentionTarget(
+        selectedMentions,
+        suggestionToExplicitMentionTarget(projSuggestion),
+      );
+      composerText = removeActiveMentionQuery(composerText, qProj).nextText;
+      expect(composerText).toBe("");
+
+      composerText = "@T6";
+      const qTask = detectActiveMention(composerText, composerText.length)!;
+      const taskSuggestion = getMentionSuggestions(
+        qTask,
+        SAMPLE_PROJECTS,
+        SAMPLE_TASKS,
+      ).suggestions.find((s) => s.kind === "task" && s.task.id === "task-6")!;
+      selectedMentions = addExplicitMentionTarget(
+        selectedMentions,
+        suggestionToExplicitMentionTarget(taskSuggestion),
+      );
+      composerText = removeActiveMentionQuery(composerText, qTask).nextText;
+      expect(composerText).toBe("");
+
+      // User writes clean prompt text without any @xxx tokens and sends
+      const cleanMessageText = "このバグの原因を調べて修正して";
+      const capturedMentions = [...selectedMentions];
+      // Simulate composer clearing chips on send after capturing payload
+      selectedMentions = [];
+      expect(selectedMentions).toEqual([]);
+
+      await controller.sendMessage({
+        text: cleanMessageText,
+        attachments: [],
+        mentions: capturedMentions,
+      });
+
+      // 2. Immediate snapshot broadcast retains mentions on ChatMessage & renders badges above user bubble
+      expect(broadcastedSnapshots.length).toBeGreaterThan(0);
+      const immediateSnapshot = broadcastedSnapshots[broadcastedSnapshots.length - 1]!;
+      const postedUserMsg = immediateSnapshot.messages.find((m) => m.role === "user");
+      expect(postedUserMsg?.text).toBe(cleanMessageText);
+      expect(postedUserMsg?.text).not.toContain("@");
+      expect(postedUserMsg?.mentions).toHaveLength(2);
+
+      const immediateHtml = renderUnifiedChat(immediateSnapshot.messages, immediateSnapshot);
+      expect(immediateHtml).toContain('data-testid="user-message-meta-chips"');
+      expect((immediateHtml.match(/data-testid="user-message-mention-badge"/g) ?? []).length).toBe(2);
+      expect(immediateHtml).toContain('data-project-name="web_dashboard"');
+      expect(immediateHtml).toContain('data-task-code="T6"');
+      expect(immediateHtml).toContain(cleanMessageText);
+
+      // Verify badges appear before the user bubble text in DOM order
+      const metaIdx = immediateHtml.indexOf('data-testid="user-message-meta-chips"');
+      const bodyIdx = immediateHtml.indexOf(cleanMessageText);
+      expect(metaIdx).toBeGreaterThan(-1);
+      expect(bodyIdx).toBeGreaterThan(metaIdx);
+
+      // 3. Reload / session restore from StateStore still renders both badges above the posted bubble
+      const restoredController = new ConductorController({
+        store: new StateStore(tmpDir),
+        browser: fakeBrowser,
+        onSnapshot: () => {},
+      });
+      const restoredSnapshot = restoredController.getSnapshot();
+      const restoredUserMsg = restoredSnapshot.messages.find((m) => m.role === "user");
+      expect(restoredUserMsg?.mentions).toHaveLength(2);
+
+      const restoredHtml = renderUnifiedChat(restoredSnapshot.messages, restoredSnapshot);
+      expect(restoredHtml).toContain('data-testid="user-message-meta-chips"');
+      expect((restoredHtml.match(/data-testid="user-message-mention-badge"/g) ?? []).length).toBe(2);
+      expect(restoredHtml).toContain('data-project-name="web_dashboard"');
+      expect(restoredHtml).toContain('data-task-code="T6"');
+      expect(restoredHtml).toContain(cleanMessageText);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
