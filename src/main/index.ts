@@ -14,7 +14,7 @@ import { BrowserManager } from "./browser-manager.js";
 import { ConductorController } from "./conductor-controller.js";
 import { readLocalImageFile } from "./image-viewer.js";
 import { MarkdownFileWatcher, readLocalMarkdownFile } from "./markdown-viewer.js";
-import { listProjectDirectory, readLocalTextFile } from "./project-files.js";
+import { registerProjectFileTreeIpcHandlers } from "./project-files.js";
 import { QuitGuard } from "./quit-guard.js";
 import { StateStore } from "./state-store.js";
 
@@ -367,17 +367,8 @@ function registerIpcHandlers(): void {
     readLocalImageFile(filePathOrUrl),
   );
 
-  // Project File Tree read-only IPC
-  ipcMain.handle(
-    "fs:list-dir",
-    (_e, dirPath: string, options?: { rootPath?: string; includeIgnored?: boolean }) =>
-      listProjectDirectory(dirPath, options),
-  );
-  ipcMain.handle(
-    "fs:read-text-file",
-    (_e, filePath: string, options?: { rootPath?: string }) =>
-      readLocalTextFile(filePath, options),
-  );
+  // Project File Tree read-only IPC (fs:list-dir, fs:read-text-file)
+  registerProjectFileTreeIpcHandlers(ipcMain);
 }
 
 async function createWindow(): Promise<void> {

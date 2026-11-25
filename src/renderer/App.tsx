@@ -10,7 +10,7 @@ import type {
   ProjectFileEntry,
   RightPaneMode,
 } from "../shared/types.js";
-import { classifyProjectFile } from "../shared/file-tree.js";
+import { classifyProjectFile, formatFileTreeIpcError } from "../shared/file-tree.js";
 import {
   addExplicitMentionTarget,
   removeExplicitMentionTarget,
@@ -892,7 +892,7 @@ export const App: React.FC = () => {
           );
         }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "ファイルを読み込めませんでした。";
+        const msg = formatFileTreeIpcError(err, "ファイルを読み込めませんでした。");
         setCodeTabs((prev) =>
           prev.map((t) =>
             t.filePath === filePath

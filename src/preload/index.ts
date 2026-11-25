@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { PROJECT_FILE_TREE_IPC_CHANNELS } from "../shared/file-tree.js";
 import type {
   AgentTaskStatus,
   AppSnapshot,
@@ -101,8 +102,10 @@ const api: ConductorAPI = {
     return () => ipcRenderer.off("markdown:fileChanged", handler);
   },
   imageReadFile: (filePathOrUrl) => ipcRenderer.invoke("image:readFile", filePathOrUrl),
-  fsListDir: (dirPath, options) => ipcRenderer.invoke("fs:list-dir", dirPath, options),
-  fsReadTextFile: (filePath, options) => ipcRenderer.invoke("fs:read-text-file", filePath, options),
+  fsListDir: (dirPath, options) =>
+    ipcRenderer.invoke(PROJECT_FILE_TREE_IPC_CHANNELS.listDir, dirPath, options),
+  fsReadTextFile: (filePath, options) =>
+    ipcRenderer.invoke(PROJECT_FILE_TREE_IPC_CHANNELS.readTextFile, filePath, options),
   getPathForFile: (file: File) => {
     try {
       return webUtils.getPathForFile(file);

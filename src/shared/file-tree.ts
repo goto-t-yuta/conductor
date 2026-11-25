@@ -1,3 +1,8 @@
+export const PROJECT_FILE_TREE_IPC_CHANNELS = {
+  listDir: "fs:list-dir",
+  readTextFile: "fs:read-text-file",
+} as const;
+
 export const DEFAULT_IGNORED_NAMES: ReadonlySet<string> = new Set([
   "node_modules",
   ".git",
@@ -350,4 +355,25 @@ export function filterFileTreeEntries(
 
   visitDir(rootPath, false);
   return { filteredByDir, autoExpandedDirs, matchCount };
+}
+
+/**
+ * Normalizes IPC invocation errors for the Project File Tree / Code Viewer.
+ * Gives an actionable restart hint when a newer renderer/preload invokes a newly added
+ * `fs:*` channel against an older, still-running Electron main process.
+ */
+export function formatFileTreeIpcError(err: unknown, fallback: string): string {
+  const rawMessage = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  const trimmed = rawMessage.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  const missingHandlerMatch = trimmed.match(/No handler registered for ['"]([^'"]+)['"]/i);
+  if (missingHandlerMatch) {
+    const channel = missingHandlerMatch[1];
+    return `メインプロセスに IPC ハンドラ '${channel}' が登録されていません。最新ビルドを反映するため Conductor アプリを再起動してください。`;
+  }
+
+  return trimmed;
 }

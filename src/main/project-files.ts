@@ -8,11 +8,20 @@ import {
   isBufferLikelyBinary,
   isDefaultIgnoredEntry,
   MAX_TEXT_FILE_BYTES,
+  PROJECT_FILE_TREE_IPC_CHANNELS,
   sortDirectoryEntries,
   type ListDirectoryResult,
   type ProjectFileEntry,
   type TextFileReadResult,
 } from "../shared/file-tree.js";
+
+export interface IpcMainHandleLike {
+  handle: (
+    channel: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    listener: (event: any, ...args: any[]) => unknown,
+  ) => void;
+}
 
 function expandHome(raw: string): string {
   if (raw === "~") return os.homedir();
@@ -299,4 +308,17 @@ export function readLocalTextFile(
       error: `ファイルの読み込みに失敗しました: ${(err as Error).message}`,
     };
   }
+}
+
+export function registerProjectFileTreeIpcHandlers(ipc: IpcMainHandleLike): void {
+  ipc.handle(
+    PROJECT_FILE_TREE_IPC_CHANNELS.listDir,
+    (_e, dirPath: string, options?: { rootPath?: string; includeIgnored?: boolean }) =>
+      listProjectDirectory(dirPath, options),
+  );
+  ipc.handle(
+    PROJECT_FILE_TREE_IPC_CHANNELS.readTextFile,
+    (_e, filePath: string, options?: { rootPath?: string }) =>
+      readLocalTextFile(filePath, options),
+  );
 }
