@@ -457,7 +457,7 @@ export interface ConductorAPI {
   onMarkdownFileChanged(listener: (event: MarkdownWatchEvent) => void): () => void;
 
   // Local Image Viewer
-  imageReadFile(filePathOrUrl: string): Promise<ImageReadResult>;
+  imageReadFile(filePathOrUrl: string, baseFilePath?: string): Promise<ImageReadResult>;
 
   // Project File Tree (read-only)
   fsListDir(

@@ -363,8 +363,8 @@ function registerIpcHandlers(): void {
   });
 
   // Local Image Viewer IPC
-  ipcMain.handle("image:readFile", (_e, filePathOrUrl: string) =>
-    readLocalImageFile(filePathOrUrl),
+  ipcMain.handle("image:readFile", (_e, filePathOrUrl: string, baseFilePath?: string) =>
+    readLocalImageFile(filePathOrUrl, baseFilePath),
   );
 
   // Project File Tree read-only IPC (fs:list-dir, fs:read-text-file)

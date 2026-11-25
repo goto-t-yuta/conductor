@@ -22,6 +22,7 @@ import type {
 import { CodeViewerPane } from "./CodeViewerPane.js";
 import { ImageViewerPane } from "./ImageViewerPane.js";
 import { InAppBrowserPane } from "./InAppBrowserPane.js";
+import type { MarkdownOpenedImage } from "./MarkdownView.js";
 import { MarkdownViewerPane } from "./MarkdownViewerPane.js";
 import { ProjectFileTree } from "./ProjectFileTree.js";
 import { RightPaneProjectSwitcher } from "./RightPaneProjectSwitcher.js";
@@ -58,6 +59,7 @@ export interface UnifiedRightPaneProps {
   onRefreshActiveMd: () => void;
   onRemoveRecentMd: (filePath: string) => void;
   onAttachMdFileToChat: (filePath: string, fileName: string) => void;
+  onOpenMarkdownImage?: (image: MarkdownOpenedImage) => void;
   // Image props
   onRetryImageTab: (tabId: string) => void;
   onImageLoadError: (tabId: string) => void;
@@ -106,6 +108,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
   onRefreshActiveMd,
   onRemoveRecentMd,
   onAttachMdFileToChat,
+  onOpenMarkdownImage,
   onRetryImageTab,
   onImageLoadError,
   onOpenProjectFile,
@@ -565,6 +568,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
               onRefreshActive={onRefreshActiveMd}
               onRemoveRecent={onRemoveRecentMd}
               onOpenUrl={onOpenUrl}
+              onOpenImage={onOpenMarkdownImage}
               onAttachFileToChat={onAttachMdFileToChat}
               onRevealInFinder={onRevealInFinder}
             />

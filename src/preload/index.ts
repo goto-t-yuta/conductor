@@ -101,7 +101,8 @@ const api: ConductorAPI = {
     ipcRenderer.on("markdown:fileChanged", handler);
     return () => ipcRenderer.off("markdown:fileChanged", handler);
   },
-  imageReadFile: (filePathOrUrl) => ipcRenderer.invoke("image:readFile", filePathOrUrl),
+  imageReadFile: (filePathOrUrl, baseFilePath) =>
+    ipcRenderer.invoke("image:readFile", filePathOrUrl, baseFilePath),
   fsListDir: (dirPath, options) =>
     ipcRenderer.invoke(PROJECT_FILE_TREE_IPC_CHANNELS.listDir, dirPath, options),
   fsReadTextFile: (filePath, options) =>

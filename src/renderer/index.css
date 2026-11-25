@@ -151,7 +151,12 @@
 
 .conductor-markdown img {
   max-width: 100%;
+  height: auto;
   border-radius: 8px;
+}
+
+.conductor-markdown a img {
+  cursor: pointer;
 }
 
 .conductor-markdown input[type="checkbox"] {

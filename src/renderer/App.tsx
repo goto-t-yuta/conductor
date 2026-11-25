@@ -16,6 +16,7 @@ import {
   removeExplicitMentionTarget,
   type MentionChipRemovalTarget,
 } from "../shared/mentions.js";
+import type { MarkdownOpenedImage } from "./components/MarkdownView.js";
 import type { MarkdownViewerTab } from "./components/MarkdownViewerPane.js";
 import { SettingsModal } from "./components/SettingsModal.js";
 import { TaskInspectorModal } from "./components/TaskInspectorModal.js";
@@ -24,6 +25,7 @@ import { UnifiedChat, type ChatJumpRequest } from "./components/UnifiedChat.js";
 import { UnifiedRightPane } from "./components/UnifiedRightPane.js";
 import {
   buildImageTabFromAttachment,
+  extractImageFileName,
   isViewableImageAttachment,
   upsertImageTab,
   type ImageViewerTab,
@@ -771,6 +773,28 @@ export const App: React.FC = () => {
       void loadImageTabFromDisk(tabId, target.imagePath);
     },
     [imageTabs, loadImageTabFromDisk],
+  );
+
+  const handleOpenMarkdownImage = useCallback(
+    (image: MarkdownOpenedImage) => {
+      const fallbackProjectId = activeProjectItem.project?.id ?? null;
+      const fileName = extractImageFileName(image.filePath ?? image.src);
+      const label = image.alt?.trim() || fileName || "Image";
+      const id = image.filePath
+        ? `md-image:${image.filePath}`
+        : `md-image:${image.src.slice(0, 120)}`;
+      handleOpenImageAttachment(
+        {
+          id,
+          kind: "image",
+          label,
+          imagePath: image.filePath,
+          imageDataUrl: image.src,
+        },
+        { projectId: fallbackProjectId },
+      );
+    },
+    [activeProjectItem.project?.id, handleOpenImageAttachment],
   );
 
   const handleImageLoadError = useCallback(
@@ -1546,6 +1570,7 @@ export const App: React.FC = () => {
                 });
               }}
               onAttachMdFileToChat={handleAttachMarkdownFile}
+              onOpenMarkdownImage={handleOpenMarkdownImage}
               onRetryImageTab={handleRetryImageTab}
               onImageLoadError={handleImageLoadError}
               onOpenProjectFile={handleOpenProjectFile}

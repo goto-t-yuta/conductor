@@ -33,7 +33,69 @@ export type ResolvedImagePath =
   | { ok: true; filePath: string }
   | { ok: false; error: string };
 
-export function resolveLocalImagePath(input: string): ResolvedImagePath {
+function resolveBaseDirectory(baseFilePath?: string): string | null {
+  const trimmed = baseFilePath?.trim();
+  if (!trimmed) return null;
+  if (/^file:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      parsed.hash = "";
+      parsed.search = "";
+      return path.dirname(fileURLToPath(parsed));
+    } catch {
+      return null;
+    }
+  }
+  return path.dirname(trimmed);
+}
+
+function expandHomePath(rawPath: string): string {
+  if (rawPath === "~") {
+    return os.homedir();
+  }
+  if (rawPath.startsWith("~/") || rawPath.startsWith("~\\")) {
+    return path.join(os.homedir(), rawPath.slice(2));
+  }
+  return rawPath;
+}
+
+function stripQueryAndHashIfNotLiteral(rawPath: string, baseDir: string | null): string {
+  const queryIdx = rawPath.indexOf("?");
+  const hashIdx = rawPath.indexOf("#");
+  const cutIndices = [queryIdx, hashIdx].filter((idx) => idx > 0);
+  if (cutIndices.length === 0) {
+    return rawPath;
+  }
+
+  const expanded = expandHomePath(rawPath);
+  const literalCandidate = path.isAbsolute(expanded)
+    ? path.resolve(expanded)
+    : baseDir
+      ? path.resolve(baseDir, expanded)
+      : null;
+
+  if (literalCandidate && fs.existsSync(literalCandidate)) {
+    return rawPath;
+  }
+
+  return rawPath.slice(0, Math.min(...cutIndices));
+}
+
+function resolveCandidatePath(rawPath: string, baseDir: string | null): string | null {
+  const expanded = expandHomePath(rawPath);
+  if (path.isAbsolute(expanded)) {
+    return path.resolve(expanded);
+  }
+  if (baseDir) {
+    return path.resolve(baseDir, expanded);
+  }
+  return null;
+}
+
+export function resolveLocalImagePath(
+  input: string,
+  baseFilePath?: string,
+): ResolvedImagePath {
   const trimmed = input.trim();
   if (!trimmed) {
     return { ok: false, error: "画像ファイルパスが空です。" };
@@ -42,27 +104,50 @@ export function resolveLocalImagePath(input: string): ResolvedImagePath {
     return { ok: false, error: "不正なファイルパスです。" };
   }
 
-  let rawPath = trimmed;
+  const baseDir = resolveBaseDirectory(baseFilePath);
+  let resolved: string | null = null;
+
   if (/^file:\/\//i.test(trimmed)) {
     try {
       const parsed = new URL(trimmed);
       parsed.hash = "";
       parsed.search = "";
-      rawPath = fileURLToPath(parsed);
+      const filePath = fileURLToPath(parsed);
+      if (filePath.includes("\0")) {
+        return { ok: false, error: "不正なファイルパスです。" };
+      }
+      resolved = path.resolve(filePath);
     } catch {
       return { ok: false, error: `file:// URL を解析できません: ${trimmed}` };
     }
-  } else if (rawPath === "~") {
-    rawPath = os.homedir();
-  } else if (rawPath.startsWith("~/") || rawPath.startsWith("~\\")) {
-    rawPath = path.join(os.homedir(), rawPath.slice(2));
+  } else {
+    const cleaned = stripQueryAndHashIfNotLiteral(trimmed, baseDir);
+    const literalResolved = resolveCandidatePath(cleaned, baseDir);
+    if (!literalResolved) {
+      return { ok: false, error: "絶対パスまたは file:// URL を指定してください。" };
+    }
+
+    if (cleaned.includes("%") && !fs.existsSync(literalResolved)) {
+      let decoded: string | null = null;
+      try {
+        decoded = decodeURIComponent(cleaned);
+      } catch {
+        decoded = null;
+      }
+      if (decoded !== null) {
+        if (decoded.includes("\0")) {
+          return { ok: false, error: "不正なファイルパスです。" };
+        }
+        const decodedResolved = resolveCandidatePath(decoded, baseDir);
+        resolved = decodedResolved ?? literalResolved;
+      } else {
+        resolved = literalResolved;
+      }
+    } else {
+      resolved = literalResolved;
+    }
   }
 
-  if (!path.isAbsolute(rawPath)) {
-    return { ok: false, error: "絶対パスまたは file:// URL を指定してください。" };
-  }
-
-  const resolved = path.resolve(rawPath);
   if (!isAllowedImageExtension(resolved)) {
     return {
       ok: false,
@@ -73,8 +158,11 @@ export function resolveLocalImagePath(input: string): ResolvedImagePath {
   return { ok: true, filePath: resolved };
 }
 
-export function readLocalImageFile(input: string): ImageReadResult {
-  const resolved = resolveLocalImagePath(input);
+export function readLocalImageFile(
+  input: string,
+  baseFilePath?: string,
+): ImageReadResult {
+  const resolved = resolveLocalImagePath(input, baseFilePath);
   if (!resolved.ok) {
     return { ok: false, filePath: input, error: resolved.error };
   }
