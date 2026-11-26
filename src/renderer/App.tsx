@@ -10,12 +10,13 @@ import type {
   ProjectFileEntry,
   RightPaneMode,
 } from "../shared/types.js";
-import { classifyProjectFile } from "../shared/file-tree.js";
+import { classifyProjectFile, formatFileTreeIpcError } from "../shared/file-tree.js";
 import {
   addExplicitMentionTarget,
   removeExplicitMentionTarget,
   type MentionChipRemovalTarget,
 } from "../shared/mentions.js";
+import type { MarkdownOpenedImage } from "./components/MarkdownView.js";
 import type { MarkdownViewerTab } from "./components/MarkdownViewerPane.js";
 import { SettingsModal } from "./components/SettingsModal.js";
 import { TaskInspectorModal } from "./components/TaskInspectorModal.js";
@@ -24,6 +25,7 @@ import { UnifiedChat, type ChatJumpRequest } from "./components/UnifiedChat.js";
 import { UnifiedRightPane } from "./components/UnifiedRightPane.js";
 import {
   buildImageTabFromAttachment,
+  extractImageFileName,
   isViewableImageAttachment,
   upsertImageTab,
   type ImageViewerTab,
@@ -107,9 +109,41 @@ export const App: React.FC = () => {
   const [composerText, setComposerText] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [selectedMentions, setSelectedMentions] = useState<ExplicitMentionTarget[]>([]);
+  const composerTextRef = useRef("");
+  const attachmentsRef = useRef<ChatAttachment[]>([]);
+  const selectedMentionsRef = useRef<ExplicitMentionTarget[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+
+  const updateComposerText = useCallback((nextText: string) => {
+    composerTextRef.current = nextText;
+    setComposerText(nextText);
+  }, []);
+
+  const updateAttachments = useCallback(
+    (updater: ChatAttachment[] | ((prev: ChatAttachment[]) => ChatAttachment[])) => {
+      const next =
+        typeof updater === "function" ? updater(attachmentsRef.current) : updater;
+      attachmentsRef.current = next;
+      setAttachments(next);
+    },
+    [],
+  );
+
+  const updateSelectedMentions = useCallback(
+    (
+      updater:
+        | ExplicitMentionTarget[]
+        | ((prev: ExplicitMentionTarget[]) => ExplicitMentionTarget[]),
+    ) => {
+      const next =
+        typeof updater === "function" ? updater(selectedMentionsRef.current) : updater;
+      selectedMentionsRef.current = next;
+      setSelectedMentions(next);
+    },
+    [],
+  );
 
   // Unified project-scoped right-pane workspace state
   const initialPersistedWorkspaceRef = useRef<ReturnType<
@@ -230,7 +264,7 @@ export const App: React.FC = () => {
     void window.conductor.getSnapshot().then(setSnapshot);
     const unsubSnap = window.conductor.onSnapshot(setSnapshot);
     const unsubAtt = window.conductor.onAttachmentFromBrowser((att) => {
-      setAttachments((prev) => [...prev, att]);
+      updateAttachments((prev) => [...prev, att]);
     });
     return () => {
       unsubSnap();
@@ -773,6 +807,28 @@ export const App: React.FC = () => {
     [imageTabs, loadImageTabFromDisk],
   );
 
+  const handleOpenMarkdownImage = useCallback(
+    (image: MarkdownOpenedImage) => {
+      const fallbackProjectId = activeProjectItem.project?.id ?? null;
+      const fileName = extractImageFileName(image.filePath ?? image.src);
+      const label = image.alt?.trim() || fileName || "Image";
+      const id = image.filePath
+        ? `md-image:${image.filePath}`
+        : `md-image:${image.src.slice(0, 120)}`;
+      handleOpenImageAttachment(
+        {
+          id,
+          kind: "image",
+          label,
+          imagePath: image.filePath,
+          imageDataUrl: image.src,
+        },
+        { projectId: fallbackProjectId },
+      );
+    },
+    [activeProjectItem.project?.id, handleOpenImageAttachment],
+  );
+
   const handleImageLoadError = useCallback(
     (tabId: string) => {
       const target = imageTabs.find((t) => t.id === tabId);
@@ -892,7 +948,7 @@ export const App: React.FC = () => {
           );
         }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "ファイルを読み込めませんでした。";
+        const msg = formatFileTreeIpcError(err, "ファイルを読み込めませんでした。");
         setCodeTabs((prev) =>
           prev.map((t) =>
             t.filePath === filePath
@@ -1133,16 +1189,16 @@ export const App: React.FC = () => {
   const captureScreenshot = useCallback(async () => {
     const att = await window.conductor.browserCaptureScreenshot();
     if (att) {
-      setAttachments((prev) => [...prev, att]);
+      updateAttachments((prev) => [...prev, att]);
     }
-  }, []);
+  }, [updateAttachments]);
 
   const attachConsoleErrors = useCallback(async () => {
     const att = await window.conductor.browserGetConsoleAttachment();
     if (att) {
-      setAttachments((prev) => [...prev, att]);
+      updateAttachments((prev) => [...prev, att]);
     }
-  }, []);
+  }, [updateAttachments]);
 
   const handleToggleElementPicker = useCallback(() => {
     void window.conductor.setLayout({ showBrowserPane: true });
@@ -1264,12 +1320,14 @@ export const App: React.FC = () => {
   const selectedTaskColor = selectedTaskProject?.colorHex ?? "#6366F1";
 
   const handleSend = () => {
-    const text = composerText;
-    const atts = attachments;
-    const mentions = selectedMentions;
-    setComposerText("");
-    setAttachments([]);
-    setSelectedMentions([]);
+    const text = composerTextRef.current;
+    const atts = [...attachmentsRef.current];
+    const mentions = [...selectedMentionsRef.current];
+    if (!text.trim() && atts.length === 0) return;
+
+    updateComposerText("");
+    updateAttachments([]);
+    updateSelectedMentions([]);
 
     // Automatically switch the right-pane project scope when the user mentions a project or task
     const mentionedProject = resolveProjectFromChatText(
@@ -1300,7 +1358,7 @@ export const App: React.FC = () => {
       snapshot.browserTabs.find((t) => t.id === snapshot.activeBrowserTabId) ??
       null;
     if (!activeBrowser?.url) return;
-    setAttachments((prev) => [
+    updateAttachments((prev) => [
       ...prev,
       {
         id: crypto.randomUUID(),
@@ -1313,7 +1371,7 @@ export const App: React.FC = () => {
   };
 
   const handleAttachMarkdownFile = (filePath: string, fileName: string) => {
-    setAttachments((prev) => [
+    updateAttachments((prev) => [
       ...prev,
       {
         id: crypto.randomUUID(),
@@ -1325,7 +1383,7 @@ export const App: React.FC = () => {
   };
 
   const handleAttachCodeFile = (filePath: string, fileName: string) => {
-    setAttachments((prev) => [
+    updateAttachments((prev) => [
       ...prev,
       {
         id: crypto.randomUUID(),
@@ -1337,11 +1395,11 @@ export const App: React.FC = () => {
   };
 
   const handleAddMention = (target: ExplicitMentionTarget) => {
-    setSelectedMentions((prev) => addExplicitMentionTarget(prev, target));
+    updateSelectedMentions((prev) => addExplicitMentionTarget(prev, target));
   };
 
   const handleRemoveMention = (target: MentionChipRemovalTarget) => {
-    setSelectedMentions((prev) => removeExplicitMentionTarget(prev, target));
+    updateSelectedMentions((prev) => removeExplicitMentionTarget(prev, target));
   };
 
   const handleMentionProject = (proj: Project) => {
@@ -1349,14 +1407,27 @@ export const App: React.FC = () => {
       kind: "project",
       projectId: proj.id,
       projectName: proj.name,
+      projectPath: proj.path,
+      projectColorHex: proj.colorHex,
     });
   };
 
   const handleMentionTask = (task: (typeof snapshot.tasks)[number]) => {
+    const taskProject = snapshot.projects.find(
+      (p) =>
+        (task.projectId && p.id === task.projectId) ||
+        p.name.toLowerCase() === task.projectName.toLowerCase(),
+    );
     handleAddMention({
       kind: "task",
       taskId: task.id,
       taskNumber: task.taskNumber,
+      taskTitle: task.title,
+      taskStatus: task.status,
+      projectId: taskProject?.id ?? task.projectId,
+      projectName: task.projectName || taskProject?.name || "",
+      projectPath: task.projectPath ?? taskProject?.path ?? null,
+      projectColorHex: taskProject?.colorHex ?? "#6366F1",
     });
   };
 
@@ -1446,16 +1517,16 @@ export const App: React.FC = () => {
           unreadReplyIds={unreadReplyIds}
           onMarkMessagesRead={handleMarkMessagesRead}
           isMessageVisibleRef={isMessageVisibleRef}
-          onComposerTextChange={setComposerText}
+          onComposerTextChange={updateComposerText}
           onAddMention={handleAddMention}
           onRemoveMention={handleRemoveMention}
-          onRemoveAttachment={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
-          onAddAttachment={(att) => setAttachments((prev) => [...prev, att])}
+          onRemoveAttachment={(id) => updateAttachments((prev) => prev.filter((a) => a.id !== id))}
+          onAddAttachment={(att) => updateAttachments((prev) => [...prev, att])}
           onSend={handleSend}
           onStopMessage={(id) => void window.conductor.stopMessage(id)}
           onStopAll={() => void window.conductor.stopAllResponders()}
           onNewChat={() => {
-            setSelectedMentions([]);
+            updateSelectedMentions([]);
             void window.conductor.startFreshChat();
           }}
           onSelectChatSession={(id) => void window.conductor.selectChatSession(id)}
@@ -1486,11 +1557,11 @@ export const App: React.FC = () => {
           onAttachConsoleErrors={() => void attachConsoleErrors()}
           onPickLocalImages={async () => {
             const imgs = await window.conductor.pickLocalImages();
-            if (imgs.length > 0) setAttachments((prev) => [...prev, ...imgs]);
+            if (imgs.length > 0) updateAttachments((prev) => [...prev, ...imgs]);
           }}
           onPasteImage={async (base64) => {
             const att = await window.conductor.savePastedImage(base64);
-            if (att) setAttachments((prev) => [...prev, att]);
+            if (att) updateAttachments((prev) => [...prev, att]);
           }}
           onReconnect={() => void window.conductor.reconnect()}
           onDismissError={() => void window.conductor.dismissError()}
@@ -1546,6 +1617,7 @@ export const App: React.FC = () => {
                 });
               }}
               onAttachMdFileToChat={handleAttachMarkdownFile}
+              onOpenMarkdownImage={handleOpenMarkdownImage}
               onRetryImageTab={handleRetryImageTab}
               onImageLoadError={handleImageLoadError}
               onOpenProjectFile={handleOpenProjectFile}

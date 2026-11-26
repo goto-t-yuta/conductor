@@ -906,4 +906,92 @@ describe("Draft resolved mention chips extraction & removal", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("preserves structured explicit mentions via projectPath matching and fallback snapshot metadata when live registry changes before send", () => {
+    // 1. Suggestion target carries full fallback metadata
+    const projQuery = detectActiveMention("@web_dashboard", 14)!;
+    const projSug = getMentionSuggestions(projQuery, projects, tasks).suggestions.find(
+      (s) => s.kind === "project" && s.project.id === "p-web",
+    )!;
+    const projTarget = suggestionToExplicitMentionTarget(projSug);
+    expect(projTarget).toMatchObject({
+      kind: "project",
+      projectId: "p-web",
+      projectName: "web_dashboard",
+      projectPath: "/Users/dev/Documents/web_dashboard",
+      projectColorHex: "#F59E0B",
+    });
+
+    const taskQuery = detectActiveMention("@T12", 4)!;
+    const taskSug = getMentionSuggestions(taskQuery, projects, tasks).suggestions.find(
+      (s) => s.kind === "task" && s.task.id === "task-12",
+    )!;
+    const taskTarget = suggestionToExplicitMentionTarget(taskSug);
+    expect(taskTarget).toMatchObject({
+      kind: "task",
+      taskId: "task-12",
+      taskNumber: 12,
+      taskTitle: "Implement UI feedback for selected mentions",
+      projectName: "agent_terminal_2",
+      projectColorHex: "#3B82F6",
+    });
+
+    // 2. If projectId changed (re-registered) and name differed, projectPath still matches live project
+    const reRegisteredProject = makeProject({
+      id: "p-web-new-id",
+      name: "web_dashboard_renamed",
+      path: "/Users/dev/Documents/web_dashboard",
+      colorHex: "#EC4899",
+    });
+    const matchedByPath = extractMentionRefsForMessage(
+      "ビルドを確認して",
+      [reRegisteredProject],
+      [],
+      [projTarget],
+    );
+    expect(matchedByPath).toEqual([
+      {
+        kind: "project",
+        projectId: "p-web-new-id",
+        projectName: "web_dashboard_renamed",
+        projectPath: "/Users/dev/Documents/web_dashboard",
+        projectColorHex: "#EC4899",
+      },
+    ]);
+
+    // 3. Even if project & task were removed from live registry right before send, fallback metadata keeps badges intact
+    const fallbackRefs = extractMentionRefsForMessage(
+      "ログを確認して",
+      [],
+      [],
+      [projTarget, taskTarget],
+    );
+    expect(fallbackRefs).toEqual([
+      {
+        kind: "project",
+        projectId: "p-web",
+        projectName: "web_dashboard",
+        projectPath: "/Users/dev/Documents/web_dashboard",
+        projectColorHex: "#F59E0B",
+      },
+      {
+        kind: "task",
+        taskId: "task-12",
+        taskNumber: 12,
+        taskTitle: "Implement UI feedback for selected mentions",
+        taskStatus: "running",
+        projectId: "p-main",
+        projectName: "agent_terminal_2",
+        projectPath: "/Users/dev/Documents/agent_terminal_2",
+        projectColorHex: "#3B82F6",
+      },
+    ]);
+
+    // 4. Removing a project target with projectId: null matches cleanly via projectName
+    const afterRemove = removeExplicitMentionTarget(
+      [{ kind: "project", projectId: null, projectName: "web_dashboard" }],
+      { kind: "project", projectId: "p-web", projectName: "web_dashboard" },
+    );
+    expect(afterRemove).toEqual([]);
+  });
 });

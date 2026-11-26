@@ -92,6 +92,79 @@ describe("Local Image Viewer (main service)", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("resolves and reads relative, percent-encoded, Japanese, query/hash, and repo-root image paths against baseFilePath", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "conductor-img-rel-"));
+    try {
+      const docsDir = path.join(tmpDir, "docs");
+      const imagesDir = path.join(docsDir, "images");
+      const assetsDir = path.join(tmpDir, "assets");
+      fs.mkdirSync(path.join(tmpDir, ".git"));
+      fs.mkdirSync(imagesDir, { recursive: true });
+      fs.mkdirSync(assetsDir, { recursive: true });
+
+      const readmePath = path.join(tmpDir, "README.md");
+      const guidePath = path.join(docsDir, "guide.md");
+      const overviewPng = path.join(imagesDir, "overview.png");
+      const spacedJapanesePng = path.join(imagesDir, "画面 キャプチャ.png");
+      const parentAssetPng = path.join(assetsDir, "diagram.png");
+      const literalHashPng = path.join(imagesDir, "chart#1.png");
+
+      fs.writeFileSync(readmePath, "# Readme\n", "utf8");
+      fs.writeFileSync(guidePath, "# Guide\n", "utf8");
+      fs.writeFileSync(overviewPng, TINY_PNG_BYTES);
+      fs.writeFileSync(spacedJapanesePng, TINY_PNG_BYTES);
+      fs.writeFileSync(parentAssetPng, TINY_PNG_BYTES);
+      fs.writeFileSync(literalHashPng, TINY_PNG_BYTES);
+
+      // Relative path without ./ prefix (e.g. docs/images/overview.png)
+      const rel1 = readLocalImageFile("docs/images/overview.png", readmePath);
+      expect(rel1.ok).toBe(true);
+      expect(rel1.filePath).toBe(overviewPng);
+      expect(rel1.dataUrl).toBe(`data:image/png;base64,${TINY_PNG_BYTES.toString("base64")}`);
+
+      // Relative path with ./ and ?query#hash (GitHub theme fragments)
+      const rel2 = readLocalImageFile("./images/overview.png?raw=1#gh-dark-mode-only", guidePath);
+      expect(rel2.ok).toBe(true);
+      expect(rel2.filePath).toBe(overviewPng);
+
+      // Parent directory traversal ../
+      const relParent = readLocalImageFile("../assets/diagram.png", guidePath);
+      expect(relParent.ok).toBe(true);
+      expect(relParent.filePath).toBe(parentAssetPng);
+
+      // Percent-encoded spaces & Japanese characters produced by remark/Markdown
+      const encodedName = encodeURIComponent("画面 キャプチャ.png");
+      const relJapanese = readLocalImageFile(`docs/images/${encodedName}`, readmePath);
+      expect(relJapanese.ok).toBe(true);
+      expect(relJapanese.filePath).toBe(spacedJapanesePng);
+
+      // Literal '#' in filename preserved when file exists on disk
+      const relLiteralHash = resolveLocalImagePath("docs/images/chart#1.png", readmePath);
+      expect(relLiteralHash).toEqual({ ok: true, filePath: literalHashPng });
+
+      // baseFilePath provided as file:// URL
+      const relWithFileUrlBase = resolveLocalImagePath(
+        "docs/images/overview.png",
+        pathToFileURL(readmePath).toString(),
+      );
+      expect(relWithFileUrlBase).toEqual({ ok: true, filePath: overviewPng });
+
+      // GitHub-style repo-root path (/docs/images/...) resolved via git root when absent at OS root
+      const repoRootRel = readLocalImageFile("/docs/images/overview.png", guidePath);
+      expect(repoRootRel.ok).toBe(true);
+      expect(repoRootRel.filePath).toBe(overviewPng);
+
+      // Symlink to non-image file is still blocked even via relative path
+      const secretPath = path.join(tmpDir, "secret.txt");
+      fs.writeFileSync(secretPath, "secret", "utf8");
+      fs.symlinkSync(secretPath, path.join(imagesDir, "evil.png"));
+      const blockedRel = readLocalImageFile("docs/images/evil.png", readmePath);
+      expect(blockedRel.ok).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Image Viewer (renderer source resolution & tabs)", () => {

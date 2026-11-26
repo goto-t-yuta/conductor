@@ -310,6 +310,11 @@ function findProjectForExplicitTarget(
     const byId = projects.find((p) => p.id === target.projectId);
     if (byId) return byId;
   }
+  if (target.projectPath) {
+    const normalizedTargetPath = target.projectPath.replace(/\/+$/, "");
+    const byPath = projects.find((p) => p.path.replace(/\/+$/, "") === normalizedTargetPath);
+    if (byPath) return byPath;
+  }
   if (target.projectName) {
     const lower = target.projectName.toLowerCase();
     return projects.find((p) => p.name.toLowerCase() === lower);
@@ -371,9 +376,21 @@ export function removeExplicitMentionTarget(
 ): ExplicitMentionTarget[] {
   return current.filter((item) => {
     if (target.kind === "task") {
-      return !(item.kind === "task" && item.taskId === target.taskId);
+      if (item.kind !== "task") return true;
+      if (item.taskId === target.taskId) return false;
+      if (target.taskNumber !== undefined && item.taskNumber === target.taskNumber) return false;
+      return true;
     }
-    return !(item.kind === "project" && item.projectId === target.projectId);
+    if (item.kind !== "project") return true;
+    if (item.projectId && item.projectId === target.projectId) return false;
+    if (
+      target.projectName &&
+      item.projectName &&
+      item.projectName.toLowerCase() === target.projectName.toLowerCase()
+    ) {
+      return false;
+    }
+    return true;
   });
 }
 
@@ -388,12 +405,20 @@ export function suggestionToExplicitMentionTarget(
       kind: "task",
       taskId: suggestion.task.id,
       taskNumber: suggestion.task.taskNumber,
+      taskTitle: suggestion.task.title,
+      taskStatus: suggestion.task.status,
+      projectId: suggestion.task.projectId,
+      projectName: suggestion.task.projectName,
+      projectPath: suggestion.task.projectPath,
+      projectColorHex: suggestion.projectColorHex,
     };
   }
   return {
     kind: "project",
     projectId: suggestion.project.id,
     projectName: suggestion.project.name,
+    projectPath: suggestion.project.path,
+    projectColorHex: suggestion.project.colorHex,
   };
 }
 
@@ -701,10 +726,61 @@ export function extractMentionRefsForMessage(
     for (const target of explicitMentions) {
       if (target.kind === "task") {
         const task = findTaskForExplicitTarget(tasks, target);
-        if (task) pushTaskRef(task);
+        if (task) {
+          pushTaskRef(task);
+        } else if (
+          typeof target.taskNumber === "number" &&
+          Number.isInteger(target.taskNumber) &&
+          target.taskNumber > 0
+        ) {
+          if (
+            (target.taskId && seenTaskIds.has(target.taskId)) ||
+            seenTaskNumbers.has(target.taskNumber)
+          ) {
+            continue;
+          }
+          if (target.taskId) seenTaskIds.add(target.taskId);
+          seenTaskNumbers.add(target.taskNumber);
+          const fallbackProject =
+            (target.projectId ? projects.find((p) => p.id === target.projectId) : undefined) ??
+            (target.projectName
+              ? projects.find((p) => p.name.toLowerCase() === target.projectName!.toLowerCase())
+              : undefined);
+          refs.push({
+            kind: "task",
+            taskId: target.taskId,
+            taskNumber: target.taskNumber,
+            taskTitle: target.taskTitle ?? "",
+            taskStatus: target.taskStatus,
+            projectId: fallbackProject?.id ?? target.projectId ?? null,
+            projectName: target.projectName || fallbackProject?.name || "",
+            projectPath: target.projectPath ?? fallbackProject?.path ?? null,
+            projectColorHex: fallbackProject?.colorHex ?? target.projectColorHex ?? "#6366F1",
+          });
+        }
       } else if (target.kind === "project") {
         const proj = findProjectForExplicitTarget(projects, target);
-        if (proj) pushProjectRef(proj);
+        if (proj) {
+          pushProjectRef(proj);
+        } else if (target.projectName?.trim()) {
+          const projectName = target.projectName.trim();
+          const lowerName = projectName.toLowerCase();
+          if (
+            (target.projectId && seenProjectIds.has(target.projectId)) ||
+            seenProjectNames.has(lowerName)
+          ) {
+            continue;
+          }
+          if (target.projectId) seenProjectIds.add(target.projectId);
+          seenProjectNames.add(lowerName);
+          refs.push({
+            kind: "project",
+            projectId: target.projectId,
+            projectName,
+            projectPath: target.projectPath ?? null,
+            projectColorHex: target.projectColorHex ?? "#6366F1",
+          });
+        }
       }
     }
   }
@@ -795,8 +871,8 @@ export function resolveMessageMentionBadges(
     isLiveTask: boolean,
     source: ResolvedMessageMentionBadgeSource = "explicit",
   ) => {
-    if (seenTaskIds.has(ref.taskId) || seenTaskNumbers.has(ref.taskNumber)) return;
-    seenTaskIds.add(ref.taskId);
+    if ((ref.taskId && seenTaskIds.has(ref.taskId)) || seenTaskNumbers.has(ref.taskNumber)) return;
+    if (ref.taskId) seenTaskIds.add(ref.taskId);
     seenTaskNumbers.add(ref.taskNumber);
     const badge = makeTaskBadge(ref, isLiveTask, source);
 
@@ -826,7 +902,10 @@ export function resolveMessageMentionBadges(
     source: ResolvedMessageMentionBadgeSource = "explicit",
   ) => {
     const lowerName = ref.projectName.toLowerCase();
-    if ((ref.projectId && seenProjectIds.has(ref.projectId)) || seenProjectNames.has(lowerName)) {
+    if (
+      (ref.projectId && seenProjectIds.has(ref.projectId)) ||
+      (lowerName && seenProjectNames.has(lowerName))
+    ) {
       return;
     }
     if (source === "inferred") {
@@ -836,7 +915,7 @@ export function resolveMessageMentionBadges(
       }
     }
     if (ref.projectId) seenProjectIds.add(ref.projectId);
-    seenProjectNames.add(lowerName);
+    if (lowerName) seenProjectNames.add(lowerName);
     badges.push({
       key: `project:${ref.projectId ?? lowerName}`,
       kind: "project",
@@ -1237,8 +1316,8 @@ export type ResolvedMentionChip =
     };
 
 export type MentionChipRemovalTarget =
-  | { kind: "task"; taskId: string }
-  | { kind: "project"; projectId: string };
+  | { kind: "task"; taskId: string; taskNumber?: number }
+  | { kind: "project"; projectId: string; projectName?: string };
 
 /**
  * Extracts deduplicated, display-ready resolved mention chips combining structured

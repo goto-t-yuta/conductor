@@ -519,8 +519,8 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     (chip: ResolvedMentionChip) => {
       const target: MentionChipRemovalTarget =
         chip.kind === "task"
-          ? { kind: "task", taskId: chip.task.id }
-          : { kind: "project", projectId: chip.project.id };
+          ? { kind: "task", taskId: chip.task.id, taskNumber: chip.task.taskNumber }
+          : { kind: "project", projectId: chip.project.id, projectName: chip.project.name };
       onRemoveMention?.(target);
 
       const { nextText, nextCaret, removedCount } = removeResolvedMentionChip(

@@ -371,11 +371,19 @@ export type ExplicitMentionTarget =
       kind: "project";
       projectId: string | null;
       projectName?: string;
+      projectPath?: string | null;
+      projectColorHex?: string;
     }
   | {
       kind: "task";
       taskId: string;
       taskNumber?: number;
+      taskTitle?: string;
+      taskStatus?: AgentTaskStatus;
+      projectId?: string | null;
+      projectName?: string;
+      projectPath?: string | null;
+      projectColorHex?: string;
     };
 
 export interface SendMessagePayload {
@@ -457,7 +465,7 @@ export interface ConductorAPI {
   onMarkdownFileChanged(listener: (event: MarkdownWatchEvent) => void): () => void;
 
   // Local Image Viewer
-  imageReadFile(filePathOrUrl: string): Promise<ImageReadResult>;
+  imageReadFile(filePathOrUrl: string, baseFilePath?: string): Promise<ImageReadResult>;
 
   // Project File Tree (read-only)
   fsListDir(

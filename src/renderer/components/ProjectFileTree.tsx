@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import {
   filterFileTreeEntries,
+  formatFileTreeIpcError,
   type ProjectFileEntry,
 } from "../../shared/file-tree.js";
 
@@ -94,7 +95,7 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
         }
       } catch (err) {
         if (projectPathRef.current !== rootDir) return;
-        const msg = err instanceof Error ? err.message : "ディレクトリを読み込めませんでした。";
+        const msg = formatFileTreeIpcError(err, "ディレクトリを読み込めませんでした。");
         if (dirPath === rootDir) {
           setRootError(msg);
         } else {

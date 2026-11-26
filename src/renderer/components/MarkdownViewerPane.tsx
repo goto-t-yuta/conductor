@@ -21,8 +21,9 @@ import {
   formatByteSize,
   slugifyHeading,
 } from "../lib/markdown-utils.js";
+import { invalidateMarkdownImageCache } from "../lib/markdown-image-cache.js";
 import type { MarkdownViewerTab } from "../lib/right-pane-tabs.js";
-import { MarkdownView } from "./MarkdownView.js";
+import { MarkdownView, type MarkdownOpenedImage } from "./MarkdownView.js";
 
 export type { MarkdownViewerTab };
 
@@ -40,6 +41,7 @@ export interface MarkdownViewerPaneProps {
   onRefreshActive: () => void;
   onRemoveRecent: (filePath: string) => void;
   onOpenUrl: (url: string) => void;
+  onOpenImage?: (image: MarkdownOpenedImage) => void;
   onAttachFileToChat: (filePath: string, fileName: string) => void;
   onRevealInFinder: (filePath: string) => void;
 }
@@ -60,6 +62,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
   onRefreshActive,
   onRemoveRecent,
   onOpenUrl,
+  onOpenImage,
   onAttachFileToChat,
   onRevealInFinder,
 }) => {
@@ -70,6 +73,13 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
   const [copiedPath, setCopiedPath] = useState(false);
   const [copiedRaw, setCopiedRaw] = useState(false);
   const [showReloadPulse, setShowReloadPulse] = useState(false);
+  const [imageReloadVersion, setImageReloadVersion] = useState(0);
+
+  const handleManualRefresh = () => {
+    invalidateMarkdownImageCache();
+    setImageReloadVersion((v) => v + 1);
+    onRefreshActive();
+  };
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -223,7 +233,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
         {/* Manual Refresh */}
         <button
           type="button"
-          onClick={onRefreshActive}
+          onClick={handleManualRefresh}
           disabled={!activeTab}
           title="手動で再読み込み"
           className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-35 cursor-pointer"
@@ -439,8 +449,10 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                       variant="document"
                       baseFilePath={activeTab.filePath}
                       headingIdPrefix={HEADING_ID_PREFIX}
+                      imageReloadVersion={imageReloadVersion}
                       onOpenUrl={onOpenUrl}
                       onOpenMarkdownFile={onOpenFile}
+                      onOpenImage={onOpenImage}
                       onScrollToHeading={scrollToHeading}
                     />
                   </article>
