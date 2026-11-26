@@ -3,7 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentTask, AgentTaskStatus, Project } from "../src/shared/types.js";
 import { RUNNING_TASK_DONE_BLOCKED_REASON } from "../src/shared/task-status.js";
-import { REOPEN_TARGET_STATUS } from "../src/renderer/lib/task-sidebar.js";
+import {
+  QUESTIONS_SECTION_HEIGHT_STORAGE_KEY,
+  REOPEN_TARGET_STATUS,
+} from "../src/renderer/lib/task-sidebar.js";
 import { TaskInspectorModal, TaskStatusSelect } from "../src/renderer/components/TaskInspectorModal.js";
 import { TaskCard, TaskSidebar, type TaskSidebarProps } from "../src/renderer/components/TaskSidebar.js";
 
@@ -338,5 +341,67 @@ describe("TaskCard & TaskSidebar rendering and click isolation", () => {
       target: { value: "needs_review" },
     });
     expect(onUpdateStatus).toHaveBeenCalledWith("needs_review");
+  });
+
+  it("renders a vertical resize handle for Questions when expanded, restores persisted height, and collapses cleanly", () => {
+    const g = globalThis as unknown as {
+      localStorage?: {
+        getItem(key: string): string | null;
+        setItem(key: string, value: string): void;
+        removeItem(key: string): void;
+      };
+    };
+    const originalStorage = g.localStorage;
+    const store = new Map<string, string>();
+    g.localStorage = {
+      getItem: (key) => store.get(key) ?? null,
+      setItem: (key, value) => {
+        store.set(key, value);
+      },
+      removeItem: (key) => {
+        store.delete(key);
+      },
+    };
+
+    try {
+      // 1. Default expanded state (no persisted height)
+      const defaultHtml = renderToStaticMarkup(<TaskSidebar {...makeSidebarProps()} />);
+      expect(defaultHtml).toContain('data-testid="questions-resize-handle"');
+      expect(defaultHtml).toContain("cursor-row-resize");
+      expect(defaultHtml).toContain('role="separator"');
+      expect(defaultHtml).toContain('aria-orientation="horizontal"');
+      expect(defaultHtml).toContain('data-testid="questions-list-container"');
+      expect(defaultHtml).toContain("max-h-[38vh]");
+      expect(defaultHtml).not.toMatch(/data-testid="questions-section"[^>]*style="/);
+
+      // 2. Expanded state with persisted height
+      store.set(QUESTIONS_SECTION_HEIGHT_STORAGE_KEY, "260");
+      const persistedHtml = renderToStaticMarkup(<TaskSidebar {...makeSidebarProps()} />);
+      expect(persistedHtml).toContain('data-testid="questions-resize-handle"');
+      expect(persistedHtml).toMatch(
+        /data-testid="questions-section"[^>]*style="height:260px;max-height:65%"/,
+      );
+      expect(persistedHtml).toMatch(
+        /data-testid="questions-list-container"[^>]*class="flex-1 min-h-0 overflow-y-auto/,
+      );
+      expect(persistedHtml).not.toContain("max-h-[38vh]");
+
+      // 3. Collapsed state omits resize handle, list, and inline height even when a height is persisted
+      const collapsedHtml = renderToStaticMarkup(
+        <TaskSidebar {...makeSidebarProps({ defaultQuestionsExpanded: false })} />,
+      );
+      expect(collapsedHtml).not.toContain('data-testid="questions-resize-handle"');
+      expect(collapsedHtml).not.toContain('data-testid="questions-list-container"');
+      expect(collapsedHtml).not.toMatch(/data-testid="questions-section"[^>]*style="/);
+      expect(collapsedHtml).toMatch(
+        /aria-expanded="false"[^>]*data-testid="questions-toggle-button"/,
+      );
+    } finally {
+      if (originalStorage === undefined) {
+        delete g.localStorage;
+      } else {
+        g.localStorage = originalStorage;
+      }
+    }
   });
 });

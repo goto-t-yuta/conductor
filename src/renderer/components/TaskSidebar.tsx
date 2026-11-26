@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -40,11 +40,16 @@ import {
   type QuestionItem,
 } from "../lib/questions.js";
 import {
+  QUESTIONS_SECTION_MAX_HEIGHT_RATIO,
+  QUESTIONS_SECTION_MIN_HEIGHT,
+  clampQuestionsSectionHeight,
   filterCompletedTasks,
   formatCompletedCountBadge,
   getQuickStatusTransition,
   getTaskCardSubtitle,
+  loadQuestionsSectionHeight,
   partitionSidebarTasks,
+  saveQuestionsSectionHeight,
 } from "../lib/task-sidebar.js";
 
 export interface TaskSidebarProps {
@@ -55,6 +60,7 @@ export interface TaskSidebarProps {
   selectedProjectId: string | null;
   selectedTaskId: string | null;
   defaultCompletedExpanded?: boolean;
+  defaultQuestionsExpanded?: boolean;
   onSelectProjectFilter: (id: string | null) => void;
   onAddProject: () => void;
   onScanDirectory: () => void;
@@ -104,6 +110,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
   selectedProjectId,
   selectedTaskId,
   defaultCompletedExpanded = false,
+  defaultQuestionsExpanded = true,
   onSelectProjectFilter,
   onAddProject,
   onScanDirectory,
@@ -123,7 +130,138 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
   const [projectSearch, setProjectSearch] = useState("");
   const [completedExpanded, setCompletedExpanded] = useState(defaultCompletedExpanded);
   const [completedSearch, setCompletedSearch] = useState("");
-  const [questionsExpanded, setQuestionsExpanded] = useState(true);
+  const [questionsExpanded, setQuestionsExpanded] = useState(defaultQuestionsExpanded);
+  const [questionsHeight, setQuestionsHeight] = useState<number | null>(() =>
+    loadQuestionsSectionHeight(),
+  );
+  const [sidebarHeight, setSidebarHeight] = useState<number | null>(null);
+  const [isResizingQuestions, setIsResizingQuestions] = useState(false);
+
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const questionsSectionRef = useRef<HTMLDivElement | null>(null);
+  const cleanupResizeRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    const el = sidebarRef.current;
+    if (!el) return;
+
+    const updateSidebarHeight = () => {
+      const nextHeight = el.getBoundingClientRect().height;
+      if (nextHeight > 0) {
+        setSidebarHeight(nextHeight);
+      }
+    };
+
+    updateSidebarHeight();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(updateSidebarHeight);
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
+
+    window.addEventListener("resize", updateSidebarHeight);
+    return () => window.removeEventListener("resize", updateSidebarHeight);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      cleanupResizeRef.current?.();
+    };
+  }, []);
+
+  const resolvedQuestionsHeight =
+    questionsExpanded && questionsHeight !== null
+      ? clampQuestionsSectionHeight(questionsHeight, sidebarHeight)
+      : null;
+
+  const startQuestionsResize = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || !questionsExpanded) return;
+    e.preventDefault();
+    cleanupResizeRef.current?.();
+
+    const startY = e.clientY;
+    const measuredSidebarHeight =
+      sidebarRef.current?.getBoundingClientRect().height || sidebarHeight || undefined;
+    const measuredQuestionsHeight =
+      questionsSectionRef.current?.getBoundingClientRect().height ||
+      resolvedQuestionsHeight ||
+      QUESTIONS_SECTION_MIN_HEIGHT;
+
+    let latestHeight: number | null = null;
+    let didMove = false;
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    setIsResizingQuestions(true);
+
+    const onMove = (ev: MouseEvent) => {
+      const dy = startY - ev.clientY;
+      if (!didMove && Math.abs(dy) < 2) return;
+      didMove = true;
+      const currentSidebarHeight =
+        sidebarRef.current?.getBoundingClientRect().height || measuredSidebarHeight;
+      const nextHeight = clampQuestionsSectionHeight(
+        measuredQuestionsHeight + dy,
+        currentSidebarHeight,
+      );
+      latestHeight = nextHeight;
+      setQuestionsHeight(nextHeight);
+    };
+
+    const cleanup = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevUserSelect;
+      setIsResizingQuestions(false);
+      cleanupResizeRef.current = null;
+    };
+
+    const onUp = () => {
+      cleanup();
+      if (didMove && latestHeight !== null) {
+        const currentSidebarHeight =
+          sidebarRef.current?.getBoundingClientRect().height || measuredSidebarHeight;
+        saveQuestionsSectionHeight(latestHeight, undefined, currentSidebarHeight);
+      }
+    };
+
+    cleanupResizeRef.current = cleanup;
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", onUp);
+  };
+
+  const resetQuestionsHeight = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setQuestionsHeight(null);
+    saveQuestionsSectionHeight(null);
+  };
+
+  const handleQuestionsResizeKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!questionsExpanded) return;
+    const currentSidebarHeight =
+      sidebarRef.current?.getBoundingClientRect().height || sidebarHeight || undefined;
+    const baseHeight =
+      questionsSectionRef.current?.getBoundingClientRect().height ||
+      resolvedQuestionsHeight ||
+      QUESTIONS_SECTION_MIN_HEIGHT;
+
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const delta = e.key === "ArrowUp" ? 20 : -20;
+      const nextHeight = clampQuestionsSectionHeight(baseHeight + delta, currentSidebarHeight);
+      setQuestionsHeight(nextHeight);
+      saveQuestionsSectionHeight(nextHeight, undefined, currentSidebarHeight);
+    } else if (e.key === "Home" || e.key === "Escape") {
+      e.preventDefault();
+      setQuestionsHeight(null);
+      saveQuestionsSectionHeight(null);
+    }
+  };
 
   const questionSummary = useMemo(() => summarizeQuestions(questions), [questions]);
 
@@ -169,7 +307,10 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
   const runningCount = tasks.filter((t) => t.status === "running").length;
 
   return (
-    <aside className="flex flex-col h-full bg-zinc-50 dark:bg-[#13161c] border-r border-zinc-200/80 dark:border-zinc-800/90">
+    <aside
+      ref={sidebarRef}
+      className="flex flex-col h-full bg-zinc-50 dark:bg-[#13161c] border-r border-zinc-200/80 dark:border-zinc-800/90"
+    >
       {/* Header with space for macOS traffic lights */}
       <div className="drag-region h-11 flex items-center justify-between pl-[78px] pr-3 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0">
         <div className="flex items-center gap-1.5 min-w-0">
@@ -506,11 +647,53 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
       </div>
 
       {/* Bottom Questions History & Progress Section */}
-      <div className="shrink-0 border-t border-zinc-200/80 dark:border-zinc-800/90 bg-zinc-50/90 dark:bg-[#11141a] flex flex-col">
+      <div
+        ref={questionsSectionRef}
+        data-testid="questions-section"
+        style={
+          resolvedQuestionsHeight !== null
+            ? {
+                height: `${resolvedQuestionsHeight}px`,
+                maxHeight: `${Math.round(QUESTIONS_SECTION_MAX_HEIGHT_RATIO * 100)}%`,
+              }
+            : undefined
+        }
+        className="shrink-0 min-h-0 border-t border-zinc-200/80 dark:border-zinc-800/90 bg-zinc-50/90 dark:bg-[#11141a] flex flex-col"
+      >
+        {questionsExpanded && (
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Questions セクションの高さを調整"
+            tabIndex={0}
+            data-testid="questions-resize-handle"
+            onMouseDown={startQuestionsResize}
+            onDoubleClick={resetQuestionsHeight}
+            onKeyDown={handleQuestionsResizeKeyDown}
+            title="ドラッグして高さを調整（ダブルクリックでデフォルトに戻す）"
+            className={`group h-1.5 shrink-0 cursor-row-resize select-none transition-colors flex items-center justify-center focus-visible:outline-none focus-visible:bg-indigo-500/35 ${
+              isResizingQuestions
+                ? "bg-indigo-500/35"
+                : "hover:bg-indigo-500/25"
+            }`}
+          >
+            <div
+              className={`h-[2px] w-8 rounded-full transition-colors ${
+                isResizingQuestions
+                  ? "bg-indigo-500/80"
+                  : "bg-zinc-300/60 dark:bg-zinc-700/70 group-hover:bg-indigo-500/70"
+              }`}
+            />
+          </div>
+        )}
         <button
           type="button"
+          aria-expanded={questionsExpanded}
+          data-testid="questions-toggle-button"
           onClick={() => setQuestionsExpanded((v) => !v)}
-          className="px-3 py-2 flex items-center justify-between gap-1.5 text-left hover:bg-zinc-200/40 dark:hover:bg-zinc-800/40 transition-colors cursor-pointer"
+          className={`shrink-0 px-3 ${
+            questionsExpanded ? "pt-1 pb-2" : "py-2"
+          } flex items-center justify-between gap-1.5 text-left hover:bg-zinc-200/40 dark:hover:bg-zinc-800/40 transition-colors cursor-pointer`}
         >
           <span className="inline-flex items-center gap-1.5 min-w-0">
             {questionsExpanded ? (
@@ -551,7 +734,12 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
         </button>
 
         {questionsExpanded && (
-          <div className="max-h-[38vh] overflow-y-auto px-2.5 pb-2.5 pt-0.5 space-y-1.5">
+          <div
+            data-testid="questions-list-container"
+            className={`${
+              resolvedQuestionsHeight !== null ? "flex-1 min-h-0" : "max-h-[38vh]"
+            } overflow-y-auto px-2.5 pb-2.5 pt-0.5 space-y-1.5`}
+          >
             {questions.length === 0 ? (
               <div className="px-2 py-2 text-[11px] text-zinc-400 dark:text-zinc-500 text-center">
                 チャットで質問すると履歴と進捗がここに表示されます
