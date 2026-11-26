@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { app, BrowserWindow, Menu, dialog, ipcMain, shell, systemPreferences } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, protocol, shell, systemPreferences } from "electron";
 import type {
   AgentProvider,
   AgentTaskStatus,
@@ -18,6 +18,11 @@ import { AppUpdater } from "./app-updater.js";
 import { BrowserManager } from "./browser-manager.js";
 import { ConductorController } from "./conductor-controller.js";
 import { readLocalImageFile } from "./image-viewer.js";
+import {
+  CONDUCTOR_MEDIA_PROTOCOL,
+  handleConductorMediaRequest,
+  readLocalVideoFile,
+} from "./media-viewer.js";
 import {
   MarkdownFileWatcher,
   readLocalMarkdownFile,
@@ -483,9 +488,12 @@ function registerIpcHandlers(): void {
     markdownWatcher?.unwatch();
   });
 
-  // Local Image Viewer IPC
+  // Local Image & Video Viewer IPC
   ipcMain.handle("image:readFile", (_e, filePathOrUrl: string, baseFilePath?: string) =>
     readLocalImageFile(filePathOrUrl, baseFilePath),
+  );
+  ipcMain.handle("media:readVideo", (_e, filePathOrUrl: string, baseFilePath?: string) =>
+    readLocalVideoFile(filePathOrUrl, baseFilePath),
   );
 
   // Project File Tree read-only IPC (fs:list-dir, fs:read-text-file)
@@ -617,9 +625,23 @@ async function createWindow(): Promise<void> {
   }
 }
 
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: CONDUCTOR_MEDIA_PROTOCOL,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true,
+    },
+  },
+]);
+
 app.setName("Conductor");
 
 app.whenReady().then(async () => {
+  protocol.handle(CONDUCTOR_MEDIA_PROTOCOL, (request) => handleConductorMediaRequest(request));
   createApplicationMenu();
   registerIpcHandlers();
   await createWindow();

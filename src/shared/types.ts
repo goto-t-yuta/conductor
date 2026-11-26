@@ -362,6 +362,16 @@ export interface ImageReadResult {
   error?: string;
 }
 
+export interface VideoReadResult {
+  ok: boolean;
+  filePath: string;
+  fileName?: string;
+  mediaUrl?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  error?: string;
+}
+
 export interface MarkdownDocument {
   filePath: string;
   fileName: string;
@@ -602,6 +612,7 @@ export interface ConductorAPI {
 
   // Local Image Viewer
   imageReadFile(filePathOrUrl: string, baseFilePath?: string): Promise<ImageReadResult>;
+  mediaReadVideo(filePathOrUrl: string, baseFilePath?: string): Promise<VideoReadResult>;
 
   // Project File Tree (read-only)
   fsListDir(

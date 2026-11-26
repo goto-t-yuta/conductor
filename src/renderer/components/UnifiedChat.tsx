@@ -89,14 +89,16 @@ import {
   formatToolChipsSummary,
 } from "../lib/activity-log.js";
 import { isViewableImageAttachment } from "../lib/image-viewer.js";
-import { resolveTaskForTaskEvent } from "../lib/task-event.js";
+import type { MarkdownImageCache } from "../lib/markdown-image-cache.js";
+import type { MarkdownVideoCache } from "../lib/markdown-video-cache.js";
+import { buildTaskMarkdownBasePath, resolveTaskForTaskEvent } from "../lib/task-event.js";
 import { getQuickStatusTransition } from "../lib/task-sidebar.js";
 import {
   getSpeechRecognitionConstructor,
   type BrowserSpeechRecognition,
 } from "../lib/voice-client.js";
 import { ChatSessionControls } from "./ChatHistoryMenu.js";
-import { MarkdownView } from "./MarkdownView.js";
+import { MarkdownView, type MarkdownOpenedImage } from "./MarkdownView.js";
 import { UserMessageMentionBadges } from "./MentionBadges.js";
 import { DraftMentionContextBar } from "./MentionChips.js";
 import { MentionPopover } from "./MentionPopover.js";
@@ -174,6 +176,7 @@ interface UnifiedChatProps {
       draftMentions?: ExplicitMentionTarget[];
     },
   ) => void;
+  onOpenMarkdownImage?: (image: MarkdownOpenedImage, context?: { message?: ChatMessage }) => void;
   onOpenTask: (taskId: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
@@ -236,6 +239,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImageAttachment,
+  onOpenMarkdownImage,
   onOpenTask,
   onUpdateTaskStatus,
   onLandTask,
@@ -1606,6 +1610,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                 onOpenUrl={onOpenUrl}
                 onOpenMarkdownFile={onOpenMarkdownFile}
                 onOpenImageAttachment={onOpenImageAttachment}
+                onOpenMarkdownImage={onOpenMarkdownImage}
                 onOpenTask={onOpenTask}
                 onUpdateTaskStatus={onUpdateTaskStatus}
                 onLandTask={onLandTask}
@@ -2085,6 +2090,7 @@ const ChatMessageItem: React.FC<{
       draftMentions?: ExplicitMentionTarget[];
     },
   ) => void;
+  onOpenMarkdownImage?: (image: MarkdownOpenedImage, context?: { message?: ChatMessage }) => void;
   onOpenTask: (taskId: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
@@ -2100,6 +2106,7 @@ const ChatMessageItem: React.FC<{
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImageAttachment,
+  onOpenMarkdownImage,
   onOpenTask,
   onUpdateTaskStatus,
   onLandTask,
@@ -2127,6 +2134,11 @@ const ChatMessageItem: React.FC<{
     [onOpenImageAttachment, message],
   );
 
+  const handleOpenMarkdownImg = useCallback(
+    (image: MarkdownOpenedImage) => onOpenMarkdownImage?.(image, { message }),
+    [onOpenMarkdownImage, message],
+  );
+
   const handleStop = useCallback(
     () => onStopMessage(message.id),
     [onStopMessage, message.id],
@@ -2151,6 +2163,7 @@ const ChatMessageItem: React.FC<{
         onOpenUrl={handleOpenUrl}
         onOpenMarkdownFile={handleOpenMarkdownFile}
         onOpenImageAttachment={onOpenImageAttachment ? handleOpenImage : undefined}
+        onOpenMarkdownImage={onOpenMarkdownImage ? handleOpenMarkdownImg : undefined}
         onOpenTask={onOpenTask}
         onUpdateTaskStatus={onUpdateTaskStatus}
         onLandTask={onLandTask}
@@ -2182,6 +2195,7 @@ const ChatMessageList: React.FC<{
       draftMentions?: ExplicitMentionTarget[];
     },
   ) => void;
+  onOpenMarkdownImage?: (image: MarkdownOpenedImage, context?: { message?: ChatMessage }) => void;
   onOpenTask: (taskId: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
@@ -2197,6 +2211,7 @@ const ChatMessageList: React.FC<{
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImageAttachment,
+  onOpenMarkdownImage,
   onOpenTask,
   onUpdateTaskStatus,
   onLandTask,
@@ -2221,6 +2236,7 @@ const ChatMessageList: React.FC<{
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
             onOpenImageAttachment={onOpenImageAttachment}
+            onOpenMarkdownImage={onOpenMarkdownImage}
             onOpenTask={onOpenTask}
             onUpdateTaskStatus={onUpdateTaskStatus}
             onLandTask={onLandTask}
@@ -2316,9 +2332,12 @@ export interface TaskEventCardProps {
   locale?: UiLocale;
   onOpenUrl: (url: string) => void;
   onOpenMarkdownFile: (target: string, baseFilePath?: string) => void;
+  onOpenImage?: (image: MarkdownOpenedImage) => void;
   onOpenTask: (taskId: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
+  imageCache?: MarkdownImageCache;
+  videoCache?: MarkdownVideoCache;
 }
 
 export const TaskEventCard: React.FC<TaskEventCardProps> = ({
@@ -2329,11 +2348,15 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
   locale = "ja",
   onOpenUrl,
   onOpenMarkdownFile,
+  onOpenImage,
   onOpenTask,
   onUpdateTaskStatus,
   onLandTask,
+  imageCache,
+  videoCache,
 }) => {
   const resolvedTask = resolveTaskForTaskEvent(message, tasks);
+  const taskBaseFilePath = buildTaskMarkdownBasePath(resolvedTask);
   const targetTaskId = resolvedTask?.id ?? message.relatedTaskId;
   const quickTransition = resolvedTask ? getQuickStatusTransition(resolvedTask.status, locale) : null;
   const isDone = resolvedTask?.status === "done";
@@ -2504,8 +2527,12 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
           <MarkdownView
             content={message.text}
             locale={locale}
+            baseFilePath={taskBaseFilePath}
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
+            onOpenImage={onOpenImage}
+            imageCache={imageCache}
+            videoCache={videoCache}
           />
 
           <button
@@ -2527,8 +2554,12 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
             <MarkdownView
               content={message.text}
               locale={locale}
+              baseFilePath={taskBaseFilePath}
               onOpenUrl={onOpenUrl}
               onOpenMarkdownFile={onOpenMarkdownFile}
+              onOpenImage={onOpenImage}
+              imageCache={imageCache}
+              videoCache={videoCache}
             />
             {targetTaskId && (
               <button
@@ -2558,6 +2589,7 @@ const MessageRow: React.FC<{
   onOpenUrl: (url: string) => void;
   onOpenMarkdownFile: (target: string, baseFilePath?: string) => void;
   onOpenImageAttachment?: (attachment: ChatAttachment) => void;
+  onOpenMarkdownImage?: (image: MarkdownOpenedImage) => void;
   onOpenTask: (taskId: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
@@ -2571,6 +2603,7 @@ const MessageRow: React.FC<{
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImageAttachment,
+  onOpenMarkdownImage,
   onOpenTask,
   onUpdateTaskStatus,
   onLandTask,
@@ -2680,6 +2713,7 @@ const MessageRow: React.FC<{
         locale={locale}
         onOpenUrl={onOpenUrl}
         onOpenMarkdownFile={onOpenMarkdownFile}
+        onOpenImage={onOpenMarkdownImage}
         onOpenTask={onOpenTask}
         onUpdateTaskStatus={onUpdateTaskStatus}
         onLandTask={onLandTask}
@@ -2755,6 +2789,7 @@ const MessageRow: React.FC<{
             locale={locale}
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
+            onOpenImage={onOpenMarkdownImage}
           />
         ) : message.isStreaming ? (
           <span className="text-[13px] text-zinc-400">{t(locale, "chat.preparingReply")}</span>

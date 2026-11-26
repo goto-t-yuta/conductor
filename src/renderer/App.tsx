@@ -1110,8 +1110,11 @@ export const App: React.FC = () => {
   );
 
   const handleOpenMarkdownImage = useCallback(
-    (image: MarkdownOpenedImage) => {
-      const fallbackProjectId = activeProjectItem.project?.id ?? null;
+    (
+      image: MarkdownOpenedImage,
+      context?: { message?: ChatMessage; projectId?: string | null },
+    ) => {
+      const fallbackProjectId = context?.projectId ?? activeProjectItem.project?.id ?? null;
       const fileName = extractImageFileName(image.filePath ?? image.src);
       const label = image.alt?.trim() || fileName || "Image";
       const id = image.filePath
@@ -1125,7 +1128,7 @@ export const App: React.FC = () => {
           imagePath: image.filePath,
           imageDataUrl: image.src,
         },
-        { projectId: fallbackProjectId },
+        { message: context?.message, projectId: fallbackProjectId },
       );
     },
     [activeProjectItem.project?.id, handleOpenImageAttachment],
@@ -2320,6 +2323,7 @@ export const App: React.FC = () => {
           onOpenUrl={handleOpenChatUrl}
           onOpenMarkdownFile={handleOpenMarkdownFile}
           onOpenImageAttachment={handleOpenImageAttachment}
+          onOpenMarkdownImage={handleOpenMarkdownImage}
           onOpenTask={setSelectedTaskId}
           onUpdateTaskStatus={handleUpdateTaskStatus}
           onLandTask={handleLandTask}
@@ -2436,6 +2440,9 @@ export const App: React.FC = () => {
             handleOpenMarkdownFile(target, base, {
               fallbackProjectId: selectedTaskProject?.id ?? null,
             })
+          }
+          onOpenImage={(image) =>
+            handleOpenMarkdownImage(image, { projectId: selectedTaskProject?.id ?? null })
           }
           onMentionInChat={() => handleMentionTask(selectedTask)}
           onStopWorker={() => void window.conductor.stopTaskWorker(selectedTask.id)}

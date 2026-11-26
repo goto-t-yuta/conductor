@@ -325,7 +325,9 @@ export function conductorMCPTools(): MCPToolDefinition[] {
           task_id: s("Optional existing task ID (UUID or T# code) to start an existing queued task"),
           title: s("Short task title (written in Conductor's configured output language)"),
           summary: s("Short summary (written in Conductor's configured output language)"),
-          prompt: s("Detailed coding/investigation instructions for the worker"),
+          prompt: s(
+            "Detailed coding/investigation instructions for the worker (for frontend/UI/style changes, the worker is automatically required to attach a screenshot or video via Markdown `![description](/abs/path/to/media.png)` in its completion report)",
+          ),
           provider: s("Optional agent provider override: codex | agy | claude"),
           model: s("Optional model override"),
         },

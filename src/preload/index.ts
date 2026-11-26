@@ -129,6 +129,8 @@ const api: ConductorAPI = {
   },
   imageReadFile: (filePathOrUrl, baseFilePath) =>
     ipcRenderer.invoke("image:readFile", filePathOrUrl, baseFilePath),
+  mediaReadVideo: (filePathOrUrl, baseFilePath) =>
+    ipcRenderer.invoke("media:readVideo", filePathOrUrl, baseFilePath),
   fsListDir: (dirPath, options) =>
     ipcRenderer.invoke(PROJECT_FILE_TREE_IPC_CHANNELS.listDir, dirPath, options),
   fsReadTextFile: (filePath, options) =>

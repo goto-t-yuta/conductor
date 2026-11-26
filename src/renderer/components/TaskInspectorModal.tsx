@@ -48,8 +48,11 @@ import {
   getEffectiveProjectMode,
   getIntegrationModeOption,
 } from "../lib/integration-mode.js";
+import type { MarkdownImageCache } from "../lib/markdown-image-cache.js";
+import type { MarkdownVideoCache } from "../lib/markdown-video-cache.js";
+import { buildTaskMarkdownBasePath } from "../lib/task-event.js";
 import { getQuickStatusTransition } from "../lib/task-sidebar.js";
-import { MarkdownView } from "./MarkdownView.js";
+import { MarkdownView, type MarkdownOpenedImage } from "./MarkdownView.js";
 
 export interface TaskInspectorQuickStatusButtonProps {
   task: Pick<AgentTask, "title" | "status" | "worktreePath" | "worktreeBranch" | "landStatus">;
@@ -188,12 +191,15 @@ export interface TaskInspectorModalProps {
   onUpdateStatus: (status: AgentTaskStatus) => void;
   onOpenPreviewUrl: (url: string) => void;
   onOpenMarkdownFile?: (target: string, baseFilePath?: string) => void;
+  onOpenImage?: (image: MarkdownOpenedImage) => void;
   onMentionInChat: () => void;
   onStopWorker: () => void;
   onDelete: () => void;
   onLandTask?: (options?: { createPr?: boolean }) => Promise<LandTaskResult | void> | void;
   onResolveConflictWithAI?: () => Promise<{ ok: boolean; error?: string } | void> | void;
   onCleanupWorktree?: () => Promise<void> | void;
+  imageCache?: MarkdownImageCache;
+  videoCache?: MarkdownVideoCache;
 }
 
 export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
@@ -207,12 +213,15 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
   onUpdateStatus,
   onOpenPreviewUrl,
   onOpenMarkdownFile,
+  onOpenImage,
   onMentionInChat,
   onStopWorker,
   onDelete,
   onLandTask,
   onResolveConflictWithAI,
   onCleanupWorktree,
+  imageCache,
+  videoCache,
 }) => {
   const [gitStatus, setGitStatus] = useState<string | null>(null);
   const [worktreeStatus, setWorktreeStatus] = useState<TaskWorktreeStatus | null>(null);
@@ -614,6 +623,9 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                 <MarkdownView
                   content={task.latestOutput}
                   locale={locale}
+                  baseFilePath={buildTaskMarkdownBasePath(task)}
+                  imageCache={imageCache}
+                  videoCache={videoCache}
                   onOpenUrl={(url) => {
                     onOpenPreviewUrl(url);
                     onClose();
@@ -622,6 +634,14 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                     onOpenMarkdownFile
                       ? (target, base) => {
                           onOpenMarkdownFile(target, base);
+                          onClose();
+                        }
+                      : undefined
+                  }
+                  onOpenImage={
+                    onOpenImage
+                      ? (image) => {
+                          onOpenImage(image);
                           onClose();
                         }
                       : undefined

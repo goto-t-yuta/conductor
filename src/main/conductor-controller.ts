@@ -273,6 +273,15 @@ export function buildOrchestratorDeveloperInstructions(
   ].join("\n");
 }
 
+export function buildWorkerVisualVerificationInstruction(): string {
+  return [
+    "Frontend / UI Visual Verification (REQUIRED):",
+    "- Whenever your task modifies frontend UI, layout, styles, CSS, or visual components, BEFORE returning your final completion report, capture the updated UI as a screenshot (PNG/JPG/WebP/GIF) or screen recording video (MP4/WebM/MOV) and save it to a persistent local file path.",
+    "- ALWAYS embed the captured media directly in your final Markdown completion report using standard Markdown image syntax with an absolute path or `file://` URL, e.g. `![Updated UI](/absolute/path/to/screenshot.png)` or `![UI Walkthrough](/absolute/path/to/demo.mp4)` (if the path contains spaces such as macOS `Application Support`, wrap it in angle brackets like `![Updated UI](</abs/path/with spaces/screenshot.png>)`; Conductor renders local images and `.mp4`/`.webm`/`.mov` videos inline in chat and task details).",
+    "- Only omit media when capturing a screenshot or video is technically impossible in the current environment (for example, no runnable UI/dev server or headless display limitation); in that case, explicitly state the concrete technical reason in your final report.",
+  ].join("\n");
+}
+
 export function buildWorkerDeveloperInstructions(options: {
   projectName: string;
   cwd: string;
@@ -282,10 +291,203 @@ export function buildWorkerDeveloperInstructions(options: {
   const base = options.worktreeBranch
     ? `You are a focused coding worker for project "${options.projectName}" working in an isolated git worktree at ${options.cwd} (branch "${options.worktreeBranch}"). Complete the assigned task thoroughly, run checks/tests, and return a concise summary including changed files or local preview URLs.`
     : `You are a focused coding worker for project "${options.projectName}" (${options.cwd}). Complete the assigned task thoroughly, run checks/tests, and return a concise summary including changed files or local preview URLs.`;
+  const visualInstruction = buildWorkerVisualVerificationInstruction();
   const langInstruction = buildWorkerLanguageInstruction(
     options.preferredLanguage ?? DEFAULT_PREFERRED_LANGUAGE,
   );
-  return `${base}\n\n${langInstruction}`;
+  return `${base}\n\n${visualInstruction}\n\n${langInstruction}`;
+}
+
+export const DEFAULT_TASK_COMPLETION_EXCERPT_CHARS = 420;
+const MAX_TASK_COMPLETION_EXCERPT_MEDIA = 6;
+
+interface ExtractedMediaSpan {
+  start: number;
+  end: number;
+  raw: string;
+  key: string;
+}
+
+function findFencedCodeRanges(text: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  const lineRe = /[^\r\n]*(?:\r?\n|$)/g;
+  let activeFence: { char: string; length: number; start: number } | null = null;
+  let match: RegExpExecArray | null;
+
+  while ((match = lineRe.exec(text)) !== null) {
+    const line = match[0];
+    if (!line) break;
+    const lineStart = match.index;
+    const lineEnd = lineStart + line.length;
+    const stripped = line.replace(/\r?\n$/, "");
+    const fenceMatch = stripped.match(/^\s{0,3}(`{3,}|~{3,})/);
+
+    if (fenceMatch) {
+      const marker = fenceMatch[1]!;
+      const char = marker[0]!;
+      if (!activeFence) {
+        activeFence = { char, length: marker.length, start: lineStart };
+      } else if (
+        activeFence.char === char &&
+        marker.length >= activeFence.length &&
+        /^\s{0,3}(`{3,}|~{3,})\s*$/.test(stripped)
+      ) {
+        ranges.push({ start: activeFence.start, end: lineEnd });
+        activeFence = null;
+      }
+    }
+  }
+
+  if (activeFence) {
+    ranges.push({ start: activeFence.start, end: text.length });
+  }
+  return ranges;
+}
+
+function isInsideRanges(
+  start: number,
+  end: number,
+  ranges: ReadonlyArray<{ start: number; end: number }>,
+): boolean {
+  return ranges.some((r) => start >= r.start && end <= r.end);
+}
+
+function extractMediaKey(raw: string): string {
+  const mdAngleMatch = raw.match(/^!\[[^\]\r\n]*\]\(\s*<([^>\r\n]+)>/);
+  if (mdAngleMatch) {
+    return (mdAngleMatch[1] ?? raw).trim();
+  }
+  const mdMatch = raw.match(
+    /^!\[[^\]\r\n]*\]\(\s*([^)\r\n]+?)(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'))?\s*\)$/,
+  );
+  if (mdMatch) {
+    return (mdMatch[1] ?? raw).trim();
+  }
+  const srcMatch = raw.match(/\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+  if (srcMatch) {
+    return (srcMatch[1] ?? srcMatch[2] ?? srcMatch[3] ?? raw).trim();
+  }
+  return raw.trim();
+}
+
+function extractTaskReportMediaSpans(text: string): ExtractedMediaSpan[] {
+  const codeRanges = findFencedCodeRanges(text);
+  const candidates: ExtractedMediaSpan[] = [];
+
+  const patterns = [
+    /!\[[^\]\r\n]*\]\((?:<[^>\r\n]+>|(?:\/|~\/|~\\|\.\.?[\\/]|file:\/\/|[a-zA-Z]:[\\/])[^)\r\n<>]*?\.(?:png|jpe?g|jfif|webp|gif|bmp|svg|ico|avif|mp4|webm|mov)(?:[?#][^\s)]*)?(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'))?|[^)\s\r\n]+(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'))?)\)/gi,
+    /<video\b[^>]*>[\s\S]*?<\/video>/gi,
+    /<img\b[^>]*\/?>/gi,
+  ];
+
+  for (const re of patterns) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (isInsideRanges(start, end, codeRanges)) continue;
+      candidates.push({
+        start,
+        end,
+        raw: m[0].trim(),
+        key: extractMediaKey(m[0]),
+      });
+    }
+  }
+
+  candidates.sort((a, b) => a.start - b.start || b.end - a.end);
+
+  // Drop spans contained within an earlier span (e.g. <img> inside <video>)
+  const spans: ExtractedMediaSpan[] = [];
+  for (const item of candidates) {
+    const prev = spans[spans.length - 1];
+    if (prev && item.start < prev.end) {
+      continue;
+    }
+    spans.push(item);
+  }
+  return spans;
+}
+
+function closeUnclosedFenceIfNeeded(text: string): string {
+  const lines = text.split(/\r?\n/);
+  let activeFence: { char: string; length: number } | null = null;
+  for (const line of lines) {
+    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (!fenceMatch) continue;
+    const marker = fenceMatch[1]!;
+    const char = marker[0]!;
+    if (!activeFence) {
+      activeFence = { char, length: marker.length };
+    } else if (
+      activeFence.char === char &&
+      marker.length >= activeFence.length &&
+      /^\s{0,3}(`{3,}|~{3,})\s*$/.test(line)
+    ) {
+      activeFence = null;
+    }
+  }
+  if (!activeFence) return text;
+  return `${text}\n${activeFence.char.repeat(activeFence.length)}`;
+}
+
+/**
+ * Builds a concise excerpt of a worker's completion output for chat `TaskEvent` cards
+ * while preserving attached Markdown/HTML images and videos that would otherwise be cut off.
+ */
+export function buildTaskCompletionExcerpt(
+  output: string,
+  maxTextChars = DEFAULT_TASK_COMPLETION_EXCERPT_CHARS,
+): string {
+  const trimmed = output.trim();
+  if (!trimmed) return "";
+
+  const limit = Math.max(1, maxTextChars);
+  if (trimmed.length <= limit) {
+    return trimmed;
+  }
+
+  const mediaSpans = extractTaskReportMediaSpans(trimmed);
+  let cutIndex = limit;
+
+  // Never slice through the middle of a Markdown image/video or HTML media tag
+  const overlapping = mediaSpans.find((span) => span.start < cutIndex && span.end > cutIndex);
+  if (overlapping) {
+    cutIndex = overlapping.start;
+  }
+
+  let head = trimmed.slice(0, cutIndex).trimEnd();
+  if (head) {
+    head = closeUnclosedFenceIfNeeded(head);
+    if (!/[…]$/.test(head)) {
+      head = `${head}…`;
+    }
+  }
+
+  if (mediaSpans.length === 0) {
+    return head || trimmed.slice(0, limit);
+  }
+
+  const includedKeys = new Set(
+    mediaSpans.filter((span) => span.end <= cutIndex).map((span) => span.key),
+  );
+  const appendedMedia: string[] = [];
+
+  for (const span of mediaSpans) {
+    if (includedKeys.has(span.key)) continue;
+    includedKeys.add(span.key);
+    appendedMedia.push(span.raw);
+    if (appendedMedia.length >= MAX_TASK_COMPLETION_EXCERPT_MEDIA) {
+      break;
+    }
+  }
+
+  if (appendedMedia.length === 0) {
+    return head;
+  }
+
+  return head ? `${head}\n\n${appendedMedia.join("\n\n")}` : appendedMedia.join("\n\n");
 }
 
 export const MAX_AUTO_CONFLICT_RESOLVE_ATTEMPTS = 2;
@@ -4112,7 +4314,7 @@ export class ConductorController {
             updatedTask = tTask;
           });
           if (updatedTask) {
-            const excerpt = updatedTask.latestOutput.trim().slice(0, 420);
+            const excerpt = buildTaskCompletionExcerpt(updatedTask.latestOutput);
             this.appendTaskEventMessage(
               updatedTask,
               updatedTask.status === "failed"
@@ -4140,7 +4342,7 @@ export class ConductorController {
             tTask.landStatus = "landing";
             tTask.currentStep = t(locale, "taskStep.autoLanding");
             tTask.updatedAt = new Date().toISOString();
-            excerpt = tTask.latestOutput.trim().slice(0, 420);
+            excerpt = buildTaskCompletionExcerpt(tTask.latestOutput);
           });
           this.persist();
           this.broadcastSnapshot();
@@ -4163,7 +4365,7 @@ export class ConductorController {
         });
 
         if (updatedTask) {
-          const excerpt = updatedTask.latestOutput.trim().slice(0, 420);
+          const excerpt = buildTaskCompletionExcerpt(updatedTask.latestOutput);
           this.appendTaskEventMessage(
             updatedTask,
             t(locale, "taskEvent.completedReview"),
@@ -5721,9 +5923,9 @@ export class ConductorController {
           });
 
           if (finishedTask) {
-            const excerpt = (finishedTask.latestOutput || outcome.errorMessage || "")
-              .trim()
-              .slice(0, 420);
+            const excerpt = buildTaskCompletionExcerpt(
+              finishedTask.latestOutput || outcome.errorMessage || "",
+            );
             this.appendTaskEventMessage(
               finishedTask,
               finishedTask.status === "failed"
@@ -5744,9 +5946,9 @@ export class ConductorController {
 
         if (shouldAutoLand && preparedTask) {
           const locale = this.getUiLocale();
-          const excerpt = (preparedTask.latestOutput || outcome.finalText || "")
-            .trim()
-            .slice(0, 420);
+          const excerpt = buildTaskCompletionExcerpt(
+            preparedTask.latestOutput || outcome.finalText || "",
+          );
           this.updateTask(args.taskId, (tTask) => {
             tTask.status = "running";
             tTask.landStatus = "landing";
@@ -5772,9 +5974,9 @@ export class ConductorController {
         });
 
         if (finishedTask) {
-          const excerpt = (finishedTask.latestOutput || outcome.errorMessage || "")
-            .trim()
-            .slice(0, 420);
+          const excerpt = buildTaskCompletionExcerpt(
+            finishedTask.latestOutput || outcome.errorMessage || "",
+          );
           this.appendTaskEventMessage(
             finishedTask,
             t(locale, "taskEvent.completedReview"),
