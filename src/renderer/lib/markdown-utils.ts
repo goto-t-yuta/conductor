@@ -2,6 +2,86 @@ import type { AgentTask, Project } from "../../shared/types.js";
 import { formatTaskCode, parseAndResolveMentions } from "../../shared/mentions.js";
 
 export const MARKDOWN_EXT_REGEX = /\.(?:md|markdown|mdown|mkd|mdx)$/i;
+export const VIDEO_EXT_REGEX = /\.(?:mp4|webm|mov)$/i;
+export const IMAGE_OR_VIDEO_EXT_REGEX =
+  /\.(?:png|jpe?g|jfif|webp|gif|bmp|svg|ico|avif|mp4|webm|mov)(?:[?#][^\s)]*)?$/i;
+
+const UNWRAPPED_SPACED_MEDIA_RE =
+  /!\[([^\]\r\n]*)\]\(((?:\/|~\/|~\\|\.\.?[\\/]|file:\/\/|[a-zA-Z]:[\\/])[^)\r\n<>]*?[ \t][^)\r\n<>]*?)\)/g;
+
+/**
+ * Wraps bare local image/video destinations containing spaces (such as macOS
+ * `~/Library/Application Support/...` worktree paths) in CommonMark angle brackets
+ * (`![alt](</path/with spaces/file.png>)`) outside fenced/inline code so react-markdown
+ * parses them as real media elements instead of literal text.
+ */
+export function normalizeMarkdownSpacedMediaDestinations(markdown: string): string {
+  if (!markdown.includes("![") || !/[ \t]/.test(markdown)) {
+    return markdown;
+  }
+
+  const lines = markdown.split(/\r?\n/);
+  let activeFence: { char: string; length: number } | null = null;
+  let changed = false;
+
+  const transformOutsideInlineCode = (line: string): string => {
+    // Split line by backtick inline code spans so code examples stay untouched
+    const parts = line.split(/(`+[^`]*`+)/g);
+    let lineChanged = false;
+    const nextParts = parts.map((part, idx) => {
+      if (idx % 2 === 1) return part; // inside inline code
+      if (!part.includes("![")) return part;
+      const replaced = part.replace(
+        UNWRAPPED_SPACED_MEDIA_RE,
+        (fullMatch, alt: string, rawInside: string) => {
+          const trimmed = rawInside.trim();
+          // Split optional trailing Markdown title ("..." or '...') if present
+          const titleMatch = /^(.*?\S)\s+("[^"\r\n]*"|'[^'\r\n]*')$/.exec(trimmed);
+          const dest = (titleMatch ? titleMatch[1] : trimmed) ?? trimmed;
+          const title = titleMatch ? titleMatch[2] : null;
+          if (!/[ \t]/.test(dest)) {
+            return fullMatch;
+          }
+          if (!IMAGE_OR_VIDEO_EXT_REGEX.test(dest)) {
+            return fullMatch;
+          }
+          lineChanged = true;
+          return title ? `![${alt}](<${dest}> ${title})` : `![${alt}](<${dest}>)`;
+        },
+      );
+      return replaced;
+    });
+    if (lineChanged) {
+      changed = true;
+      return nextParts.join("");
+    }
+    return line;
+  };
+
+  const nextLines = lines.map((line) => {
+    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1]!;
+      const char = marker[0]!;
+      if (!activeFence) {
+        activeFence = { char, length: marker.length };
+        return line;
+      }
+      if (
+        activeFence.char === char &&
+        marker.length >= activeFence.length &&
+        /^\s{0,3}(`{3,}|~{3,})\s*$/.test(line)
+      ) {
+        activeFence = null;
+        return line;
+      }
+    }
+    if (activeFence) return line;
+    return transformOutsideInlineCode(line);
+  });
+
+  return changed ? nextLines.join("\n") : markdown;
+}
 
 export interface MarkdownHeading {
   level: number;
@@ -30,9 +110,34 @@ export type ClassifiedMarkdownImageSrc =
 const WINDOWS_DRIVE_PATH_RE = /^[a-zA-Z]:[\\/]/;
 const URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 const DATA_IMAGE_URL_RE = /^data:image\/[a-z0-9.+-]+(?:;[^,]*)?,/i;
+const DATA_VIDEO_URL_RE = /^data:video\/[a-z0-9.+-]+(?:;[^,]*)?,/i;
+const CONDUCTOR_MEDIA_URL_RE = /^conductor-media:\/\//i;
 
 export function isSafeDataImageUrl(url: string): boolean {
   return DATA_IMAGE_URL_RE.test(url.trim());
+}
+
+export function isSafeDataVideoUrl(url: string): boolean {
+  return DATA_VIDEO_URL_RE.test(url.trim());
+}
+
+export function isVideoPathOrUrl(raw: string | undefined): boolean {
+  if (!raw) return false;
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  if (DATA_VIDEO_URL_RE.test(trimmed)) return true;
+  if (CONDUCTOR_MEDIA_URL_RE.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.pathname === "/video") return true;
+      const targetPath = parsed.searchParams.get("path");
+      if (targetPath && VIDEO_EXT_REGEX.test(targetPath)) return true;
+    } catch {
+      return false;
+    }
+  }
+  const pathPart = safeDecodeURIComponent(stripQueryAndHash(trimmed));
+  return VIDEO_EXT_REGEX.test(pathPart);
 }
 
 export function transformMarkdownUrl(
@@ -45,13 +150,16 @@ export function transformMarkdownUrl(
   if (key === "href" && /^file:\/\//i.test(trimmed)) {
     return trimmed;
   }
-  // Allow file://, inline data:image/*, blob:, and Windows drive paths on img src / source srcSet
-  // so our MarkdownImage renderer can resolve and load them safely.
+  // Allow file://, inline data:image/*, data:video/*, blob:, conductor-media://, and Windows drive
+  // paths on img/video src / source srcSet so our MarkdownImage & MarkdownVideo renderers can
+  // resolve and load them safely.
   if (key === "src" || key === "srcSet") {
     if (
       /^file:\/\//i.test(trimmed) ||
       DATA_IMAGE_URL_RE.test(trimmed) ||
+      DATA_VIDEO_URL_RE.test(trimmed) ||
       /^blob:/i.test(trimmed) ||
+      CONDUCTOR_MEDIA_URL_RE.test(trimmed) ||
       WINDOWS_DRIVE_PATH_RE.test(trimmed)
     ) {
       return trimmed;
@@ -260,6 +368,90 @@ export function classifyMarkdownImageSrc(
     kind: "invalid",
     raw: trimmed,
     error: "基準ファイルが不明なため相対パスの画像を解決できません。",
+  };
+}
+
+/**
+ * Classifies a Markdown `![alt](video.mp4)` or HTML `<video src="...">` source into:
+ * - `direct`: safe remote (`http://`, `https://`), `data:video/*`, `blob:`, or `conductor-media://` URLs
+ * - `local`: relative (with `baseFilePath`), absolute, `~/`, or `file://` local files to resolve via IPC
+ * - `invalid`: empty, disallowed schemes (e.g. `javascript:`), or relative paths without `baseFilePath`
+ */
+export function classifyMarkdownVideoSrc(
+  src: string | undefined,
+  baseFilePath?: string,
+): ClassifiedMarkdownImageSrc {
+  if (!src) {
+    return { kind: "invalid", raw: "", error: "動画 URL が空です。" };
+  }
+  const trimmed = src.trim();
+  if (!trimmed) {
+    return { kind: "invalid", raw: "", error: "動画 URL が空です。" };
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return { kind: "direct", src: trimmed };
+  }
+
+  if (/^\/\/[^/]/.test(trimmed)) {
+    return { kind: "direct", src: `https:${trimmed}` };
+  }
+
+  if (
+    DATA_VIDEO_URL_RE.test(trimmed) ||
+    /^blob:/i.test(trimmed) ||
+    CONDUCTOR_MEDIA_URL_RE.test(trimmed)
+  ) {
+    return { kind: "direct", src: trimmed };
+  }
+
+  if (/^file:\/\//i.test(trimmed)) {
+    const resolvedPath = resolveMarkdownImagePath(trimmed);
+    return {
+      kind: "local",
+      target: trimmed,
+      resolvedPath,
+      cacheKey: resolvedPath ?? trimmed,
+    };
+  }
+
+  const isWindowsDrive = WINDOWS_DRIVE_PATH_RE.test(trimmed);
+  if (!isWindowsDrive && URL_SCHEME_RE.test(trimmed)) {
+    return { kind: "invalid", raw: trimmed, error: "対応していない動画 URL です。" };
+  }
+
+  if (
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("~/") ||
+    trimmed.startsWith("~\\") ||
+    isWindowsDrive
+  ) {
+    const resolvedPath = resolveMarkdownImagePath(trimmed);
+    const trimmedBase = baseFilePath?.trim();
+    return {
+      kind: "local",
+      target: trimmed,
+      ...(trimmedBase ? { baseFilePath: trimmedBase } : {}),
+      resolvedPath,
+      cacheKey: resolvedPath ?? trimmed,
+    };
+  }
+
+  if (baseFilePath?.trim()) {
+    const resolvedPath = resolveMarkdownImagePath(trimmed, baseFilePath);
+    return {
+      kind: "local",
+      target: trimmed,
+      baseFilePath,
+      resolvedPath,
+      cacheKey: resolvedPath ?? `${baseFilePath}::${trimmed}`,
+    };
+  }
+
+  return {
+    kind: "invalid",
+    raw: trimmed,
+    error: "基準ファイルが不明なため相対パスの動画を解決できません。",
   };
 }
 

@@ -5,11 +5,19 @@ import type { AgentTask, AgentTaskStatus, ChatMessage, Project } from "../src/sh
 import { RUNNING_TASK_DONE_BLOCKED_REASON } from "../src/shared/task-status.js";
 import { deriveQuestionItems } from "../src/renderer/lib/questions.js";
 import {
+  COLLAPSED_PROJECT_GROUPS_STORAGE_KEY,
   QUESTIONS_SECTION_HEIGHT_STORAGE_KEY,
   REOPEN_TARGET_STATUS,
+  TASK_GROUP_BY_PROJECT_STORAGE_KEY,
+  makeProjectGroupCollapseKey,
 } from "../src/renderer/lib/task-sidebar.js";
 import { TaskInspectorModal, TaskStatusSelect } from "../src/renderer/components/TaskInspectorModal.js";
-import { TaskCard, TaskSidebar, type TaskSidebarProps } from "../src/renderer/components/TaskSidebar.js";
+import {
+  ProjectTaskGroupSection,
+  TaskCard,
+  TaskSidebar,
+  type TaskSidebarProps,
+} from "../src/renderer/components/TaskSidebar.js";
 
 function makeTask(
   overrides: Partial<AgentTask> & { id: string; taskNumber: number; title: string; status: AgentTaskStatus },
@@ -575,5 +583,267 @@ describe("TaskCard & TaskSidebar rendering and click isolation", () => {
     );
     expect(collapsedHtml).not.toContain('data-testid="questions-search-input"');
     expect(collapsedHtml).not.toContain('data-testid="questions-list-container"');
+  });
+
+  it("groups tasks by project by default with running/needs_review badges, supports collapse/flat toggle persistence, and auto-expands matched groups on search", () => {
+    const projects: Project[] = [
+      makeProject({ id: "proj-alpha", name: "alpha-web", colorHex: "#3B82F6" }),
+      makeProject({ id: "proj-beta", name: "beta-api", colorHex: "#10B981" }),
+      makeProject({ id: "proj-gamma", name: "gamma-cli", colorHex: "#F59E0B" }),
+    ];
+
+    const tasks: AgentTask[] = [
+      makeTask({
+        id: "t-gamma-queued",
+        taskNumber: 10,
+        title: "Gamma queued task",
+        projectId: "proj-gamma",
+        projectName: "gamma-cli",
+        status: "queued",
+        updatedAt: "2026-11-26T12:00:00.000Z",
+      }),
+      makeTask({
+        id: "t-alpha-review",
+        taskNumber: 11,
+        title: "Alpha review task",
+        projectId: "proj-alpha",
+        projectName: "alpha-web",
+        status: "needs_review",
+        updatedAt: "2026-11-26T11:00:00.000Z",
+      }),
+      makeTask({
+        id: "t-beta-running",
+        taskNumber: 12,
+        title: "Beta running task",
+        projectId: "proj-beta",
+        projectName: "beta-api",
+        status: "running",
+        updatedAt: "2026-11-26T10:00:00.000Z",
+      }),
+      makeTask({
+        id: "t-beta-review",
+        taskNumber: 13,
+        title: "Beta review task",
+        projectId: "proj-beta",
+        projectName: "beta-api",
+        status: "needs_review",
+        updatedAt: "2026-11-26T10:05:00.000Z",
+      }),
+      makeTask({
+        id: "t-alpha-done-1",
+        taskNumber: 14,
+        title: "Alpha OAuth fix",
+        projectId: "proj-alpha",
+        projectName: "alpha-web",
+        status: "done",
+        summary: "Fixed OAuth callback",
+        updatedAt: "2026-11-26T09:00:00.000Z",
+      }),
+      makeTask({
+        id: "t-alpha-done-2",
+        taskNumber: 15,
+        title: "Alpha lint cleanup",
+        projectId: "proj-alpha",
+        projectName: "alpha-web",
+        status: "done",
+        summary: "Cleaned eslint warnings",
+        updatedAt: "2026-11-26T08:00:00.000Z",
+      }),
+      makeTask({
+        id: "t-beta-done-1",
+        taskNumber: 16,
+        title: "Beta metrics endpoint",
+        projectId: "proj-beta",
+        projectName: "beta-api",
+        status: "done",
+        summary: "Added Prometheus metrics",
+        updatedAt: "2026-11-26T09:30:00.000Z",
+      }),
+    ];
+
+    // 1. Default grouped view: toggle is pressed, groups sorted beta (running) -> alpha (needs_review) -> gamma (queued)
+    const groupedHtml = renderToStaticMarkup(
+      <TaskSidebar {...makeSidebarProps({ projects, tasks })} />,
+    );
+    expect(groupedHtml).toContain('data-testid="toggle-project-grouping"');
+    expect(groupedHtml).toContain('aria-pressed="true"');
+    expect(groupedHtml).toContain('data-testid="active-project-groups"');
+    expect(groupedHtml).toContain('data-testid="project-group-running-badge"');
+    expect(groupedHtml).toContain('data-testid="project-group-review-badge"');
+
+    const betaIdx = groupedHtml.indexOf('data-project-group="beta-api"');
+    const alphaIdx = groupedHtml.indexOf('data-project-group="alpha-web"');
+    const gammaIdx = groupedHtml.indexOf('data-project-group="gamma-cli"');
+    expect(betaIdx).toBeGreaterThan(-1);
+    expect(alphaIdx).toBeGreaterThan(betaIdx);
+    expect(gammaIdx).toBeGreaterThan(alphaIdx);
+
+    // 2. Collapsed project group hides its task cards while preserving header & counts
+    const collapsedHtml = renderToStaticMarkup(
+      <TaskSidebar
+        {...makeSidebarProps({
+          projects,
+          tasks,
+          defaultCollapsedProjectGroups: [makeProjectGroupCollapseKey("active", "beta-api")],
+        })}
+      />,
+    );
+    expect(collapsedHtml).not.toContain("Beta running task");
+    expect(collapsedHtml).not.toContain("Beta review task");
+    expect(collapsedHtml).toContain("Alpha review task");
+    expect(collapsedHtml).toMatch(
+      /data-testid="project-group-header"[^>]*data-project-group="beta-api"[^>]*aria-expanded="false"/,
+    );
+
+    // 3. Completed search auto-expands matched project groups even when collapsed and shows filtered/total badge
+    const searchCompletedHtml = renderToStaticMarkup(
+      <TaskSidebar
+        {...makeSidebarProps({
+          projects,
+          tasks,
+          defaultCompletedExpanded: true,
+          defaultCompletedSearch: "oauth",
+          defaultCollapsedProjectGroups: [makeProjectGroupCollapseKey("completed", "alpha-web")],
+        })}
+      />,
+    );
+    expect(searchCompletedHtml).toContain('data-testid="completed-project-groups"');
+    expect(searchCompletedHtml).toContain("Alpha OAuth fix");
+    expect(searchCompletedHtml).not.toContain("Alpha lint cleanup");
+    expect(searchCompletedHtml).not.toContain("Beta metrics endpoint");
+    expect(searchCompletedHtml).toMatch(
+      /data-testid="project-group-header"[^>]*data-project-group="alpha-web"[^>]*data-section="completed"[^>]*aria-expanded="true"/,
+    );
+    expect(searchCompletedHtml).toMatch(/data-testid="project-group-count"[^>]*>1\/2<\/span>/);
+
+    // 4. Project filter narrows visible groups to the selected project
+    const filteredProjectHtml = renderToStaticMarkup(
+      <TaskSidebar
+        {...makeSidebarProps({
+          projects,
+          tasks,
+          selectedProjectId: "proj-alpha",
+        })}
+      />,
+    );
+    expect(filteredProjectHtml).toContain("Alpha review task");
+    expect(filteredProjectHtml).not.toContain("Beta running task");
+    expect(filteredProjectHtml).not.toContain("Gamma queued task");
+
+    // 5. Flat list mode (defaultGroupByProject=false) omits project group headers
+    const flatHtml = renderToStaticMarkup(
+      <TaskSidebar
+        {...makeSidebarProps({
+          projects,
+          tasks,
+          defaultGroupByProject: false,
+        })}
+      />,
+    );
+    expect(flatHtml).toContain('aria-pressed="false"');
+    expect(flatHtml).not.toContain('data-testid="active-project-groups"');
+    expect(flatHtml).not.toContain('data-testid="project-group-header"');
+    expect(flatHtml).toContain("Beta running task");
+
+    // 6. Persisted localStorage preferences (flat mode + collapsed groups) are restored on render
+    const g = globalThis as unknown as {
+      localStorage?: {
+        getItem(key: string): string | null;
+        setItem(key: string, value: string): void;
+        removeItem(key: string): void;
+      };
+    };
+    const originalStorage = g.localStorage;
+    const store = new Map<string, string>();
+    g.localStorage = {
+      getItem: (key) => store.get(key) ?? null,
+      setItem: (key, value) => {
+        store.set(key, value);
+      },
+      removeItem: (key) => {
+        store.delete(key);
+      },
+    };
+    try {
+      store.set(TASK_GROUP_BY_PROJECT_STORAGE_KEY, "false");
+      const persistedFlatHtml = renderToStaticMarkup(
+        <TaskSidebar {...makeSidebarProps({ projects, tasks })} />,
+      );
+      expect(persistedFlatHtml).toContain('aria-pressed="false"');
+      expect(persistedFlatHtml).not.toContain('data-testid="project-group-header"');
+
+      store.set(TASK_GROUP_BY_PROJECT_STORAGE_KEY, "true");
+      store.set(
+        COLLAPSED_PROJECT_GROUPS_STORAGE_KEY,
+        JSON.stringify([makeProjectGroupCollapseKey("active", "alpha-web")]),
+      );
+      const persistedCollapsedHtml = renderToStaticMarkup(
+        <TaskSidebar {...makeSidebarProps({ projects, tasks })} />,
+      );
+      expect(persistedCollapsedHtml).toContain('aria-pressed="true"');
+      expect(persistedCollapsedHtml).not.toContain("Alpha review task");
+      expect(persistedCollapsedHtml).toContain("Beta running task");
+    } finally {
+      if (originalStorage === undefined) {
+        delete g.localStorage;
+      } else {
+        g.localStorage = originalStorage;
+      }
+    }
+
+    // 7. ProjectTaskGroupSection header click triggers toggle when not forceExpanded, and ignores clicks while forceExpanded
+    const onToggleCollapse = vi.fn();
+    const normalGroupEl = ProjectTaskGroupSection({
+      group: {
+        groupKey: "beta-api",
+        projectName: "beta-api",
+        projectId: "proj-beta",
+        colorHex: "#10B981",
+        tasks: [tasks[2]!],
+        runningCount: 1,
+        needsReviewCount: 0,
+        queuedCount: 0,
+        failedCount: 0,
+        doneCount: 0,
+        latestUpdatedAtMs: Date.parse("2026-11-26T10:00:00.000Z"),
+      },
+      section: "active",
+      locale: "ja",
+      isCollapsed: false,
+      onToggleCollapse,
+      renderTaskCard: () => null,
+    });
+    const headerBtn = findElementByTestId(normalGroupEl, "project-group-header");
+    expect(headerBtn).not.toBeNull();
+    (headerBtn!.props.onClick as () => void)();
+    expect(onToggleCollapse).toHaveBeenCalledWith("active:beta-api");
+
+    onToggleCollapse.mockClear();
+    const forcedGroupEl = ProjectTaskGroupSection({
+      group: {
+        groupKey: "alpha-web",
+        projectName: "alpha-web",
+        projectId: "proj-alpha",
+        colorHex: "#3B82F6",
+        tasks: [tasks[4]!],
+        runningCount: 0,
+        needsReviewCount: 0,
+        queuedCount: 0,
+        failedCount: 0,
+        doneCount: 1,
+        latestUpdatedAtMs: Date.parse("2026-11-26T09:00:00.000Z"),
+      },
+      section: "completed",
+      locale: "en",
+      isCollapsed: true,
+      forceExpanded: true,
+      totalCountInGroup: 2,
+      onToggleCollapse,
+      renderTaskCard: () => null,
+    });
+    const forcedHeaderBtn = findElementByTestId(forcedGroupEl, "project-group-header");
+    expect(forcedHeaderBtn).not.toBeNull();
+    (forcedHeaderBtn!.props.onClick as () => void)();
+    expect(onToggleCollapse).not.toHaveBeenCalled();
   });
 });

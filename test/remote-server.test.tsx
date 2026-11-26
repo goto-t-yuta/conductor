@@ -18,7 +18,9 @@ import {
   type RemoteBridgeController,
 } from "../src/main/remote-server.js";
 import { StateStore } from "../src/main/state-store.js";
+import { buildQrSvgData } from "../src/renderer/components/QrCodeSvg.js";
 import { SettingsModal } from "../src/renderer/components/SettingsModal.js";
+import { ANDROID_APK_DOWNLOAD_URL } from "../src/shared/remote-access.js";
 import { validateManualTaskStatusTransition } from "../src/shared/task-status.js";
 import type {
   AgentTask,
@@ -301,15 +303,48 @@ describe("Tailscale IP detection & connect URI helpers", () => {
     expect(cliFallback.magicDnsName).toBe("studio.ts.net");
   });
 
-  it("round-trips conductor://connect URIs cleanly", () => {
+  it("round-trips conductor://connect, conductor://link, and JSON pairing payloads cleanly", () => {
     const uri = buildConductorConnectUri("http://100.121.247.7:4789", "secret-token-123");
     expect(uri.startsWith("conductor://connect?")).toBe(true);
     expect(parseConductorConnectUri(uri)).toEqual({
       url: "http://100.121.247.7:4789",
       token: "secret-token-123",
     });
+    expect(
+      parseConductorConnectUri(
+        "conductor://link?url=http%3A%2F%2F100.121.247.7%3A4789%2F&token=link-token-999",
+      ),
+    ).toEqual({
+      url: "http://100.121.247.7:4789",
+      token: "link-token-999",
+    });
+    expect(
+      parseConductorConnectUri(
+        JSON.stringify({ url: "http://100.64.0.9:4789/", token: "json-tok" }),
+      ),
+    ).toEqual({
+      url: "http://100.64.0.9:4789",
+      token: "json-tok",
+    });
     expect(parseConductorConnectUri("https://example.com")).toBeNull();
+    expect(parseConductorConnectUri("conductor://other?url=http://100.64.0.1:4789&token=abc")).toBeNull();
     expect(parseConductorConnectUri("conductor://connect?url=http://100.64.0.1:4789")).toBeNull();
+    expect(parseConductorConnectUri("{invalid-json}")).toBeNull();
+  });
+
+  it("generates deterministic offline SVG QR data for APK download and pairing URIs", () => {
+    const downloadQr = buildQrSvgData(ANDROID_APK_DOWNLOAD_URL);
+    expect(downloadQr).not.toBeNull();
+    expect(downloadQr!.moduleCount).toBeGreaterThanOrEqual(21);
+    expect(downloadQr!.viewBoxSize).toBe(downloadQr!.moduleCount + 4);
+    expect(downloadQr!.pathD.length).toBeGreaterThan(20);
+
+    const pairUri = buildConductorConnectUri("http://100.121.247.7:4789", "abcdef0123456789");
+    const pairQr = buildQrSvgData(pairUri);
+    expect(pairQr).not.toBeNull();
+    expect(pairQr!.pathD).not.toBe(downloadQr!.pathD);
+
+    expect(buildQrSvgData("   ")).toBeNull();
   });
 });
 
@@ -677,11 +712,86 @@ describe("StateStore, ConductorController & SettingsModal Remote Access integrat
     );
 
     expect(html).toContain('data-testid="remote-access-section"');
+    expect(html).toContain('data-testid="remote-access-qr-panel"');
+    expect(html).toContain('data-testid="remote-access-qr-download"');
+    expect(html).toContain('data-testid="remote-access-qr-pair"');
+    expect(html).toContain(ANDROID_APK_DOWNLOAD_URL);
     expect(html).toContain("100.121.247.7");
     expect(html).toContain("macbook-pro.taile00453.ts.net");
     expect(html).toContain("http://100.121.247.7:4789");
     expect(html).toContain("稼働中 · SSE 2台");
     expect(html).toContain("conductor://connect?");
     expect(html).toContain('data-testid="remote-access-regenerate-token"');
+    expect(html).not.toContain('data-testid="remote-access-qr-enable-btn"');
+    expect(html).not.toContain('data-testid="remote-access-qr-tailscale-warning"');
+  });
+
+  it("shows one-click enable CTA when Remote Bridge is stopped and Tailscale warning when IP is missing", () => {
+    const disabledHtml = renderToStaticMarkup(
+      <SettingsModal
+        defaultIntegrationMode="feature-branch"
+        preferredLanguage="ja"
+        remoteAccess={{
+          enabled: false,
+          running: false,
+          port: 4789,
+          token: "abcdef0123456789abcdef0123456789",
+          bindHost: null,
+          tailscaleIp: null,
+          magicDnsName: null,
+          lanIp: "192.168.1.5",
+          url: "http://192.168.1.5:4789",
+          magicDnsUrl: null,
+          connectUri:
+            "conductor://connect?url=http%3A%2F%2F192.168.1.5%3A4789&token=abcdef0123456789abcdef0123456789",
+          connectedClients: 0,
+          error: null,
+        }}
+        projects={[]}
+        onClose={vi.fn()}
+        onSetDefaultIntegrationMode={vi.fn()}
+        onSetProjectIntegrationMode={vi.fn()}
+      />,
+    );
+
+    // Step 1 download QR is always available
+    expect(disabledHtml).toContain('data-testid="remote-access-qr-download"');
+    // Step 2 shows one-click enable CTA instead of pairing QR
+    expect(disabledHtml).toContain('data-testid="remote-access-qr-enable-btn"');
+    expect(disabledHtml).not.toContain('data-testid="remote-access-qr-pair"');
+
+    // English locale + running without Tailscale IP shows English UI and warning
+    const enNoTailscaleHtml = renderToStaticMarkup(
+      <SettingsModal
+        defaultIntegrationMode="feature-branch"
+        preferredLanguage="en"
+        remoteAccess={{
+          enabled: true,
+          running: true,
+          port: 4789,
+          token: "abcdef0123456789abcdef0123456789",
+          bindHost: "0.0.0.0",
+          tailscaleIp: null,
+          magicDnsName: null,
+          lanIp: "192.168.1.5",
+          url: "http://192.168.1.5:4789",
+          magicDnsUrl: null,
+          connectUri:
+            "conductor://connect?url=http%3A%2F%2F192.168.1.5%3A4789&token=abcdef0123456789abcdef0123456789",
+          connectedClients: 0,
+          error: null,
+        }}
+        projects={[]}
+        onClose={vi.fn()}
+        onSetDefaultIntegrationMode={vi.fn()}
+        onSetProjectIntegrationMode={vi.fn()}
+      />,
+    );
+
+    expect(enNoTailscaleHtml).toContain("Android Quick Setup (QR Code)");
+    expect(enNoTailscaleHtml).toContain("Download Android App");
+    expect(enNoTailscaleHtml).toContain("Link with Desktop (Pairing)");
+    expect(enNoTailscaleHtml).toContain('data-testid="remote-access-qr-pair"');
+    expect(enNoTailscaleHtml).toContain('data-testid="remote-access-qr-tailscale-warning"');
   });
 });

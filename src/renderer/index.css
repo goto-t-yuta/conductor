@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
 
 @layer base {
   html,
@@ -150,6 +151,12 @@
 }
 
 .conductor-markdown img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.conductor-markdown video {
   max-width: 100%;
   height: auto;
   border-radius: 8px;
@@ -396,4 +403,14 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Interactive Terminal (xterm.js) layout & polish */
+.conductor-terminal-host .xterm {
+  height: 100%;
+  width: 100%;
+}
+
+.conductor-terminal-host .xterm-viewport {
+  overflow-y: auto !important;
 }

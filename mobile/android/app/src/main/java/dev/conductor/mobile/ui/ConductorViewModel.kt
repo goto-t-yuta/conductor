@@ -73,14 +73,25 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun handleIncomingConnectUri(rawUri: String) {
-        val parsed = ConnectUriParser.parse(rawUri) ?: return
-        _uiState.update {
-            it.copy(
-                pendingDeepLinkConfig = parsed,
-                bannerMessage = "接続 URI を読み込みました (${parsed.serverUrl})",
-            )
+    fun handleIncomingConnectUri(rawUri: String): Boolean {
+        val parsed = ConnectUriParser.parse(rawUri) ?: run {
+            _uiState.update {
+                it.copy(bannerMessage = "無効なリンク形式です（Step 2 の QR または接続 URI を使用してください）")
+            }
+            return false
         }
+        viewModelScope.launch {
+            store.save(parsed)
+            _uiState.update {
+                it.copy(
+                    pendingDeepLinkConfig = parsed,
+                    lastTestResult = null,
+                    bannerMessage = "デスクトップとリンクしました (${parsed.serverUrl})",
+                )
+            }
+            startRealtimeSync(parsed)
+        }
+        return true
     }
 
     fun consumePendingDeepLink() {

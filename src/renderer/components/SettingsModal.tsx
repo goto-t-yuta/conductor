@@ -1,13 +1,23 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
+  ArrowUpCircle,
   BarChart3,
   Check,
+  CheckCircle2,
   Copy,
+  Download,
+  ExternalLink,
   Eye,
   EyeOff,
+  FolderOpen,
   GitBranch,
   Globe,
+  Link2,
+  Loader2,
   Mic,
+  Power,
+  QrCode,
   RefreshCw,
   Search,
   Settings,
@@ -22,13 +32,18 @@ import {
   type UiLocale,
 } from "../../shared/i18n.js";
 import { DEFAULT_PREFERRED_LANGUAGE, LANGUAGE_OPTIONS } from "../../shared/language.js";
+import { ANDROID_APK_DOWNLOAD_URL } from "../../shared/remote-access.js";
 import type {
+  AppUpdateState,
   IntegrationMode,
   PreferredLanguage,
   Project,
+  ProviderQuotasMap,
   RemoteAccessStatus,
+  UsageBudgetSettings,
   UsageRecord,
 } from "../../shared/types.js";
+import { formatBytes, formatPlatformArchLabel } from "../../shared/updater.js";
 import {
   DEFAULT_VOICE_AUTO_SEND,
   DEFAULT_VOICE_READBACK_ENABLED,
@@ -37,6 +52,7 @@ import {
   getIntegrationModeOption,
   getIntegrationModeOptions,
 } from "../lib/integration-mode.js";
+import { QrCodeSvg } from "./QrCodeSvg.js";
 import { UsagePanel } from "./UsagePanel.js";
 
 export type SettingsModalTab = "general" | "usage";
@@ -52,7 +68,11 @@ export interface SettingsModalProps {
   projects: Project[];
   initialTab?: SettingsModalTab;
   usageRecords?: UsageRecord[];
+  usageBudgets?: UsageBudgetSettings;
+  providerQuotas?: ProviderQuotasMap;
   onClearUsage?: () => void;
+  onUpdateUsageBudgets?: (budgets: UsageBudgetSettings) => void;
+  onRefreshProviderQuotas?: () => void | Promise<unknown>;
   onClose: () => void;
   onSetDefaultIntegrationMode: (mode: IntegrationMode) => void;
   onSetAutoLandOnComplete?: (enabled: boolean) => void;
@@ -64,7 +84,431 @@ export interface SettingsModalProps {
   onSetRemoteAccessPort?: (port: number) => void;
   onRegenerateRemoteAccessToken?: () => void;
   onRefreshRemoteAccessStatus?: () => void;
+  appUpdate?: AppUpdateState | null;
+  onCheckForUpdates?: () => void;
+  onDownloadAndOpenUpdate?: () => void;
+  onCancelUpdateDownload?: () => void;
+  onOpenDownloadedUpdate?: () => void;
+  onShowDownloadedUpdateInFolder?: () => void;
+  onOpenUpdateReleasePage?: (url?: string) => void;
 }
+
+export interface AppUpdateSettingsSectionProps {
+  appUpdate: AppUpdateState;
+  locale?: UiLocale;
+  onCheckForUpdates?: () => void;
+  onDownloadAndOpenUpdate?: () => void;
+  onCancelUpdateDownload?: () => void;
+  onOpenDownloadedUpdate?: () => void;
+  onShowDownloadedUpdateInFolder?: () => void;
+  onOpenUpdateReleasePage?: (url?: string) => void;
+}
+
+function formatUpdateTimestamp(iso: string | null, locale: UiLocale): string {
+  if (!iso) return t(locale, "update.notCheckedYet");
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  try {
+    return new Intl.DateTimeFormat(locale === "ja" ? "ja-JP" : "en-US", {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(date);
+  } catch {
+    return date.toLocaleString();
+  }
+}
+
+function resolveUpdateErrorText(appUpdate: AppUpdateState, locale: UiLocale): string | null {
+  if (!appUpdate.errorCode && !appUpdate.error) return null;
+  switch (appUpdate.errorCode) {
+    case "network":
+      return t(locale, "update.errorNetwork");
+    case "rate_limit":
+      return t(locale, "update.errorRateLimit");
+    case "no_release":
+      return t(locale, "update.errorNoRelease");
+    case "download_failed":
+      return t(locale, "update.errorDownloadFailed");
+    case "open_failed":
+      return t(locale, "update.errorOpenFailed");
+    case "no_asset":
+      return t(locale, "update.noAssetForPlatform", {
+        platform: formatPlatformArchLabel(appUpdate.platform, appUpdate.arch),
+      });
+    default:
+      return appUpdate.error;
+  }
+}
+
+export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> = ({
+  appUpdate,
+  locale = "ja",
+  onCheckForUpdates,
+  onDownloadAndOpenUpdate,
+  onCancelUpdateDownload,
+  onOpenDownloadedUpdate,
+  onShowDownloadedUpdateInFolder,
+  onOpenUpdateReleasePage,
+}) => {
+  const isChecking = appUpdate.status === "checking";
+  const isDownloading = appUpdate.status === "downloading";
+  const isDownloaded = appUpdate.status === "downloaded";
+  const isAvailable = appUpdate.status === "available";
+  const isUpToDate = appUpdate.status === "up_to_date";
+  const isError = appUpdate.status === "error";
+  const release = appUpdate.latestRelease;
+  const asset = release?.selectedAsset ?? null;
+  const progress = appUpdate.downloadProgress;
+  const platformLabel = formatPlatformArchLabel(appUpdate.platform, appUpdate.arch);
+  const localizedError = resolveUpdateErrorText(appUpdate, locale);
+
+  const currentVersionDisplay = appUpdate.currentTag
+    ? appUpdate.currentTag
+    : appUpdate.currentCommitSha
+      ? `v${appUpdate.currentVersion} (${appUpdate.currentCommitSha})`
+      : `v${appUpdate.currentVersion}`;
+
+  const statusBadge = (() => {
+    if (isAvailable) {
+      return {
+        label: t(locale, "update.statusAvailable"),
+        cls: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-300",
+      };
+    }
+    if (isDownloading) {
+      return {
+        label: t(locale, "update.statusDownloading"),
+        cls: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-300",
+      };
+    }
+    if (isDownloaded) {
+      return {
+        label: t(locale, "update.statusDownloaded"),
+        cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+      };
+    }
+    if (isUpToDate) {
+      return {
+        label: t(locale, "update.statusUpToDate"),
+        cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+      };
+    }
+    if (isError) {
+      return {
+        label: t(locale, "update.statusError"),
+        cls: "bg-rose-500/15 text-rose-600 dark:text-rose-300",
+      };
+    }
+    return null;
+  })();
+
+  return (
+    <section
+      data-testid="app-update-section"
+      className="space-y-3"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h3 className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5 flex-wrap">
+            <ArrowUpCircle className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+            <span>{t(locale, "update.title")}</span>
+            {statusBadge && (
+              <span
+                data-testid="app-update-status-badge"
+                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${statusBadge.cls}`}
+              >
+                {statusBadge.label}
+              </span>
+            )}
+            {appUpdate.isDevMode && (
+              <span
+                data-testid="app-update-dev-badge"
+                className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300"
+              >
+                {t(locale, "update.devModeBadge")}
+              </span>
+            )}
+          </h3>
+          <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+            {t(locale, "update.desc")}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          data-testid="app-update-check-btn"
+          disabled={isChecking || isDownloading}
+          onClick={() => onCheckForUpdates?.()}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shrink-0"
+        >
+          <RefreshCw className={`w-3 h-3 ${isChecking ? "animate-spin" : ""}`} />
+          <span>
+            {isChecking ? t(locale, "update.checkingBtn") : t(locale, "update.checkBtn")}
+          </span>
+        </button>
+      </div>
+
+      <div className="p-3.5 rounded-xl bg-zinc-50/80 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800 space-y-3">
+        {/* Version summary row */}
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="space-y-0.5 min-w-0">
+            <div className="text-[10.5px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t(locale, "update.currentVersionLabel")}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <code
+                data-testid="app-update-current-version"
+                className="text-[12px] font-mono font-semibold text-zinc-900 dark:text-zinc-100"
+              >
+                {currentVersionDisplay}
+              </code>
+              <span className="px-1.5 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 text-[10px] font-mono text-zinc-600 dark:text-zinc-400">
+                {platformLabel}
+              </span>
+            </div>
+          </div>
+
+          <div className="text-right space-y-0.5">
+            {release && (
+              <div className="text-[11px] font-mono text-zinc-700 dark:text-zinc-300">
+                <span className="text-zinc-400 mr-1">{t(locale, "update.latestVersionLabel")}:</span>
+                <span data-testid="app-update-latest-version" className="font-semibold">
+                  {release.tagName}
+                </span>
+              </div>
+            )}
+            <div className="text-[10.5px] text-zinc-400">
+              {t(locale, "update.lastChecked", {
+                time: formatUpdateTimestamp(appUpdate.lastCheckedAt, locale),
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Dev mode info notice */}
+        {appUpdate.isDevMode && (
+          <div className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-200 leading-relaxed">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            <span>{t(locale, "update.devModeHint")}</span>
+          </div>
+        )}
+
+        {/* Up-to-date message */}
+        {isUpToDate && (
+          <div
+            data-testid="app-update-uptodate"
+            className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-[11.5px] text-emerald-700 dark:text-emerald-300"
+          >
+            <div className="flex items-center gap-1.5">
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+              <span>{t(locale, "update.upToDateMessage")}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => onOpenUpdateReleasePage?.(release?.htmlUrl)}
+              className="inline-flex items-center gap-1 text-[11px] font-medium hover:underline cursor-pointer shrink-0"
+            >
+              <span>{t(locale, "update.openReleasePageBtn")}</span>
+              <ExternalLink className="w-3 h-3" />
+            </button>
+          </div>
+        )}
+
+        {/* Release details when update is available / downloading / downloaded */}
+        {release && (appUpdate.updateAvailable || isDownloading || isDownloaded) && (
+          <div className="space-y-2.5 pt-1 border-t border-zinc-200/80 dark:border-zinc-800">
+            {/* Release notes excerpt */}
+            {release.notesExcerpt && (
+              <div className="space-y-1">
+                <div className="text-[10.5px] font-semibold text-zinc-500 dark:text-zinc-400">
+                  {t(locale, "update.releaseNotesTitle")}
+                </div>
+                <pre
+                  data-testid="app-update-release-notes"
+                  className="text-[11px] font-sans whitespace-pre-wrap break-words text-zinc-700 dark:text-zinc-300 bg-white/90 dark:bg-zinc-950/70 border border-zinc-200/80 dark:border-zinc-800 rounded-lg p-2.5 max-h-36 overflow-y-auto leading-relaxed"
+                >
+                  {release.notesExcerpt}
+                </pre>
+              </div>
+            )}
+
+            {/* Selected installer asset info */}
+            {asset ? (
+              <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-600 dark:text-zinc-300">
+                <span className="text-zinc-400 shrink-0">
+                  {t(locale, "update.selectedAssetLabel")}:
+                </span>
+                <span
+                  data-testid="app-update-selected-asset"
+                  className="font-mono truncate"
+                  title={asset.name}
+                >
+                  {asset.name}
+                  {asset.size > 0 ? ` (${formatBytes(asset.size)})` : ""}
+                </span>
+              </div>
+            ) : (
+              <div className="px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-200">
+                {t(locale, "update.noAssetForPlatform", { platform: platformLabel })}
+              </div>
+            )}
+
+            {/* Download progress bar */}
+            {isDownloading && progress && (
+              <div data-testid="app-update-progress" className="space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-indigo-600 dark:text-indigo-300 font-medium tabular-nums">
+                  <span className="inline-flex items-center gap-1.5">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    {progress.percent !== null && progress.totalBytes
+                      ? t(locale, "update.downloadingProgress", {
+                          percent: progress.percent,
+                          downloaded: formatBytes(progress.downloadedBytes),
+                          total: formatBytes(progress.totalBytes),
+                        })
+                      : t(locale, "update.downloadingProgressIndeterminate", {
+                          downloaded: formatBytes(progress.downloadedBytes),
+                        })}
+                  </span>
+                </div>
+                <div className="h-2 w-full rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+                  <div
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={progress.percent ?? undefined}
+                    className={`h-full rounded-full bg-indigo-500 transition-all duration-150 ${
+                      progress.percent === null ? "w-1/2 animate-pulse" : ""
+                    }`}
+                    style={
+                      progress.percent !== null
+                        ? { width: `${Math.max(2, Math.min(100, progress.percent))}%` }
+                        : undefined
+                    }
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Downloaded hint */}
+            {isDownloaded && (
+              <div
+                data-testid="app-update-downloaded-hint"
+                className="px-2.5 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-[11px] text-emerald-700 dark:text-emerald-300 leading-relaxed"
+              >
+                {appUpdate.openedInstaller
+                  ? t(locale, "update.downloadedOpenedHint")
+                  : t(locale, "update.downloadedManualHint")}
+              </div>
+            )}
+
+            {/* Action buttons */}
+            <div className="flex items-center gap-2 flex-wrap pt-0.5">
+              {isAvailable && asset && (
+                <button
+                  type="button"
+                  data-testid="app-update-download-btn"
+                  onClick={() => onDownloadAndOpenUpdate?.()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-xs transition-colors cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{t(locale, "update.downloadAndOpenBtn")}</span>
+                </button>
+              )}
+
+              {isDownloading && (
+                <button
+                  type="button"
+                  data-testid="app-update-cancel-btn"
+                  onClick={() => onCancelUpdateDownload?.()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-medium bg-zinc-200/80 dark:bg-zinc-800 hover:bg-zinc-300/80 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  <span>{t(locale, "update.cancelDownloadBtn")}</span>
+                </button>
+              )}
+
+              {isDownloaded && (
+                <>
+                  <button
+                    type="button"
+                    data-testid="app-update-open-installer-btn"
+                    onClick={() => onOpenDownloadedUpdate?.()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-xs transition-colors cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{t(locale, "update.openInstallerBtn")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="app-update-show-folder-btn"
+                    onClick={() => onShowDownloadedUpdateInFolder?.()}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 text-zinc-700 dark:text-zinc-200 cursor-pointer"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    <span>{t(locale, "update.showInFolderBtn")}</span>
+                  </button>
+                </>
+              )}
+
+              <button
+                type="button"
+                data-testid="app-update-open-release-btn"
+                onClick={() => onOpenUpdateReleasePage?.(release.htmlUrl)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 text-zinc-700 dark:text-zinc-200 cursor-pointer"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>{t(locale, "update.openReleasePageBtn")}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Error notice with fallback button */}
+        {(isError || (isDownloaded && appUpdate.errorCode === "open_failed")) && localizedError && (
+          <div
+            data-testid="app-update-error"
+            className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11.5px] text-rose-700 dark:text-rose-300 space-y-2"
+          >
+            <div className="flex items-start gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <div className="space-y-0.5 min-w-0">
+                <div>{localizedError}</div>
+                {appUpdate.error && appUpdate.error !== localizedError && (
+                  <div className="text-[10.5px] font-mono opacity-80 break-all">
+                    {appUpdate.error}
+                  </div>
+                )}
+              </div>
+            </div>
+            {isError && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onCheckForUpdates?.()}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-white dark:bg-zinc-900 border border-rose-300 dark:border-rose-700/60 hover:bg-rose-50 dark:hover:bg-rose-950/50 cursor-pointer"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>{t(locale, "common.retry")}</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="app-update-error-release-btn"
+                  onClick={() => onOpenUpdateReleasePage?.(release?.htmlUrl)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-200 hover:border-indigo-500/60 cursor-pointer"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>{t(locale, "update.openReleasePageBtn")}</span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+};
 
 export interface LanguageSettingsSectionProps {
   preferredLanguage: PreferredLanguage;
@@ -139,6 +583,7 @@ export const LanguageSettingsSection: React.FC<LanguageSettingsSectionProps> = (
 
 export interface RemoteAccessSettingsSectionProps {
   remoteAccess: RemoteAccessStatus;
+  locale?: UiLocale;
   onSetRemoteAccessEnabled?: (enabled: boolean) => void;
   onSetRemoteAccessPort?: (port: number) => void;
   onRegenerateRemoteAccessToken?: () => void;
@@ -147,6 +592,7 @@ export interface RemoteAccessSettingsSectionProps {
 
 export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionProps> = ({
   remoteAccess,
+  locale = "ja",
   onSetRemoteAccessEnabled,
   onSetRemoteAccessPort,
   onRegenerateRemoteAccessToken,
@@ -183,6 +629,8 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
       ? `${remoteAccess.token.slice(0, 6)}${"•".repeat(16)}${remoteAccess.token.slice(-4)}`
       : "•".repeat(16);
 
+  const canShowPairingQr = Boolean(remoteAccess.running && remoteAccess.connectUri);
+
   return (
     <section
       data-testid="remote-access-section"
@@ -192,21 +640,21 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         <div>
           <h3 className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
             <Smartphone className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-            <span>リモートアクセス / Tailscale Mobile Bridge</span>
+            <span>{t(locale, "remote.title")}</span>
           </h3>
           <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-            Tailscale 経由で Android アプリやモバイルブラウザから Conductor のチャット・タスクをリアルタイム操作します。
+            {t(locale, "remote.desc")}
           </p>
         </div>
         <button
           type="button"
           data-testid="remote-access-refresh"
           onClick={() => onRefreshRemoteAccessStatus?.()}
-          title="Tailscale ネットワーク情報を再検出"
+          title={t(locale, "remote.refreshTitle")}
           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 cursor-pointer shrink-0"
         >
           <RefreshCw className="w-3 h-3" />
-          <span>再検出</span>
+          <span>{t(locale, "remote.refreshBtn")}</span>
         </button>
       </div>
 
@@ -226,7 +674,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         <div className="space-y-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100">
-              Remote Bridge サーバーを有効化
+              {t(locale, "remote.toggleTitle")}
             </span>
             <span
               className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
@@ -238,15 +686,16 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               }`}
             >
               {remoteAccess.running
-                ? `稼働中 · SSE ${remoteAccess.connectedClients}台`
+                ? t(locale, "remote.statusRunning", { count: remoteAccess.connectedClients })
                 : remoteAccess.error
-                  ? "エラー"
-                  : "停止中"}
+                  ? t(locale, "remote.statusError")
+                  : t(locale, "remote.statusStopped")}
             </span>
           </div>
           <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-            ON の間のみ <code className="font-mono text-[10.5px]">0.0.0.0:{remoteAccess.port}</code>{" "}
-            で待受し、すべての API に Bearer Token 認証を必須とします。
+            {t(locale, "remote.toggleDescBeforeCode")}
+            <code className="font-mono text-[10.5px]">0.0.0.0:{remoteAccess.port}</code>
+            {t(locale, "remote.toggleDescAfterCode")}
           </p>
         </div>
         <span
@@ -269,6 +718,149 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         </div>
       )}
 
+      {/* 2-Step Android QR Quick Setup */}
+      <div
+        data-testid="remote-access-qr-panel"
+        className="p-3.5 rounded-xl bg-zinc-50/80 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800 space-y-3"
+      >
+        <div className="flex items-start gap-2">
+          <QrCode className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <h4 className="text-[12px] font-semibold text-zinc-900 dark:text-zinc-100">
+              {t(locale, "remote.qrHeading")}
+            </h4>
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+              {t(locale, "remote.qrSubheading")}
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Step 1: Android APK Download QR */}
+          <div
+            data-testid="remote-access-qr-download-card"
+            className="flex flex-col justify-between gap-2.5 p-3 rounded-xl bg-white dark:bg-zinc-950/80 border border-zinc-200 dark:border-zinc-800"
+          >
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-300">
+                  <Download className="w-2.5 h-2.5" />
+                  <span>{t(locale, "remote.step1Badge")}</span>
+                </span>
+                <span className="text-[12px] font-semibold text-zinc-900 dark:text-zinc-100">
+                  {t(locale, "remote.step1Title")}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                {t(locale, "remote.step1Desc")}
+              </p>
+            </div>
+
+            <div className="flex justify-center py-1">
+              <QrCodeSvg
+                value={ANDROID_APK_DOWNLOAD_URL}
+                size={136}
+                ariaLabel={t(locale, "remote.step1QrAria")}
+                testId="remote-access-qr-download"
+              />
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <code
+                data-testid="remote-access-apk-url"
+                title={ANDROID_APK_DOWNLOAD_URL}
+                className="flex-1 min-w-0 truncate px-2 py-1 rounded-md bg-zinc-100/90 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800 font-mono text-[10px] text-zinc-600 dark:text-zinc-300"
+              >
+                {ANDROID_APK_DOWNLOAD_URL}
+              </code>
+              <button
+                type="button"
+                data-testid="remote-access-apk-copy"
+                onClick={() => copyText("apkUrl", ANDROID_APK_DOWNLOAD_URL)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-medium bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 text-zinc-700 dark:text-zinc-200 cursor-pointer shrink-0"
+              >
+                {copiedKey === "apkUrl" ? (
+                  <Check className="w-3 h-3 text-emerald-500" />
+                ) : (
+                  <Copy className="w-3 h-3" />
+                )}
+                <span>
+                  {copiedKey === "apkUrl"
+                    ? t(locale, "remote.copiedBtn")
+                    : t(locale, "remote.step1CopyUrl")}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {/* Step 2: Desktop Pairing QR */}
+          <div
+            data-testid="remote-access-qr-pair-card"
+            className="flex flex-col justify-between gap-2.5 p-3 rounded-xl bg-white dark:bg-zinc-950/80 border border-zinc-200 dark:border-zinc-800"
+          >
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-500/12 text-emerald-700 dark:text-emerald-300">
+                  <Link2 className="w-2.5 h-2.5" />
+                  <span>{t(locale, "remote.step2Badge")}</span>
+                </span>
+                <span className="text-[12px] font-semibold text-zinc-900 dark:text-zinc-100">
+                  {t(locale, "remote.step2Title")}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                {canShowPairingQr
+                  ? t(locale, "remote.step2DescActive")
+                  : t(locale, "remote.step2DisabledDesc")}
+              </p>
+            </div>
+
+            {canShowPairingQr && remoteAccess.connectUri ? (
+              <>
+                <div className="flex justify-center py-1">
+                  <QrCodeSvg
+                    value={remoteAccess.connectUri}
+                    size={136}
+                    ariaLabel={t(locale, "remote.step2QrAria")}
+                    testId="remote-access-qr-pair"
+                  />
+                </div>
+                <div className="space-y-1">
+                  {!remoteAccess.tailscaleIp && (
+                    <div
+                      data-testid="remote-access-qr-tailscale-warning"
+                      className="flex items-start gap-1.5 px-2 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[10px] text-amber-700 dark:text-amber-300 leading-snug"
+                    >
+                      <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+                      <span>{t(locale, "remote.step2TailscaleWarning")}</span>
+                    </div>
+                  )}
+                  <p className="text-[10px] text-zinc-500 dark:text-zinc-400 leading-snug">
+                    {t(locale, "remote.step2TokenHint")}
+                  </p>
+                </div>
+              </>
+            ) : (
+              <div
+                data-testid="remote-access-qr-pair-disabled"
+                className="flex-1 flex flex-col items-center justify-center gap-2.5 py-4 px-3 rounded-xl border border-dashed border-zinc-300 dark:border-zinc-700 bg-zinc-50/70 dark:bg-zinc-900/50 text-center"
+              >
+                <QrCode className="w-8 h-8 text-zinc-400 dark:text-zinc-600" />
+                <button
+                  type="button"
+                  data-testid="remote-access-qr-enable-btn"
+                  onClick={() => onSetRemoteAccessEnabled?.(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-xs transition-colors cursor-pointer"
+                >
+                  <Power className="w-3.5 h-3.5" />
+                  <span>{t(locale, "remote.step2EnableBtn")}</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* Connection Details Box */}
       <div className="p-3.5 rounded-xl bg-zinc-50/80 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800 space-y-3">
         {/* Port & Tailscale Info */}
@@ -278,7 +870,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               htmlFor="remote-access-port"
               className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400"
             >
-              ポート番号（既定: 4789）
+              {t(locale, "remote.portLabel")}
             </label>
             <div className="flex items-center gap-1.5">
               <input
@@ -300,20 +892,20 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
                 onClick={applyPort}
                 className="px-2.5 py-1 rounded-lg text-[11.5px] font-medium bg-zinc-200/80 dark:bg-zinc-800 hover:bg-zinc-300/80 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 cursor-pointer"
               >
-                適用
+                {t(locale, "remote.applyBtn")}
               </button>
             </div>
           </div>
 
           <div className="space-y-1">
             <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-              Tailscale 検出結果
+              {t(locale, "remote.tailscaleDetection")}
             </div>
             <div className="text-[11.5px] font-mono text-zinc-800 dark:text-zinc-200 space-y-0.5">
               <div>
                 IPv4:{" "}
                 <span data-testid="remote-access-tailscale-ip">
-                  {remoteAccess.tailscaleIp ?? "未検出"}
+                  {remoteAccess.tailscaleIp ?? t(locale, "remote.notDetected")}
                 </span>
               </div>
               {remoteAccess.magicDnsName && (
@@ -328,7 +920,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         {/* Connection URL */}
         <div className="space-y-1">
           <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-            接続 URL（Android Chrome でもそのまま開けます）
+            {t(locale, "remote.urlLabel")}
           </div>
           <div className="flex items-center gap-1.5">
             <code
@@ -347,7 +939,9 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               ) : (
                 <Copy className="w-3 h-3" />
               )}
-              <span>{copiedKey === "url" ? "コピー済み" : "コピー"}</span>
+              <span>
+                {copiedKey === "url" ? t(locale, "remote.copiedBtn") : t(locale, "remote.copyBtn")}
+              </span>
             </button>
           </div>
           {remoteAccess.magicDnsUrl && remoteAccess.magicDnsUrl !== remoteAccess.url && (
@@ -358,7 +952,9 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
                 onClick={() => copyText("magicdns", remoteAccess.magicDnsUrl)}
                 className="text-indigo-500 hover:underline shrink-0 cursor-pointer"
               >
-                {copiedKey === "magicdns" ? "コピー済み" : "コピー"}
+                {copiedKey === "magicdns"
+                  ? t(locale, "remote.copiedBtn")
+                  : t(locale, "remote.copyBtn")}
               </button>
             </div>
           )}
@@ -367,7 +963,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         {/* Bearer Token */}
         <div className="space-y-1">
           <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-            Bearer Token
+            {t(locale, "remote.bearerTokenLabel")}
           </div>
           <div className="flex items-center gap-1.5">
             <code
@@ -379,7 +975,9 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
             <button
               type="button"
               onClick={() => setShowToken((v) => !v)}
-              aria-label={showToken ? "トークンを隠す" : "トークンを表示"}
+              aria-label={
+                showToken ? t(locale, "remote.hideTokenAria") : t(locale, "remote.showTokenAria")
+              }
               className="p-1.5 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 cursor-pointer shrink-0"
             >
               {showToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
@@ -394,7 +992,11 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               ) : (
                 <Copy className="w-3 h-3" />
               )}
-              <span>{copiedKey === "token" ? "コピー済み" : "コピー"}</span>
+              <span>
+                {copiedKey === "token"
+                  ? t(locale, "remote.copiedBtn")
+                  : t(locale, "remote.copyBtn")}
+              </span>
             </button>
             <button
               type="button"
@@ -403,7 +1005,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 cursor-pointer shrink-0"
             >
               <RefreshCw className="w-3 h-3" />
-              <span>再生成</span>
+              <span>{t(locale, "remote.regenerateBtn")}</span>
             </button>
           </div>
         </div>
@@ -412,7 +1014,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         {remoteAccess.connectUri && (
           <div className="space-y-1">
             <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-              Android アプリ一括接続 URI（そのまま貼り付け可能）
+              {t(locale, "remote.connectUriLabel")}
             </div>
             <div className="flex items-center gap-1.5">
               <code
@@ -433,7 +1035,11 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
                 ) : (
                   <Copy className="w-3 h-3" />
                 )}
-                <span>{copiedKey === "uri" ? "コピー済み" : "URI コピー"}</span>
+                <span>
+                  {copiedKey === "uri"
+                    ? t(locale, "remote.copiedBtn")
+                    : t(locale, "remote.copyUriBtn")}
+                </span>
               </button>
             </div>
           </div>
@@ -589,7 +1195,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   projects,
   initialTab = "general",
   usageRecords = [],
+  usageBudgets,
+  providerQuotas,
   onClearUsage,
+  onUpdateUsageBudgets,
+  onRefreshProviderQuotas,
   onClose,
   onSetDefaultIntegrationMode,
   onSetAutoLandOnComplete,
@@ -601,6 +1211,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSetRemoteAccessPort,
   onRegenerateRemoteAccessToken,
   onRefreshRemoteAccessStatus,
+  appUpdate,
+  onCheckForUpdates,
+  onDownloadAndOpenUpdate,
+  onCancelUpdateDownload,
+  onOpenDownloadedUpdate,
+  onShowDownloadedUpdateInFolder,
+  onOpenUpdateReleasePage,
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsModalTab>(initialTab);
   const [projectSearch, setProjectSearch] = useState("");
@@ -613,6 +1230,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   useEffect(() => {
     onRefreshRemoteAccessStatus?.();
   }, []);
+
+  useEffect(() => {
+    if (activeTab === "usage") {
+      void onRefreshProviderQuotas?.();
+    }
+  }, [activeTab]);
 
   const filteredProjects = useMemo(() => {
     const q = projectSearch.trim().toLowerCase();
@@ -634,7 +1257,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-2xl max-h-[82vh] flex flex-col rounded-2xl bg-white dark:bg-[#161a22] border border-zinc-200 dark:border-zinc-800 shadow-2xl overflow-hidden"
+        className={`w-full ${
+          activeTab === "usage" ? "max-w-3xl" : "max-w-2xl"
+        } max-h-[84vh] flex flex-col rounded-2xl bg-white dark:bg-[#161a22] border border-zinc-200 dark:border-zinc-800 shadow-2xl overflow-hidden`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -702,9 +1327,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-6 select-text">
           {activeTab === "usage" ? (
-            <UsagePanel usageRecords={usageRecords} onClearUsage={onClearUsage} />
+            <UsagePanel
+              usageRecords={usageRecords}
+              usageBudgets={usageBudgets}
+              providerQuotas={providerQuotas}
+              locale={activeLocale}
+              onClearUsage={onClearUsage}
+              onUpdateBudgets={onUpdateUsageBudgets}
+              onRefreshProviderQuotas={onRefreshProviderQuotas}
+            />
           ) : (
             <>
+              {/* App Updates (GitHub Releases) */}
+              {appUpdate && (
+                <div className="border-b border-zinc-200 dark:border-zinc-800 pb-5">
+                  <AppUpdateSettingsSection
+                    appUpdate={appUpdate}
+                    locale={activeLocale}
+                    onCheckForUpdates={onCheckForUpdates}
+                    onDownloadAndOpenUpdate={onDownloadAndOpenUpdate}
+                    onCancelUpdateDownload={onCancelUpdateDownload}
+                    onOpenDownloadedUpdate={onOpenDownloadedUpdate}
+                    onShowDownloadedUpdateInFolder={onShowDownloadedUpdateInFolder}
+                    onOpenUpdateReleasePage={onOpenUpdateReleasePage}
+                  />
+                </div>
+              )}
+
               {/* Output Language Preference */}
               <LanguageSettingsSection
                 preferredLanguage={preferredLanguage}
@@ -725,6 +1374,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {remoteAccess && (
                 <RemoteAccessSettingsSection
                   remoteAccess={remoteAccess}
+                  locale={activeLocale}
                   onSetRemoteAccessEnabled={onSetRemoteAccessEnabled}
                   onSetRemoteAccessPort={onSetRemoteAccessPort}
                   onRegenerateRemoteAccessToken={onRegenerateRemoteAccessToken}

@@ -82,3 +82,17 @@ export function resolveTaskForTaskEvent(
 
   return undefined;
 }
+
+/**
+ * Builds a virtual Markdown file path anchored in the task's worktree or project root
+ * so relative image/video references inside task completion reports resolve cleanly.
+ */
+export function buildTaskMarkdownBasePath(
+  task?: Pick<AgentTask, "worktreePath" | "projectPath"> | null,
+): string | undefined {
+  const dir = task?.worktreePath?.trim() || task?.projectPath?.trim();
+  if (!dir) return undefined;
+  const normalized = dir.replace(/[/\\]+$/, "");
+  if (!normalized) return undefined;
+  return `${normalized}/__task_report__.md`;
+}

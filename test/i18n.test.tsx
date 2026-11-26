@@ -16,6 +16,7 @@ import { RightPaneProjectSwitcher } from "../src/renderer/components/RightPanePr
 import { SettingsModal } from "../src/renderer/components/SettingsModal.js";
 import { TaskInspectorModal } from "../src/renderer/components/TaskInspectorModal.js";
 import { TaskSidebar } from "../src/renderer/components/TaskSidebar.js";
+import { TerminalPane } from "../src/renderer/components/TerminalPane.js";
 import { TaskEventCard, UnifiedChat } from "../src/renderer/components/UnifiedChat.js";
 import { UnifiedRightPane } from "../src/renderer/components/UnifiedRightPane.js";
 import { deriveQuestionItems } from "../src/renderer/lib/questions.js";
@@ -265,6 +266,16 @@ describe("English UI rendering has zero leaked Japanese strings across all major
         projects={[SAMPLE_PROJECT]}
         tasks={[
           SAMPLE_TASK,
+          { ...SAMPLE_TASK, id: "task-2", taskNumber: 2, title: "Running task", status: "running" },
+          {
+            ...SAMPLE_TASK,
+            id: "task-4",
+            taskNumber: 4,
+            title: "Unassigned task",
+            projectId: null,
+            projectName: "",
+            status: "queued",
+          },
           { ...SAMPLE_TASK, id: "task-1", taskNumber: 1, title: "Done task", status: "done" },
         ]}
         questions={questions}
@@ -292,6 +303,8 @@ describe("English UI rendering has zero leaked Japanese strings across all major
     expect(sidebarHtml).toContain("Completed");
     expect(sidebarHtml).toContain("Questions");
     expect(sidebarHtml).toContain("Search questions...");
+    expect(sidebarHtml).toContain("Group by project: ON (click for flat list)");
+    expect(sidebarHtml).toContain("Unassigned");
     expect(sidebarHtml).not.toMatch(JAPANESE_CHAR_RE);
 
     const sidebarEmptyQuestionsSearchHtml = renderToStaticMarkup(
@@ -561,6 +574,22 @@ describe("English UI rendering has zero leaked Japanese strings across all major
         defaultIntegrationMode="feature-branch"
         autoLandOnComplete={true}
         preferredLanguage="en"
+        remoteAccess={{
+          enabled: true,
+          running: true,
+          port: 4789,
+          token: "abcdef0123456789abcdef0123456789",
+          bindHost: "0.0.0.0",
+          tailscaleIp: "100.121.247.7",
+          magicDnsName: "macbook-pro.taile00453.ts.net",
+          lanIp: "192.168.1.5",
+          url: "http://100.121.247.7:4789",
+          magicDnsUrl: "http://macbook-pro.taile00453.ts.net:4789",
+          connectUri:
+            "conductor://connect?url=http%3A%2F%2F100.121.247.7%3A4789&token=abcdef0123456789abcdef0123456789",
+          connectedClients: 1,
+          error: null,
+        }}
         projects={[SAMPLE_PROJECT]}
         onClose={vi.fn()}
         onSetDefaultIntegrationMode={vi.fn()}
@@ -571,9 +600,48 @@ describe("English UI rendering has zero leaked Japanese strings across all major
     );
     expect(settingsHtml).toContain("Conductor Settings");
     expect(settingsHtml).toContain("Language / Output Language");
+    expect(settingsHtml).toContain("Remote Access / Tailscale Mobile Bridge");
+    expect(settingsHtml).toContain("Android Quick Setup (QR Code)");
     expect(settingsHtml).toContain("Git Worktree Integration Mode (Global Default)");
     expect(settingsHtml).toContain("Per-Project Overrides");
     expect(settingsHtml).toContain("Close");
+    expect(settingsHtml).not.toContain("リモートアクセス");
+    expect(settingsHtml).not.toContain("稼働中");
+
+    const usageSettingsHtml = renderToStaticMarkup(
+      <SettingsModal
+        defaultIntegrationMode="feature-branch"
+        preferredLanguage="en"
+        initialTab="usage"
+        projects={[SAMPLE_PROJECT]}
+        usageRecords={[
+          {
+            id: "u-en-1",
+            timestamp: "2026-11-26T02:00:00.000Z",
+            source: "chat",
+            provider: "codex",
+            model: "gpt-5.4",
+            projectName: null,
+            inputTokens: 2000,
+            cachedInputTokens: 1000,
+            outputTokens: 500,
+            costUsd: 0.0125,
+            isEstimated: true,
+            turnCount: 1,
+          },
+        ]}
+        onClearUsage={vi.fn()}
+        onUpdateUsageBudgets={vi.fn()}
+        onRefreshProviderQuotas={vi.fn()}
+        onClose={vi.fn()}
+        onSetDefaultIntegrationMode={vi.fn()}
+        onSetProjectIntegrationMode={vi.fn()}
+      />,
+    );
+    expect(usageSettingsHtml).toContain("Weekly &amp; Monthly Quota");
+    expect(usageSettingsHtml).toContain("General Chat");
+    expect(usageSettingsHtml).toContain("Reset History");
+    expect(usageSettingsHtml).not.toMatch(JAPANESE_CHAR_RE);
 
     const taskEventHtml = renderToStaticMarkup(
       <TaskEventCard
@@ -694,5 +762,39 @@ describe("Main-process ConductorController TaskEvent localization", () => {
       .messages.filter((m) => m.role === "taskEvent")
       .at(-1);
     expect(jaEvent?.text).toContain("— 完了（確認待ち）");
+  });
+
+  it("renders TerminalPane cleanly in both Japanese and English with zero leaked Japanese in English mode", () => {
+    expect(t("ja", "rightPane.newTerminalTabBtn")).toBe("新しいターミナル");
+    expect(t("en", "rightPane.newTerminalTabBtn")).toBe("New Terminal");
+    expect(t("ja", "terminal.restartBtn")).toBe("再起動");
+    expect(t("en", "terminal.restartBtn")).toBe("Restart");
+
+    const enTerminalHtml = renderToStaticMarkup(
+      <TerminalPane
+        tab={{
+          id: "term-en",
+          title: "zsh",
+          cwd: "/workspace/acme-web",
+          shell: "/bin/zsh",
+          shellName: "zsh",
+          pid: 1234,
+          backend: "node-pty",
+          projectId: SAMPLE_PROJECT.id,
+          status: "exited",
+          exitCode: 0,
+          error: null,
+          sequenceNumber: 1,
+        }}
+        isVisible={true}
+        locale="en"
+        onRestart={vi.fn()}
+        onNewTerminalTab={vi.fn()}
+        onRevealInFinder={vi.fn()}
+      />,
+    );
+    expect(enTerminalHtml).toContain("Exited (code 0)");
+    expect(enTerminalHtml).toContain("Restart");
+    expect(enTerminalHtml).not.toMatch(JAPANESE_CHAR_RE);
   });
 });

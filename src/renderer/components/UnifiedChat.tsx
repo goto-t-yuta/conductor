@@ -12,6 +12,9 @@ import {
   ChevronDown,
   ChevronRight,
   Crosshair,
+  Download,
+  ExternalLink,
+  FolderOpen,
   FolderPlus,
   GitMerge,
   GitPullRequest,
@@ -40,6 +43,7 @@ import type {
   AgentTask,
   AgentTaskStatus,
   AppSnapshot,
+  AppUpdateState,
   ChatAttachment,
   ChatMessage,
   ExplicitMentionTarget,
@@ -66,7 +70,13 @@ import {
   requiresLandBeforeDone,
   validateManualTaskStatusTransition,
 } from "../../shared/task-status.js";
-import { formatTokenCount, formatUsdCost, summarizeUsage } from "../../shared/usage.js";
+import {
+  evaluateUsageBudget,
+  formatTokenCount,
+  formatUsdCost,
+  normalizeUsageBudgetSettings,
+  summarizeAllUsagePeriods,
+} from "../../shared/usage.js";
 import { resolveUiLocale, t, type UiLocale } from "../../shared/i18n.js";
 import {
   appendVoiceTranscript,
@@ -79,14 +89,16 @@ import {
   formatToolChipsSummary,
 } from "../lib/activity-log.js";
 import { isViewableImageAttachment } from "../lib/image-viewer.js";
-import { resolveTaskForTaskEvent } from "../lib/task-event.js";
+import type { MarkdownImageCache } from "../lib/markdown-image-cache.js";
+import type { MarkdownVideoCache } from "../lib/markdown-video-cache.js";
+import { buildTaskMarkdownBasePath, resolveTaskForTaskEvent } from "../lib/task-event.js";
 import { getQuickStatusTransition } from "../lib/task-sidebar.js";
 import {
   getSpeechRecognitionConstructor,
   type BrowserSpeechRecognition,
 } from "../lib/voice-client.js";
 import { ChatSessionControls } from "./ChatHistoryMenu.js";
-import { MarkdownView } from "./MarkdownView.js";
+import { MarkdownView, type MarkdownOpenedImage } from "./MarkdownView.js";
 import { UserMessageMentionBadges } from "./MentionBadges.js";
 import { DraftMentionContextBar } from "./MentionChips.js";
 import { MentionPopover } from "./MentionPopover.js";
@@ -164,6 +176,7 @@ interface UnifiedChatProps {
       draftMentions?: ExplicitMentionTarget[];
     },
   ) => void;
+  onOpenMarkdownImage?: (image: MarkdownOpenedImage, context?: { message?: ChatMessage }) => void;
   onOpenTask: (taskId: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
@@ -187,6 +200,13 @@ interface UnifiedChatProps {
   onToggleVoiceReadback?: () => void;
   onStopSpeaking?: () => void;
   onToggleVoiceAutoSend?: () => void;
+  appUpdate?: AppUpdateState | null;
+  updateBannerDismissed?: boolean;
+  onDismissUpdateBanner?: () => void;
+  onDownloadAndOpenUpdate?: () => void;
+  onOpenDownloadedUpdate?: () => void;
+  onShowDownloadedUpdateInFolder?: () => void;
+  onOpenUpdateReleasePage?: (url?: string) => void;
 }
 
 export const UnifiedChat: React.FC<UnifiedChatProps> = ({
@@ -219,6 +239,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImageAttachment,
+  onOpenMarkdownImage,
   onOpenTask,
   onUpdateTaskStatus,
   onLandTask,
@@ -242,6 +263,13 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   onToggleVoiceReadback,
   onStopSpeaking,
   onToggleVoiceAutoSend,
+  appUpdate = null,
+  updateBannerDismissed = false,
+  onDismissUpdateBanner,
+  onDownloadAndOpenUpdate,
+  onOpenDownloadedUpdate,
+  onShowDownloadedUpdateInFolder,
+  onOpenUpdateReleasePage,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const contentContainerRef = useRef<HTMLDivElement>(null);
@@ -968,376 +996,580 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   const activeChatModel = chatProviderInfo?.models.find((m) => m.model === snapshot.chatModel);
   const activeWorkerModel = workerProviderInfo?.models.find((m) => m.model === snapshot.workerModel);
   const allProviders: AgentProvider[] = ["codex", "agy", "claude"];
-  const todayUsage = useMemo(
-    () => summarizeUsage(snapshot.usageRecords ?? [], "today"),
+  const usageSummaries = useMemo(
+    () => summarizeAllUsagePeriods(snapshot.usageRecords ?? []),
     [snapshot.usageRecords],
   );
-  const allTimeUsage = useMemo(
-    () => summarizeUsage(snapshot.usageRecords ?? [], "all"),
-    [snapshot.usageRecords],
-  );
+  const todayUsage = usageSummaries.today;
+  const allTimeUsage = usageSummaries.all;
+  const usageAlertSeverity = useMemo(() => {
+    const budgets = normalizeUsageBudgetSettings(snapshot.usageBudgets);
+    const w = evaluateUsageBudget(
+      usageSummaries.week.costUsd,
+      usageSummaries.week.totalTokens,
+      budgets.weekly,
+    );
+    const m = evaluateUsageBudget(
+      usageSummaries.month.costUsd,
+      usageSummaries.month.totalTokens,
+      budgets.monthly,
+    );
+    if (w.severity === "exceeded" || m.severity === "exceeded") return "exceeded";
+    if (w.severity === "warning" || m.severity === "warning") return "warning";
+    return "ok";
+  }, [usageSummaries.week, usageSummaries.month, snapshot.usageBudgets]);
+
+  const chatModelDisplayName = activeChatModel?.displayName ?? snapshot.chatModel ?? "Default";
+  const chatModelFullTitle = [
+    chatProviderInfo?.label ?? snapshot.chatProvider,
+    chatModelDisplayName,
+    snapshot.chatEffort,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
-    <section className="flex flex-col h-full min-w-0 bg-white dark:bg-[#0f1115]">
+    <section className="@container flex flex-col h-full min-w-0 bg-white dark:bg-[#0f1115]">
       {/* Top Bar */}
       <header
-        className={`drag-region h-11 flex items-center justify-between gap-2 pr-3 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 ${
-          snapshot.showTaskSidebar ? "pl-3" : "pl-[78px]"
-        }`}
+        data-testid="chat-header"
+        className="drag-region relative z-20 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 bg-white dark:bg-[#0f1115]"
       >
-        <div className="no-drag flex items-center gap-2 min-w-0">
-          <button
-            type="button"
-            onClick={onToggleSidebar}
-            title={t(activeLocale, "chat.toggleSidebarTitle")}
-            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+        <div className="flex flex-wrap @[840px]:flex-nowrap items-center justify-between gap-x-2 @[840px]:px-3">
+          {/* Row 1 Left: Sidebar toggle + Brand + Connection status */}
+          <div
+            className={`no-drag order-1 h-11 flex items-center gap-2 min-w-0 flex-1 @[840px]:flex-initial pr-1 @[840px]:pr-0 ${
+              snapshot.showTaskSidebar
+                ? "pl-3 @[840px]:pl-0"
+                : "pl-[78px] @[840px]:pl-[66px]"
+            }`}
           >
-            <PanelLeft className="w-4 h-4" />
-          </button>
-
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span
-              title={snapshot.connectionStatus}
-              className={`w-2 h-2 rounded-full shrink-0 ${
-                snapshot.isConnected ? "bg-emerald-500" : "bg-amber-500"
-              }`}
-            />
-            <span className="text-[13px] font-semibold">Conductor</span>
-            {!snapshot.isConnected && (
-              <span className="text-[11px] text-zinc-400 truncate hidden sm:inline">
-                {snapshot.connectionStatus}
-              </span>
-            )}
-          </div>
-
-          {!snapshot.isConnected && (
             <button
               type="button"
-              onClick={onReconnect}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 cursor-pointer"
+              onClick={onToggleSidebar}
+              title={t(activeLocale, "chat.toggleSidebarTitle")}
+              className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
             >
-              <RefreshCw className="w-3 h-3" />
-              {t(activeLocale, "chat.reconnect")}
+              <PanelLeft className="w-4 h-4" />
             </button>
-          )}
-        </div>
 
-        <div className="no-drag flex items-center gap-1.5">
-          {snapshot.activeResponderCount > 0 && (
-            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-[11px] font-medium">
-              <Loader2 className="w-3 h-3 animate-spin" />
-              <span>
-                {t(activeLocale, "chat.parallelResponding", {
-                  count: snapshot.activeResponderCount,
-                })}
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span
+                title={snapshot.connectionStatus}
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  snapshot.isConnected ? "bg-emerald-500" : "bg-amber-500"
+                }`}
+              />
+              <span className="text-[13px] font-semibold truncate whitespace-nowrap">
+                Conductor
               </span>
+              {!snapshot.isConnected && (
+                <span
+                  title={snapshot.connectionStatus}
+                  className="text-[11px] text-zinc-400 truncate hidden @[520px]:inline @[840px]:max-w-[140px]"
+                >
+                  {snapshot.connectionStatus}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Context & Status Pills: neat sub-toolbar below 840px, inline before icons at 840px+ */}
+          <div
+            data-testid="chat-header-controls"
+            className="no-drag order-3 basis-full flex flex-wrap items-center gap-1.5 min-w-0 px-3 py-1.5 border-t border-zinc-200/60 dark:border-zinc-800/70 bg-zinc-50/60 dark:bg-[#12151c]/70 @[840px]:order-2 @[840px]:basis-auto @[840px]:ml-auto @[840px]:flex-nowrap @[840px]:justify-end @[840px]:h-11 @[840px]:px-0 @[840px]:py-0 @[840px]:border-t-0 @[840px]:bg-transparent"
+          >
+            {!snapshot.isConnected && (
               <button
                 type="button"
-                onClick={onStopAll}
-                className="text-rose-500 hover:underline ml-0.5 cursor-pointer"
+                data-testid="chat-reconnect-btn"
+                onClick={onReconnect}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 cursor-pointer whitespace-nowrap shrink-0"
               >
-                {t(activeLocale, "chat.stopAll")}
+                <RefreshCw className="w-3 h-3 shrink-0" />
+                <span>{t(activeLocale, "chat.reconnect")}</span>
               </button>
-            </div>
-          )}
+            )}
 
-          {/* Provider & Model Split Menu (Codex / AGY / Claude) */}
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setShowModelMenu((v) => !v)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium bg-zinc-100 dark:bg-zinc-800/90 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-            >
-              <Zap className="w-3 h-3 text-amber-500" />
-              <span className="font-semibold text-indigo-600 dark:text-indigo-400">
-                {chatProviderInfo?.label ?? snapshot.chatProvider}
-              </span>
-              <span className="max-w-[140px] truncate">
-                {activeChatModel?.displayName ?? snapshot.chatModel ?? "Default"}
-              </span>
-              {snapshot.chatEffort && (
-                <span className="text-zinc-400">· {snapshot.chatEffort}</span>
+            {snapshot.activeResponderCount > 0 && (
+              <div
+                data-testid="chat-parallel-responding-pill"
+                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-[11px] font-medium whitespace-nowrap shrink-0"
+              >
+                <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                <span className="whitespace-nowrap">
+                  {t(activeLocale, "chat.parallelResponding", {
+                    count: snapshot.activeResponderCount,
+                  })}
+                </span>
+                <button
+                  type="button"
+                  data-testid="chat-stop-all-btn"
+                  onClick={onStopAll}
+                  className="text-rose-500 hover:underline ml-0.5 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  {t(activeLocale, "chat.stopAll")}
+                </button>
+              </div>
+            )}
+
+            {isSpeaking && onStopSpeaking && (
+              <button
+                type="button"
+                data-testid="voice-stop-speaking-btn"
+                onClick={onStopSpeaking}
+                title={t(activeLocale, "voice.stopSpeakingTitle")}
+                aria-label={t(activeLocale, "voice.stopSpeakingTitle")}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 hover:bg-rose-500/15 hover:text-rose-600 dark:hover:text-rose-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-ping shrink-0" />
+                <Square className="w-2.5 h-2.5 fill-current shrink-0" />
+                <span className="whitespace-nowrap">{t(activeLocale, "voice.stopSpeaking")}</span>
+              </button>
+            )}
+
+            {/* Provider & Model Split Menu (Codex / AGY / Claude) */}
+            <div className="relative min-w-0 max-w-full">
+              <button
+                type="button"
+                data-testid="chat-model-selector-btn"
+                onClick={() => setShowModelMenu((v) => !v)}
+                title={chatModelFullTitle}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium bg-zinc-100 dark:bg-zinc-800/90 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 transition-colors cursor-pointer whitespace-nowrap max-w-full min-w-0"
+              >
+                <Zap className="w-3 h-3 text-amber-500 shrink-0" />
+                <span className="font-semibold text-indigo-600 dark:text-indigo-400 shrink-0 whitespace-nowrap">
+                  {chatProviderInfo?.label ?? snapshot.chatProvider}
+                </span>
+                <span className="min-w-0 max-w-[116px] @[520px]:max-w-[148px] @[840px]:max-w-[110px] @[1020px]:max-w-[148px] truncate">
+                  {chatModelDisplayName}
+                </span>
+                {snapshot.chatEffort && (
+                  <span className="hidden @[600px]:inline @[840px]:hidden @[1080px]:inline text-zinc-400 shrink-0 whitespace-nowrap">
+                    · {snapshot.chatEffort}
+                  </span>
+                )}
+                <ChevronDown className="w-3 h-3 text-zinc-400 shrink-0" />
+              </button>
+
+              {showModelMenu && (
+                <>
+                  <div
+                    className="fixed inset-0 z-30"
+                    onClick={() => setShowModelMenu(false)}
+                  />
+                  <div className="absolute left-0 @[840px]:left-auto @[840px]:right-0 mt-1.5 z-40 w-[min(20rem,calc(100vw-24px))] rounded-xl bg-white dark:bg-[#191d26] border border-zinc-200 dark:border-zinc-700 shadow-xl p-3 space-y-3">
+                    {/* Front-Desk Chat Provider & Model */}
+                    <div className="space-y-1.5">
+                      <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
+                        {t(activeLocale, "chat.frontDeskProvider")}
+                      </div>
+                      <div className="grid grid-cols-3 gap-1">
+                        {allProviders.map((pId) => {
+                          const info = snapshot.providers[pId];
+                          const active = snapshot.chatProvider === pId;
+                          return (
+                            <button
+                              key={pId}
+                              type="button"
+                              disabled={!info?.available}
+                              onClick={() => onSetChatProvider(pId)}
+                              title={info?.detail}
+                              className={`px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors whitespace-nowrap ${
+                                active
+                                  ? "bg-indigo-600 text-white border-indigo-600 cursor-pointer"
+                                  : info?.available
+                                    ? "bg-zinc-100 dark:bg-zinc-800 border-transparent hover:border-zinc-300 dark:hover:border-zinc-600 cursor-pointer"
+                                    : "bg-zinc-100/50 dark:bg-zinc-900/50 border-transparent text-zinc-400 opacity-50 cursor-not-allowed"
+                              }`}
+                            >
+                              {info?.label ?? pId}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {chatProviderInfo && chatProviderInfo.models.length > 0 && (
+                        <select
+                          value={snapshot.chatModel ?? ""}
+                          onChange={(e) => onSetChatModel(e.target.value)}
+                          className="w-full text-[12px] rounded-lg px-2 py-1.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700"
+                        >
+                          {chatProviderInfo.models.map((m) => (
+                            <option key={m.id} value={m.model}>
+                              {m.displayName}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      {activeChatModel && activeChatModel.supportedEfforts.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {activeChatModel.supportedEfforts.map((eff) => (
+                            <button
+                              key={eff}
+                              type="button"
+                              onClick={() => onSetChatModel(activeChatModel.model, eff)}
+                              className={`px-2 py-0.5 rounded text-[11px] cursor-pointer whitespace-nowrap ${
+                                snapshot.chatEffort === eff
+                                  ? "bg-indigo-500 text-white"
+                                  : "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
+                              }`}
+                            >
+                              {eff}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Background Worker Provider & Model */}
+                    <div className="border-t border-zinc-200 dark:border-zinc-800 pt-2.5 space-y-1.5">
+                      <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
+                        {t(activeLocale, "chat.workerProvider")}
+                      </div>
+                      <div className="grid grid-cols-3 gap-1">
+                        {allProviders.map((pId) => {
+                          const info = snapshot.providers[pId];
+                          const active = snapshot.workerProvider === pId;
+                          return (
+                            <button
+                              key={pId}
+                              type="button"
+                              disabled={!info?.available}
+                              onClick={() => onSetWorkerProvider(pId)}
+                              title={info?.detail}
+                              className={`px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors whitespace-nowrap ${
+                                active
+                                  ? "bg-indigo-600 text-white border-indigo-600 cursor-pointer"
+                                  : info?.available
+                                    ? "bg-zinc-100 dark:bg-zinc-800 border-transparent hover:border-zinc-300 dark:hover:border-zinc-600 cursor-pointer"
+                                    : "bg-zinc-100/50 dark:bg-zinc-900/50 border-transparent text-zinc-400 opacity-50 cursor-not-allowed"
+                              }`}
+                            >
+                              {info?.label ?? pId}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {workerProviderInfo && workerProviderInfo.models.length > 0 && (
+                        <select
+                          value={snapshot.workerModel ?? ""}
+                          onChange={(e) => onSetWorkerModel(e.target.value)}
+                          className="w-full text-[12px] rounded-lg px-2 py-1.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700"
+                        >
+                          {workerProviderInfo.models.map((m) => (
+                            <option key={m.id} value={m.model}>
+                              {m.displayName}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      {activeWorkerModel && activeWorkerModel.supportedEfforts.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {activeWorkerModel.supportedEfforts.map((eff) => (
+                            <button
+                              key={eff}
+                              type="button"
+                              onClick={() => onSetWorkerModel(activeWorkerModel.model, eff)}
+                              className={`px-2 py-0.5 rounded text-[11px] cursor-pointer whitespace-nowrap ${
+                                snapshot.workerEffort === eff
+                                  ? "bg-indigo-500 text-white"
+                                  : "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
+                              }`}
+                            >
+                              {eff}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </>
               )}
-              <ChevronDown className="w-3 h-3 text-zinc-400" />
-            </button>
+            </div>
 
-            {showModelMenu && (
-              <>
-                <div
-                  className="fixed inset-0 z-30"
-                  onClick={() => setShowModelMenu(false)}
+            {onOpenUsage && (
+              <button
+                type="button"
+                data-testid="open-usage-btn"
+                onClick={onOpenUsage}
+                title={
+                  allTimeUsage.totalTokens > 0
+                    ? t(activeLocale, "chat.usagePillTitle", {
+                        todayTokens: formatTokenCount(todayUsage.totalTokens),
+                        todayCost: formatUsdCost(todayUsage.costUsd, {
+                          estimated: todayUsage.hasEstimatedCost,
+                        }),
+                        allTokens: formatTokenCount(allTimeUsage.totalTokens),
+                        allCost: formatUsdCost(allTimeUsage.costUsd, {
+                          estimated: allTimeUsage.hasEstimatedCost,
+                        }),
+                      })
+                    : t(activeLocale, "chat.usagePillEmptyTitle")
+                }
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100/80 dark:bg-zinc-800/70 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer tabular-nums whitespace-nowrap shrink-0"
+              >
+                <BarChart3
+                  className={`w-3 h-3 shrink-0 ${
+                    usageAlertSeverity === "exceeded"
+                      ? "text-rose-500"
+                      : usageAlertSeverity === "warning"
+                        ? "text-amber-500"
+                        : "text-indigo-500"
+                  }`}
                 />
-                <div className="absolute right-0 mt-1.5 z-40 w-80 rounded-xl bg-white dark:bg-[#191d26] border border-zinc-200 dark:border-zinc-700 shadow-xl p-3 space-y-3">
-                  {/* Front-Desk Chat Provider & Model */}
-                  <div className="space-y-1.5">
-                    <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
-                      {t(activeLocale, "chat.frontDeskProvider")}
-                    </div>
-                    <div className="grid grid-cols-3 gap-1">
-                      {allProviders.map((pId) => {
-                        const info = snapshot.providers[pId];
-                        const active = snapshot.chatProvider === pId;
-                        return (
-                          <button
-                            key={pId}
-                            type="button"
-                            disabled={!info?.available}
-                            onClick={() => onSetChatProvider(pId)}
-                            title={info?.detail}
-                            className={`px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors ${
-                              active
-                                ? "bg-indigo-600 text-white border-indigo-600 cursor-pointer"
-                                : info?.available
-                                  ? "bg-zinc-100 dark:bg-zinc-800 border-transparent hover:border-zinc-300 dark:hover:border-zinc-600 cursor-pointer"
-                                  : "bg-zinc-100/50 dark:bg-zinc-900/50 border-transparent text-zinc-400 opacity-50 cursor-not-allowed"
-                            }`}
-                          >
-                            {info?.label ?? pId}
-                          </button>
-                        );
+                {usageAlertSeverity !== "ok" && (
+                  <span
+                    data-testid="usage-pill-alert-dot"
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                      usageAlertSeverity === "exceeded" ? "bg-rose-500" : "bg-amber-500"
+                    }`}
+                  />
+                )}
+                {todayUsage.totalTokens > 0 ? (
+                  <>
+                    <span className="hidden @[480px]:inline @[840px]:hidden @[980px]:inline">
+                      {formatTokenCount(todayUsage.totalTokens)}
+                    </span>
+                    <span className="hidden @[480px]:inline @[840px]:hidden @[980px]:inline text-zinc-400">
+                      ·
+                    </span>
+                    <span>
+                      {formatUsdCost(todayUsage.costUsd, {
+                        estimated: todayUsage.hasEstimatedCost,
+                        compact: true,
                       })}
-                    </div>
-                    {chatProviderInfo && chatProviderInfo.models.length > 0 && (
-                      <select
-                        value={snapshot.chatModel ?? ""}
-                        onChange={(e) => onSetChatModel(e.target.value)}
-                        className="w-full text-[12px] rounded-lg px-2 py-1.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700"
-                      >
-                        {chatProviderInfo.models.map((m) => (
-                          <option key={m.id} value={m.model}>
-                            {m.displayName}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    {activeChatModel && activeChatModel.supportedEfforts.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {activeChatModel.supportedEfforts.map((eff) => (
-                          <button
-                            key={eff}
-                            type="button"
-                            onClick={() => onSetChatModel(activeChatModel.model, eff)}
-                            className={`px-2 py-0.5 rounded text-[11px] cursor-pointer ${
-                              snapshot.chatEffort === eff
-                                ? "bg-indigo-500 text-white"
-                                : "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
-                            }`}
-                          >
-                            {eff}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Background Worker Provider & Model */}
-                  <div className="border-t border-zinc-200 dark:border-zinc-800 pt-2.5 space-y-1.5">
-                    <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
-                      {t(activeLocale, "chat.workerProvider")}
-                    </div>
-                    <div className="grid grid-cols-3 gap-1">
-                      {allProviders.map((pId) => {
-                        const info = snapshot.providers[pId];
-                        const active = snapshot.workerProvider === pId;
-                        return (
-                          <button
-                            key={pId}
-                            type="button"
-                            disabled={!info?.available}
-                            onClick={() => onSetWorkerProvider(pId)}
-                            title={info?.detail}
-                            className={`px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors ${
-                              active
-                                ? "bg-indigo-600 text-white border-indigo-600 cursor-pointer"
-                                : info?.available
-                                  ? "bg-zinc-100 dark:bg-zinc-800 border-transparent hover:border-zinc-300 dark:hover:border-zinc-600 cursor-pointer"
-                                  : "bg-zinc-100/50 dark:bg-zinc-900/50 border-transparent text-zinc-400 opacity-50 cursor-not-allowed"
-                            }`}
-                          >
-                            {info?.label ?? pId}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    {workerProviderInfo && workerProviderInfo.models.length > 0 && (
-                      <select
-                        value={snapshot.workerModel ?? ""}
-                        onChange={(e) => onSetWorkerModel(e.target.value)}
-                        className="w-full text-[12px] rounded-lg px-2 py-1.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700"
-                      >
-                        {workerProviderInfo.models.map((m) => (
-                          <option key={m.id} value={m.model}>
-                            {m.displayName}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    {activeWorkerModel && activeWorkerModel.supportedEfforts.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {activeWorkerModel.supportedEfforts.map((eff) => (
-                          <button
-                            key={eff}
-                            type="button"
-                            onClick={() => onSetWorkerModel(activeWorkerModel.model, eff)}
-                            className={`px-2 py-0.5 rounded text-[11px] cursor-pointer ${
-                              snapshot.workerEffort === eff
-                                ? "bg-indigo-500 text-white"
-                                : "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
-                            }`}
-                          >
-                            {eff}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </>
+                    </span>
+                  </>
+                ) : (
+                  <span className="hidden @[420px]:inline">Usage</span>
+                )}
+              </button>
             )}
           </div>
 
-          {onOpenUsage && (
-            <button
-              type="button"
-              data-testid="open-usage-btn"
-              onClick={onOpenUsage}
-              title={
-                allTimeUsage.totalTokens > 0
-                  ? t(activeLocale, "chat.usagePillTitle", {
-                      todayTokens: formatTokenCount(todayUsage.totalTokens),
-                      todayCost: formatUsdCost(todayUsage.costUsd, {
-                        estimated: todayUsage.hasEstimatedCost,
-                      }),
-                      allTokens: formatTokenCount(allTimeUsage.totalTokens),
-                      allCost: formatUsdCost(allTimeUsage.costUsd, {
-                        estimated: allTimeUsage.hasEstimatedCost,
-                      }),
-                    })
-                  : t(activeLocale, "chat.usagePillEmptyTitle")
-              }
-              className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100/80 dark:bg-zinc-800/70 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer tabular-nums"
-            >
-              <BarChart3 className="w-3 h-3 text-indigo-500 shrink-0" />
-              {todayUsage.totalTokens > 0 ? (
-                <>
-                  <span>{formatTokenCount(todayUsage.totalTokens)}</span>
-                  <span className="text-zinc-400">·</span>
-                  <span>
-                    {formatUsdCost(todayUsage.costUsd, {
-                      estimated: todayUsage.hasEstimatedCost,
-                      compact: true,
-                    })}
-                  </span>
-                </>
-              ) : (
-                <span>Usage</span>
-              )}
-            </button>
-          )}
+          {/* Row 1 Right: Utility icon buttons */}
+          <div className="no-drag order-2 @[840px]:order-3 h-11 flex items-center gap-0.5 shrink-0 pr-3 @[840px]:pr-0">
+            {onToggleVoiceReadback && (
+              <button
+                type="button"
+                data-testid="voice-readback-toggle-btn"
+                aria-pressed={voiceReadbackEnabled}
+                onClick={onToggleVoiceReadback}
+                title={
+                  voiceReadbackEnabled
+                    ? t(activeLocale, "voice.readbackOnTitle")
+                    : t(activeLocale, "voice.readbackOffTitle")
+                }
+                aria-label={
+                  voiceReadbackEnabled
+                    ? t(activeLocale, "voice.readbackDisableAria")
+                    : t(activeLocale, "voice.readbackEnableAria")
+                }
+                className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
+                  voiceReadbackEnabled
+                    ? "text-indigo-500 bg-indigo-500/10 hover:bg-indigo-500/20"
+                    : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                }`}
+              >
+                {voiceReadbackEnabled ? (
+                  <Volume2 className="w-4 h-4" />
+                ) : (
+                  <VolumeX className="w-4 h-4" />
+                )}
+              </button>
+            )}
 
-          {isSpeaking && onStopSpeaking && (
-            <button
-              type="button"
-              data-testid="voice-stop-speaking-btn"
-              onClick={onStopSpeaking}
-              title={t(activeLocale, "voice.stopSpeakingTitle")}
-              aria-label={t(activeLocale, "voice.stopSpeakingTitle")}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 hover:bg-rose-500/15 hover:text-rose-600 dark:hover:text-rose-300 transition-colors cursor-pointer"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-ping" />
-              <Square className="w-2.5 h-2.5 fill-current" />
-              <span>{t(activeLocale, "voice.stopSpeaking")}</span>
-            </button>
-          )}
+            {onOpenSettings && (
+              <button
+                type="button"
+                data-testid="open-settings-btn"
+                onClick={onOpenSettings}
+                title={
+                  appUpdate?.updateAvailable && appUpdate.latestRelease
+                    ? t(activeLocale, "chat.settingsTitleWithUpdate", {
+                        tag: appUpdate.latestRelease.tagName,
+                      })
+                    : t(activeLocale, "chat.settingsTitle")
+                }
+                className="relative p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
+              >
+                <Settings className="w-4 h-4" />
+                {appUpdate &&
+                  (appUpdate.updateAvailable ||
+                    appUpdate.status === "downloading" ||
+                    appUpdate.status === "downloaded") && (
+                    <span
+                      data-testid="settings-update-badge"
+                      aria-hidden="true"
+                      className={`absolute top-1 right-1 w-2 h-2 rounded-full ring-2 ring-white dark:ring-[#0f1115] ${
+                        appUpdate.status === "downloaded" ? "bg-emerald-500" : "bg-indigo-500"
+                      }`}
+                    />
+                  )}
+              </button>
+            )}
 
-          {onToggleVoiceReadback && (
+            <ChatSessionControls
+              sessions={snapshot.chatSessions}
+              activeSessionId={snapshot.activeChatSessionId}
+              activeMessageCount={snapshot.messages.length}
+              activeResponderCount={snapshot.activeResponderCount}
+              locale={activeLocale}
+              newChatConfirmTrigger={newChatConfirmTrigger}
+              onSelectSession={onSelectChatSession}
+              onNewChat={onNewChat}
+              onDeleteSession={onDeleteChatSession}
+            />
+
             <button
               type="button"
-              data-testid="voice-readback-toggle-btn"
-              aria-pressed={voiceReadbackEnabled}
-              onClick={onToggleVoiceReadback}
-              title={
-                voiceReadbackEnabled
-                  ? t(activeLocale, "voice.readbackOnTitle")
-                  : t(activeLocale, "voice.readbackOffTitle")
-              }
-              aria-label={
-                voiceReadbackEnabled
-                  ? t(activeLocale, "voice.readbackDisableAria")
-                  : t(activeLocale, "voice.readbackEnableAria")
-              }
-              className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-                voiceReadbackEnabled
-                  ? "text-indigo-500 bg-indigo-500/10 hover:bg-indigo-500/20"
+              onClick={onToggleMarkdownViewer}
+              title={t(activeLocale, "chat.toggleMarkdownTitle")}
+              className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
+                snapshot.showBrowserPane && rightPaneMode === "markdown"
+                  ? "text-indigo-500 bg-indigo-500/10"
                   : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
               }`}
             >
-              {voiceReadbackEnabled ? (
-                <Volume2 className="w-4 h-4" />
-              ) : (
-                <VolumeX className="w-4 h-4" />
-              )}
+              <BookOpen className="w-4 h-4" />
             </button>
-          )}
 
-          {onOpenSettings && (
             <button
               type="button"
-              data-testid="open-settings-btn"
-              onClick={onOpenSettings}
-              title={t(activeLocale, "chat.settingsTitle")}
-              className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+              onClick={onToggleBrowser}
+              title={t(activeLocale, "chat.toggleRightPaneTitle")}
+              className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
+                snapshot.showBrowserPane
+                  ? "text-indigo-500 bg-indigo-500/10"
+                  : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              }`}
             >
-              <Settings className="w-4 h-4" />
+              <PanelRight className="w-4 h-4" />
             </button>
-          )}
-
-          <ChatSessionControls
-            sessions={snapshot.chatSessions}
-            activeSessionId={snapshot.activeChatSessionId}
-            activeMessageCount={snapshot.messages.length}
-            activeResponderCount={snapshot.activeResponderCount}
-            locale={activeLocale}
-            newChatConfirmTrigger={newChatConfirmTrigger}
-            onSelectSession={onSelectChatSession}
-            onNewChat={onNewChat}
-            onDeleteSession={onDeleteChatSession}
-          />
-
-          <button
-            type="button"
-            onClick={onToggleMarkdownViewer}
-            title={t(activeLocale, "chat.toggleMarkdownTitle")}
-            className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-              snapshot.showBrowserPane && rightPaneMode === "markdown"
-                ? "text-indigo-500 bg-indigo-500/10"
-                : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-            }`}
-          >
-            <BookOpen className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={onToggleBrowser}
-            title={t(activeLocale, "chat.toggleRightPaneTitle")}
-            className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-              snapshot.showBrowserPane
-                ? "text-indigo-500 bg-indigo-500/10"
-                : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-            }`}
-          >
-            <PanelRight className="w-4 h-4" />
-          </button>
+          </div>
         </div>
       </header>
 
+      {/* Subtle App Update Banner */}
+      {appUpdate &&
+        appUpdate.latestRelease &&
+        !updateBannerDismissed &&
+        (appUpdate.status === "available" ||
+          appUpdate.status === "downloading" ||
+          appUpdate.status === "downloaded") && (
+          <div
+            data-testid="app-update-banner"
+            className="flex items-center gap-2 px-4 py-1.5 text-[11.5px] bg-indigo-500/8 dark:bg-indigo-500/12 text-indigo-700 dark:text-indigo-200 border-b border-indigo-500/20 shrink-0"
+          >
+            {appUpdate.status === "downloading" ? (
+              <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin text-indigo-500" />
+            ) : appUpdate.status === "downloaded" ? (
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+            ) : (
+              <Download className="w-3.5 h-3.5 shrink-0 text-indigo-500" />
+            )}
+
+            <span className="flex-1 min-w-0 truncate font-medium">
+              {appUpdate.status === "downloading"
+                ? appUpdate.downloadProgress?.percent !== null &&
+                  appUpdate.downloadProgress?.percent !== undefined
+                  ? t(activeLocale, "update.bannerDownloading", {
+                      tag: appUpdate.latestRelease.tagName,
+                      percent: appUpdate.downloadProgress.percent,
+                    })
+                  : t(activeLocale, "update.bannerDownloadingIndeterminate", {
+                      tag: appUpdate.latestRelease.tagName,
+                    })
+                : appUpdate.status === "downloaded"
+                  ? t(activeLocale, "update.bannerDownloaded", {
+                      tag: appUpdate.latestRelease.tagName,
+                    })
+                  : t(activeLocale, "update.bannerAvailable", {
+                      tag: appUpdate.latestRelease.tagName,
+                    })}
+            </span>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {appUpdate.status === "available" &&
+                appUpdate.latestRelease.selectedAsset &&
+                onDownloadAndOpenUpdate && (
+                  <button
+                    type="button"
+                    data-testid="app-update-banner-download-btn"
+                    onClick={onDownloadAndOpenUpdate}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
+                  >
+                    <Download className="w-3 h-3" />
+                    <span>{t(activeLocale, "update.downloadAndOpenBtn")}</span>
+                  </button>
+                )}
+
+              {appUpdate.status === "downloaded" && onOpenDownloadedUpdate && (
+                <button
+                  type="button"
+                  data-testid="app-update-banner-open-btn"
+                  onClick={onOpenDownloadedUpdate}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors cursor-pointer"
+                >
+                  <Download className="w-3 h-3" />
+                  <span>{t(activeLocale, "update.openInstallerBtn")}</span>
+                </button>
+              )}
+
+              {appUpdate.status === "downloaded" && onShowDownloadedUpdateInFolder && (
+                <button
+                  type="button"
+                  onClick={onShowDownloadedUpdateInFolder}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-white/80 dark:bg-zinc-800/80 border border-indigo-500/25 hover:border-indigo-500/50 transition-colors cursor-pointer"
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  <span>{t(activeLocale, "update.showInFolderBtn")}</span>
+                </button>
+              )}
+
+              {onOpenSettings && (
+                <button
+                  type="button"
+                  data-testid="app-update-banner-details-btn"
+                  onClick={onOpenSettings}
+                  className="px-2 py-0.5 rounded-md text-[11px] font-medium hover:bg-indigo-500/15 transition-colors cursor-pointer"
+                >
+                  {t(activeLocale, "update.bannerDetailsBtn")}
+                </button>
+              )}
+
+              {onOpenUpdateReleasePage && (
+                <button
+                  type="button"
+                  onClick={() => onOpenUpdateReleasePage(appUpdate.latestRelease?.htmlUrl)}
+                  title={t(activeLocale, "update.openReleasePageBtn")}
+                  className="p-1 rounded hover:bg-indigo-500/15 transition-colors cursor-pointer"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                </button>
+              )}
+
+              {onDismissUpdateBanner && appUpdate.status !== "downloading" && (
+                <button
+                  type="button"
+                  data-testid="app-update-banner-dismiss-btn"
+                  onClick={onDismissUpdateBanner}
+                  aria-label={t(activeLocale, "update.bannerDismissAria")}
+                  className="p-0.5 rounded hover:bg-indigo-500/15 transition-colors cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
       {/* Error banner */}
       {snapshot.lastErrorBanner && (
-        <div className="flex items-center gap-2 px-4 py-2 text-[12px] bg-rose-500/10 text-rose-600 dark:text-rose-400 border-b border-rose-500/20">
+        <div className="flex items-center gap-2 px-4 py-2 text-[12px] bg-rose-500/10 text-rose-600 dark:text-rose-400 border-b border-rose-500/20 min-w-0 shrink-0">
           <AlertTriangle className="w-4 h-4 shrink-0" />
-          <span className="flex-1 truncate">{snapshot.lastErrorBanner}</span>
-          <button type="button" onClick={onDismissError} className="p-0.5 cursor-pointer">
+          <span className="flex-1 min-w-0 truncate">{snapshot.lastErrorBanner}</span>
+          <button type="button" onClick={onDismissError} className="p-0.5 cursor-pointer shrink-0">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -1378,6 +1610,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                 onOpenUrl={onOpenUrl}
                 onOpenMarkdownFile={onOpenMarkdownFile}
                 onOpenImageAttachment={onOpenImageAttachment}
+                onOpenMarkdownImage={onOpenMarkdownImage}
                 onOpenTask={onOpenTask}
                 onUpdateTaskStatus={onUpdateTaskStatus}
                 onLandTask={onLandTask}
@@ -1420,7 +1653,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                 return (
                   <div
                     key={att.id}
-                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11.5px] bg-zinc-200/70 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200"
+                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11.5px] bg-zinc-200/70 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200 max-w-full min-w-0"
                   >
                     {viewableImage ? (
                       <button
@@ -1495,7 +1728,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500" />
                 </span>
-                <span className="font-medium shrink-0">
+                <span className="font-medium shrink-0 whitespace-nowrap">
                   {t(activeLocale, "voice.listeningLabel", { locale: speechLocale })}
                 </span>
                 <span className="text-zinc-500 dark:text-zinc-400 truncate">
@@ -1505,7 +1738,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               <button
                 type="button"
                 onClick={() => stopVoiceInput()}
-                className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-rose-500/12 hover:bg-rose-500/20 text-rose-600 dark:text-rose-300 cursor-pointer shrink-0"
+                className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-rose-500/12 hover:bg-rose-500/20 text-rose-600 dark:text-rose-300 cursor-pointer shrink-0 whitespace-nowrap"
               >
                 {t(activeLocale, "common.stop")}
               </button>
@@ -1649,15 +1882,18 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             className="w-full resize-none bg-transparent px-3.5 pt-3 pb-1.5 text-[14px] leading-relaxed outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 select-text"
           />
 
-          <div className="flex items-center justify-between px-2.5 pb-2 pt-0.5">
-            <div className="flex items-center gap-0.5">
+          <div
+            data-testid="composer-toolbar"
+            className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 px-2.5 pb-2 pt-0.5"
+          >
+            <div className="flex flex-wrap items-center gap-0.5 min-w-0">
               <button
                 type="button"
                 data-testid="composer-attach-image-btn"
                 onClick={onPickLocalImages}
                 title={t(activeLocale, "chat.attachImage")}
                 aria-label={t(activeLocale, "chat.attachImage")}
-                className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
               >
                 <Paperclip className="w-4 h-4" />
               </button>
@@ -1669,10 +1905,13 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                     data-testid="composer-screenshot-btn"
                     onClick={onCaptureScreenshot}
                     title={t(activeLocale, "chat.screenshotTitle")}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                    aria-label={t(activeLocale, "chat.screenshotTitle")}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   >
-                    <Camera className="w-3.5 h-3.5" />
-                    <span>{t(activeLocale, "chat.screenshotBtn")}</span>
+                    <Camera className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden @[480px]:inline">
+                      {t(activeLocale, "chat.screenshotBtn")}
+                    </span>
                   </button>
 
                   <button
@@ -1680,14 +1919,17 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                     data-testid="composer-element-picker-btn"
                     onClick={onToggleElementPicker}
                     title={t(activeLocale, "chat.elementPickerTitle")}
-                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] transition-colors cursor-pointer ${
+                    aria-label={t(activeLocale, "chat.elementPickerTitle")}
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                       snapshot.isPickingElement
                         ? "bg-indigo-500 text-white"
                         : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
                     }`}
                   >
-                    <Crosshair className="w-3.5 h-3.5" />
-                    <span>{t(activeLocale, "chat.elementPickerBtn")}</span>
+                    <Crosshair className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden @[480px]:inline">
+                      {t(activeLocale, "chat.elementPickerBtn")}
+                    </span>
                   </button>
 
                   <button
@@ -1695,10 +1937,11 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                     data-testid="composer-attach-url-btn"
                     onClick={onAttachCurrentUrl}
                     title={t(activeLocale, "chat.attachUrlTitle")}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                    aria-label={t(activeLocale, "chat.attachUrlTitle")}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   >
-                    <Link2 className="w-3.5 h-3.5" />
-                    <span>URL</span>
+                    <Link2 className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden @[480px]:inline">URL</span>
                   </button>
 
                   {browserErrorCount > 0 && (
@@ -1707,17 +1950,20 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                       data-testid="composer-attach-errors-btn"
                       onClick={onAttachConsoleErrors}
                       title={t(activeLocale, "chat.attachErrorsTitle")}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] font-medium bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 transition-colors cursor-pointer"
+                      aria-label={t(activeLocale, "chat.attachErrorsTitle")}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] font-medium bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                     >
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      <span>{t(activeLocale, "chat.errorsCountBtn", { count: browserErrorCount })}</span>
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {t(activeLocale, "chat.errorsCountBtn", { count: browserErrorCount })}
+                      </span>
                     </button>
                   )}
                 </>
               )}
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 shrink-0 ml-auto">
               {onToggleVoiceAutoSend && (
                 <button
                   type="button"
@@ -1729,7 +1975,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                       ? t(activeLocale, "voice.autoSendOnTitle")
                       : t(activeLocale, "voice.autoSendOffTitle")
                   }
-                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                     voiceAutoSend
                       ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30"
                       : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 border border-transparent"
@@ -1754,7 +2000,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                     ? t(activeLocale, "voice.micStopAria")
                     : t(activeLocale, "voice.micStartAria")
                 }
-                className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+                className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shrink-0 ${
                   isListening
                     ? "bg-rose-500 hover:bg-rose-600 text-white shadow-sm ring-2 ring-rose-500/35"
                     : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800"
@@ -1778,7 +2024,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                 onClick={handleTriggerSend}
                 disabled={!canSend}
                 title={t(activeLocale, "chat.sendTitle")}
-                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all shrink-0 ${
                   canSend
                     ? "bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer shadow-sm"
                     : "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 cursor-not-allowed"
@@ -1844,6 +2090,7 @@ const ChatMessageItem: React.FC<{
       draftMentions?: ExplicitMentionTarget[];
     },
   ) => void;
+  onOpenMarkdownImage?: (image: MarkdownOpenedImage, context?: { message?: ChatMessage }) => void;
   onOpenTask: (taskId: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
@@ -1859,6 +2106,7 @@ const ChatMessageItem: React.FC<{
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImageAttachment,
+  onOpenMarkdownImage,
   onOpenTask,
   onUpdateTaskStatus,
   onLandTask,
@@ -1886,6 +2134,11 @@ const ChatMessageItem: React.FC<{
     [onOpenImageAttachment, message],
   );
 
+  const handleOpenMarkdownImg = useCallback(
+    (image: MarkdownOpenedImage) => onOpenMarkdownImage?.(image, { message }),
+    [onOpenMarkdownImage, message],
+  );
+
   const handleStop = useCallback(
     () => onStopMessage(message.id),
     [onStopMessage, message.id],
@@ -1910,6 +2163,7 @@ const ChatMessageItem: React.FC<{
         onOpenUrl={handleOpenUrl}
         onOpenMarkdownFile={handleOpenMarkdownFile}
         onOpenImageAttachment={onOpenImageAttachment ? handleOpenImage : undefined}
+        onOpenMarkdownImage={onOpenMarkdownImage ? handleOpenMarkdownImg : undefined}
         onOpenTask={onOpenTask}
         onUpdateTaskStatus={onUpdateTaskStatus}
         onLandTask={onLandTask}
@@ -1941,6 +2195,7 @@ const ChatMessageList: React.FC<{
       draftMentions?: ExplicitMentionTarget[];
     },
   ) => void;
+  onOpenMarkdownImage?: (image: MarkdownOpenedImage, context?: { message?: ChatMessage }) => void;
   onOpenTask: (taskId: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
@@ -1956,6 +2211,7 @@ const ChatMessageList: React.FC<{
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImageAttachment,
+  onOpenMarkdownImage,
   onOpenTask,
   onUpdateTaskStatus,
   onLandTask,
@@ -1980,6 +2236,7 @@ const ChatMessageList: React.FC<{
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
             onOpenImageAttachment={onOpenImageAttachment}
+            onOpenMarkdownImage={onOpenMarkdownImage}
             onOpenTask={onOpenTask}
             onUpdateTaskStatus={onUpdateTaskStatus}
             onLandTask={onLandTask}
@@ -2032,9 +2289,9 @@ const EmptyWelcome: React.FC<{
         </p>
       </div>
 
-      <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-[11.5px] bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300">
-        <span className="w-2 h-2 rounded-full bg-emerald-500" />
-        <span>
+      <div className="inline-flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-3 py-1 rounded-full text-[11.5px] bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300 max-w-full">
+        <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+        <span className="whitespace-nowrap">
           {projectCount > 0
             ? t(locale, "chat.welcomeProjectsDetected", { count: projectCount })
             : t(locale, "chat.welcomeProjectsScanning")}
@@ -2042,13 +2299,13 @@ const EmptyWelcome: React.FC<{
         <button
           type="button"
           onClick={onAddProject}
-          className="text-indigo-500 hover:underline font-medium cursor-pointer ml-1"
+          className="text-indigo-500 hover:underline font-medium cursor-pointer ml-1 whitespace-nowrap shrink-0"
         >
           {t(locale, "chat.welcomeAddFolder")}
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-2.5 w-full max-w-xl pt-2">
+      <div className="grid grid-cols-1 @[440px]:grid-cols-2 gap-2.5 w-full max-w-xl pt-2">
         {prompts.map((item) => (
           <button
             key={item.title}
@@ -2075,9 +2332,12 @@ export interface TaskEventCardProps {
   locale?: UiLocale;
   onOpenUrl: (url: string) => void;
   onOpenMarkdownFile: (target: string, baseFilePath?: string) => void;
+  onOpenImage?: (image: MarkdownOpenedImage) => void;
   onOpenTask: (taskId: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
+  imageCache?: MarkdownImageCache;
+  videoCache?: MarkdownVideoCache;
 }
 
 export const TaskEventCard: React.FC<TaskEventCardProps> = ({
@@ -2088,11 +2348,15 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
   locale = "ja",
   onOpenUrl,
   onOpenMarkdownFile,
+  onOpenImage,
   onOpenTask,
   onUpdateTaskStatus,
   onLandTask,
+  imageCache,
+  videoCache,
 }) => {
   const resolvedTask = resolveTaskForTaskEvent(message, tasks);
+  const taskBaseFilePath = buildTaskMarkdownBasePath(resolvedTask);
   const targetTaskId = resolvedTask?.id ?? message.relatedTaskId;
   const quickTransition = resolvedTask ? getQuickStatusTransition(resolvedTask.status, locale) : null;
   const isDone = resolvedTask?.status === "done";
@@ -2134,19 +2398,19 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
         <div className="space-y-2">
           <div
             data-testid="task-event-header"
-            className={`flex items-center justify-between gap-2 pb-2 border-b ${
+            className={`flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 pb-2 border-b ${
               isDone
                 ? "border-emerald-500/15 dark:border-emerald-400/15"
                 : "border-indigo-500/15 dark:border-indigo-400/15"
             }`}
           >
-            <div className="flex items-center gap-1.5 min-w-0">
+            <div className="flex items-center gap-1.5 min-w-0 flex-1">
               <Bell
                 className={`w-3.5 h-3.5 shrink-0 ${
                   isDone ? "text-emerald-500" : "text-indigo-500"
                 }`}
               />
-              <span className="px-1.5 py-0.5 rounded font-mono text-[10px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 border border-indigo-500/20 shrink-0">
+              <span className="px-1.5 py-0.5 rounded font-mono text-[10px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 border border-indigo-500/20 shrink-0 whitespace-nowrap">
                 {formatTaskCode(resolvedTask.taskNumber)}
               </span>
               <span className="text-[11.5px] font-medium text-zinc-700 dark:text-zinc-200 truncate">
@@ -2155,18 +2419,18 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
               {isDone && (
                 <span
                   data-testid="task-event-done-badge"
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 shrink-0"
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 shrink-0 whitespace-nowrap"
                 >
-                  <CheckCircle2 className="w-3 h-3" />
+                  <CheckCircle2 className="w-3 h-3 shrink-0" />
                   <span>{t(locale, "task.doneBadge")}</span>
                 </span>
               )}
               {isRunning && (
                 <span
                   data-testid="task-event-running-badge"
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 shrink-0"
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 shrink-0 whitespace-nowrap"
                 >
-                  <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                  <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />
                   <span>{t(locale, "task.runningBadge")}</span>
                 </span>
               )}
@@ -2174,14 +2438,14 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                 <span
                   data-testid="task-event-unlanded-badge"
                   title={doneBlockedReason ?? undefined}
-                  className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 shrink-0"
+                  className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 shrink-0 whitespace-nowrap"
                 >
                   {t(locale, "task.unlandedBadge")}
                 </span>
               )}
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex items-center gap-1.5 shrink-0 ml-auto">
               {canQuickLand && (
                 <button
                   type="button"
@@ -2199,7 +2463,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                       : t(locale, "sidebar.landChangesTitle", { mode: effectiveMode })
                   }
                   aria-label={`${resolvedTask.title}: ${isPrMode ? "Push / PR" : "Land"}`}
-                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border transition-colors shrink-0 ${
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border transition-colors shrink-0 whitespace-nowrap ${
                     isLanding
                       ? "bg-indigo-500/10 border-indigo-500/25 text-indigo-500 opacity-70 cursor-wait"
                       : resolvedTask.landStatus === "conflict" || resolvedTask.landStatus === "error"
@@ -2208,11 +2472,11 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                   }`}
                 >
                   {isLanding ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <Loader2 className="w-3 h-3 animate-spin shrink-0" />
                   ) : isPrMode ? (
-                    <GitPullRequest className="w-3 h-3" />
+                    <GitPullRequest className="w-3 h-3 shrink-0" />
                   ) : (
-                    <GitMerge className="w-3 h-3" />
+                    <GitMerge className="w-3 h-3 shrink-0" />
                   )}
                   <span>{isLanding ? "..." : isPrMode ? "Push/PR" : "Land"}</span>
                 </button>
@@ -2241,7 +2505,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                   }}
                   title={doneBlockedReason ?? quickTransition.title}
                   aria-label={`${resolvedTask.title}: ${quickTransition.label}`}
-                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border transition-colors shrink-0 ${
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border transition-colors shrink-0 whitespace-nowrap ${
                     isQuickDoneBlocked
                       ? "bg-zinc-100 dark:bg-zinc-800/60 border-zinc-200/80 dark:border-zinc-700/70 text-zinc-400 dark:text-zinc-500 opacity-60 cursor-not-allowed"
                       : isDone
@@ -2249,7 +2513,11 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                         : "bg-emerald-500/12 border-emerald-500/30 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/22 hover:border-emerald-500/45 cursor-pointer"
                   }`}
                 >
-                  {isDone ? <RotateCcw className="w-3 h-3" /> : <Check className="w-3 h-3" />}
+                  {isDone ? (
+                    <RotateCcw className="w-3 h-3 shrink-0" />
+                  ) : (
+                    <Check className="w-3 h-3 shrink-0" />
+                  )}
                   <span>{quickTransition.label}</span>
                 </button>
               )}
@@ -2259,8 +2527,12 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
           <MarkdownView
             content={message.text}
             locale={locale}
+            baseFilePath={taskBaseFilePath}
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
+            onOpenImage={onOpenImage}
+            imageCache={imageCache}
+            videoCache={videoCache}
           />
 
           <button
@@ -2282,8 +2554,12 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
             <MarkdownView
               content={message.text}
               locale={locale}
+              baseFilePath={taskBaseFilePath}
               onOpenUrl={onOpenUrl}
               onOpenMarkdownFile={onOpenMarkdownFile}
+              onOpenImage={onOpenImage}
+              imageCache={imageCache}
+              videoCache={videoCache}
             />
             {targetTaskId && (
               <button
@@ -2313,6 +2589,7 @@ const MessageRow: React.FC<{
   onOpenUrl: (url: string) => void;
   onOpenMarkdownFile: (target: string, baseFilePath?: string) => void;
   onOpenImageAttachment?: (attachment: ChatAttachment) => void;
+  onOpenMarkdownImage?: (image: MarkdownOpenedImage) => void;
   onOpenTask: (taskId: string) => void;
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
@@ -2326,6 +2603,7 @@ const MessageRow: React.FC<{
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImageAttachment,
+  onOpenMarkdownImage,
   onOpenTask,
   onUpdateTaskStatus,
   onLandTask,
@@ -2435,6 +2713,7 @@ const MessageRow: React.FC<{
         locale={locale}
         onOpenUrl={onOpenUrl}
         onOpenMarkdownFile={onOpenMarkdownFile}
+        onOpenImage={onOpenMarkdownImage}
         onOpenTask={onOpenTask}
         onUpdateTaskStatus={onUpdateTaskStatus}
         onLandTask={onLandTask}
@@ -2444,11 +2723,11 @@ const MessageRow: React.FC<{
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2">
-        <div className="w-5 h-5 rounded-md bg-indigo-500/15 flex items-center justify-center">
+      <div className="flex items-center gap-2 min-w-0">
+        <div className="w-5 h-5 rounded-md bg-indigo-500/15 flex items-center justify-center shrink-0">
           <Sparkles className="w-3 h-3 text-indigo-500" />
         </div>
-        <span className="text-[12px] font-semibold text-zinc-600 dark:text-zinc-400">
+        <span className="text-[12px] font-semibold text-zinc-600 dark:text-zinc-400 whitespace-nowrap shrink-0">
           Conductor
           {message.provider && (
             <span className="ml-1 font-normal text-zinc-400">
@@ -2457,20 +2736,20 @@ const MessageRow: React.FC<{
           )}
         </span>
         {message.replyToSnippet && (
-          <span className="px-2 py-0.5 rounded-full text-[10.5px] bg-zinc-100 dark:bg-zinc-800 text-zinc-500 truncate max-w-[260px]">
+          <span className="px-2 py-0.5 rounded-full text-[10.5px] bg-zinc-100 dark:bg-zinc-800 text-zinc-500 truncate min-w-0 max-w-[260px]">
             ↩ {message.replyToSnippet}
           </span>
         )}
         {message.isStreaming && (
           <>
-            <Loader2 className="w-3 h-3 text-indigo-500 animate-spin" />
+            <Loader2 className="w-3 h-3 text-indigo-500 animate-spin shrink-0" />
             <div className="flex-1" />
             <button
               type="button"
               onClick={onStop}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] text-rose-500 hover:bg-rose-500/10 cursor-pointer whitespace-nowrap shrink-0"
             >
-              <Square className="w-2.5 h-2.5 fill-current" />
+              <Square className="w-2.5 h-2.5 fill-current shrink-0" />
               {t(locale, "common.stop")}
             </button>
           </>
@@ -2510,6 +2789,7 @@ const MessageRow: React.FC<{
             locale={locale}
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
+            onOpenImage={onOpenMarkdownImage}
           />
         ) : message.isStreaming ? (
           <span className="text-[13px] text-zinc-400">{t(locale, "chat.preparingReply")}</span>

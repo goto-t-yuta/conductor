@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { app, BrowserWindow, Menu, dialog, ipcMain, shell, systemPreferences } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, protocol, shell, systemPreferences } from "electron";
 import type {
   AgentProvider,
   AgentTaskStatus,
@@ -9,12 +9,20 @@ import type {
   IntegrationMode,
   PreferredLanguage,
   SendMessagePayload,
+  TerminalCreateOptions,
+  UsageBudgetSettings,
   VoiceMicPermissionResult,
   VoiceSpeakRequest,
 } from "../shared/types.js";
+import { AppUpdater } from "./app-updater.js";
 import { BrowserManager } from "./browser-manager.js";
 import { ConductorController } from "./conductor-controller.js";
 import { readLocalImageFile } from "./image-viewer.js";
+import {
+  CONDUCTOR_MEDIA_PROTOCOL,
+  handleConductorMediaRequest,
+  readLocalVideoFile,
+} from "./media-viewer.js";
 import {
   MarkdownFileWatcher,
   readLocalMarkdownFile,
@@ -23,14 +31,44 @@ import {
 import { registerProjectFileTreeIpcHandlers } from "./project-files.js";
 import { QuitGuard } from "./quit-guard.js";
 import { StateStore } from "./state-store.js";
+import { TerminalManager } from "./terminal-manager.js";
 import { VoiceTtsManager } from "./voice-tts.js";
 
 let mainWindow: BrowserWindow | null = null;
 let browserManager: BrowserManager | null = null;
 let markdownWatcher: MarkdownFileWatcher | null = null;
+let terminalManager: TerminalManager | null = null;
 let controller: ConductorController | null = null;
 let stateStore: StateStore | null = null;
+let appUpdater: AppUpdater | null = null;
+let startupUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+let hasRunStartupUpdateCheck = false;
 const voiceTts = new VoiceTtsManager();
+
+function getAppUpdater(): AppUpdater {
+  if (appUpdater) return appUpdater;
+  const buildVersion = process.env.CONDUCTOR_BUILD_VERSION?.trim() || app.getVersion() || "0.1.0";
+  const buildTag = process.env.CONDUCTOR_BUILD_TAG?.trim() || null;
+  const buildSha = process.env.CONDUCTOR_BUILD_SHA?.trim() || null;
+  const rawRunNumber = process.env.CONDUCTOR_BUILD_RUN_NUMBER?.trim() || "";
+  const buildRunNumber = /^\d+$/.test(rawRunNumber) ? Number(rawRunNumber) : null;
+  const isDevMode = !app.isPackaged || Boolean(process.env.CONDUCTOR_DEV_SERVER_URL);
+  const downloadsDir = path.join(app.getPath("downloads"), "Conductor-Updates");
+
+  appUpdater = new AppUpdater({
+    currentVersion: buildVersion,
+    currentTag: buildTag,
+    currentCommitSha: buildSha,
+    currentRunNumber: buildRunNumber,
+    isDevMode,
+    downloadsDir,
+    openPath: (filePath) => shell.openPath(filePath),
+    showItemInFolder: (filePath) => shell.showItemInFolder(filePath),
+    openExternal: (url) => shell.openExternal(url),
+    onStateChange: (state) => sendToRenderer("updater:stateChanged", state),
+  });
+  return appUpdater;
+}
 
 const SHUTDOWN_TIMEOUT_MS = 3_000;
 
@@ -44,9 +82,15 @@ const quitGuard = new QuitGuard({
     return result.response === 1;
   },
   performShutdown: async () => {
+    if (startupUpdateTimer) {
+      clearTimeout(startupUpdateTimer);
+      startupUpdateTimer = null;
+    }
+    appUpdater?.dispose();
     voiceTts.stop();
     markdownWatcher?.dispose();
     markdownWatcher = null;
+    terminalManager?.disposeAll();
     browserManager?.destroyAll();
     if (controller) {
       await Promise.race([
@@ -142,6 +186,11 @@ function createApplicationMenu(): void {
           label: "Markdown Viewer に切替",
           accelerator: "CmdOrCtrl+Shift+M",
           click: () => sendToRenderer("conductor:shortcut", "toggle-markdown-viewer"),
+        },
+        {
+          label: "新しいターミナルタブを開く",
+          accelerator: "CmdOrCtrl+Shift+T",
+          click: () => sendToRenderer("conductor:shortcut", "new-terminal"),
         },
         { type: "separator" },
         {
@@ -306,6 +355,13 @@ function registerIpcHandlers(): void {
     controller?.refreshRemoteAccessStatus(),
   );
   ipcMain.handle("conductor:clearUsageRecords", () => controller?.clearUsageRecords());
+  ipcMain.handle("conductor:setUsageBudgets", (_e, budgets: UsageBudgetSettings) =>
+    controller?.setUsageBudgets(budgets),
+  );
+  ipcMain.handle(
+    "conductor:refreshProviderQuotas",
+    () => controller?.refreshProviderQuotas() ?? {},
+  );
 
   // Voice IPC (OS-standard TTS & macOS Microphone permission)
   ipcMain.handle("voice:speak", (_e, request: VoiceSpeakRequest) =>
@@ -432,13 +488,49 @@ function registerIpcHandlers(): void {
     markdownWatcher?.unwatch();
   });
 
-  // Local Image Viewer IPC
+  // Local Image & Video Viewer IPC
   ipcMain.handle("image:readFile", (_e, filePathOrUrl: string, baseFilePath?: string) =>
     readLocalImageFile(filePathOrUrl, baseFilePath),
+  );
+  ipcMain.handle("media:readVideo", (_e, filePathOrUrl: string, baseFilePath?: string) =>
+    readLocalVideoFile(filePathOrUrl, baseFilePath),
   );
 
   // Project File Tree read-only IPC (fs:list-dir, fs:read-text-file)
   registerProjectFileTreeIpcHandlers(ipcMain);
+
+  // Interactive Terminal (PTY) IPC
+  terminalManager = new TerminalManager({
+    onData: (event) => sendToRenderer("terminal:data", event),
+    onExit: (event) => sendToRenderer("terminal:exit", event),
+  });
+
+  ipcMain.handle("terminal:create", (_e, options?: TerminalCreateOptions) =>
+    terminalManager?.create(options) ?? { ok: false, error: "Terminal manager not initialized" },
+  );
+  ipcMain.handle("terminal:write", (_e, sessionId: string, data: string) =>
+    terminalManager?.write(sessionId, data) ?? { ok: false, error: "Terminal manager not initialized" },
+  );
+  ipcMain.handle("terminal:resize", (_e, sessionId: string, cols: number, rows: number) =>
+    terminalManager?.resize(sessionId, cols, rows) ?? {
+      ok: false,
+      error: "Terminal manager not initialized",
+    },
+  );
+  ipcMain.handle("terminal:close", (_e, sessionId: string) =>
+    terminalManager?.close(sessionId) ?? { ok: false },
+  );
+
+  // App Updates (GitHub Releases) IPC
+  ipcMain.handle("updater:getState", () => getAppUpdater().getState());
+  ipcMain.handle("updater:check", () => getAppUpdater().checkForUpdates({ silent: false }));
+  ipcMain.handle("updater:downloadAndOpen", () => getAppUpdater().downloadAndOpen());
+  ipcMain.handle("updater:cancelDownload", () => getAppUpdater().cancelDownload());
+  ipcMain.handle("updater:openDownloaded", () => getAppUpdater().openDownloaded());
+  ipcMain.handle("updater:showInFolder", () => getAppUpdater().showDownloadedInFolder());
+  ipcMain.handle("updater:openReleasePage", (_e, url?: string) =>
+    getAppUpdater().openReleasePage(url),
+  );
 }
 
 async function createWindow(): Promise<void> {
@@ -515,16 +607,41 @@ async function createWindow(): Promise<void> {
     voiceTts.stop();
     markdownWatcher?.dispose();
     markdownWatcher = null;
+    terminalManager?.disposeAll();
     browserManager?.destroyAll();
     mainWindow = null;
   });
 
   void controller.start();
+
+  // Check for updates once in the background shortly after startup (silently ignores network failures)
+  if (!hasRunStartupUpdateCheck) {
+    hasRunStartupUpdateCheck = true;
+    startupUpdateTimer = setTimeout(() => {
+      startupUpdateTimer = null;
+      void getAppUpdater().checkForUpdates({ silent: true });
+    }, 3_000);
+    startupUpdateTimer.unref?.();
+  }
 }
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: CONDUCTOR_MEDIA_PROTOCOL,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true,
+    },
+  },
+]);
 
 app.setName("Conductor");
 
 app.whenReady().then(async () => {
+  protocol.handle(CONDUCTOR_MEDIA_PROTOCOL, (request) => handleConductorMediaRequest(request));
   createApplicationMenu();
   registerIpcHandlers();
   await createWindow();

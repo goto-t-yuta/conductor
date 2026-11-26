@@ -411,10 +411,10 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
     Boolean(activeTab?.fileName) && activeTab?.fileName !== activeTab?.label;
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="flex-1 flex flex-col min-h-0 min-w-0">
       {/* Viewer Controls Toolbar */}
-      <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0">
-        <div className="flex items-center gap-1 min-w-0">
+      <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 overflow-x-auto">
+        <div className="flex items-center gap-1 shrink-0">
           {/* Fit / Actual Size Toggle */}
           <div className="inline-flex items-center p-0.5 rounded-md bg-zinc-200/70 dark:bg-zinc-800 shrink-0">
             <button
@@ -422,13 +422,13 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
               onClick={handleFit}
               disabled={!activeTab?.src}
               title={t(locale, "image.fitTitle")}
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap shrink-0 ${
                 zoomMode === "fit"
                   ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
                   : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
               }`}
             >
-              <Maximize2 className="w-3 h-3" />
+              <Maximize2 className="w-3 h-3 shrink-0" />
               <span>Fit</span>
             </button>
             <button
@@ -436,7 +436,7 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
               onClick={handleActualSize}
               disabled={!activeTab?.src}
               title={t(locale, "image.actualSizeTitle")}
-              className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+              className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap shrink-0 ${
                 isActualSizeActive
                   ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
                   : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
@@ -453,12 +453,12 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
             disabled={!activeTab?.src || !canZoomOut}
             title={t(locale, "image.zoomOutTitle")}
             aria-label={t(locale, "image.zoomOutAria")}
-            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-35 disabled:cursor-not-allowed transition-colors cursor-pointer"
+            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-35 disabled:cursor-not-allowed transition-colors cursor-pointer shrink-0"
           >
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
 
-          <span className="min-w-[40px] text-center font-mono text-[11px] text-zinc-600 dark:text-zinc-300 select-none">
+          <span className="min-w-[40px] text-center font-mono text-[11px] text-zinc-600 dark:text-zinc-300 select-none whitespace-nowrap shrink-0">
             {formatZoomLabel(zoomMode, zoomScale)}
           </span>
 
@@ -468,7 +468,7 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
             disabled={!activeTab?.src || !canZoomIn}
             title={t(locale, "image.zoomInTitle")}
             aria-label={t(locale, "image.zoomInAria")}
-            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-35 disabled:cursor-not-allowed transition-colors cursor-pointer"
+            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-35 disabled:cursor-not-allowed transition-colors cursor-pointer shrink-0"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
@@ -477,7 +477,7 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
         <div className="flex items-center gap-1.5 shrink-0">
           {/* Canvas background switcher (helpful for transparent PNGs) */}
           <div
-            className="inline-flex items-center p-0.5 rounded-md bg-zinc-200/70 dark:bg-zinc-800"
+            className="inline-flex items-center p-0.5 rounded-md bg-zinc-200/70 dark:bg-zinc-800 shrink-0"
             role="group"
             aria-label={t(locale, "image.bgGroupAria")}
           >
@@ -492,7 +492,7 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
                 key={opt.id}
                 type="button"
                 onClick={() => setCanvasBg(opt.id)}
-                className={`px-1.5 py-0.5 rounded text-[10.5px] font-medium transition-colors cursor-pointer ${
+                className={`px-1.5 py-0.5 rounded text-[10.5px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                   canvasBg === opt.id
                     ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
                     : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
@@ -508,7 +508,7 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
             onClick={onCloseActiveTab}
             title={t(locale, "image.closeTabTitle")}
             aria-label={t(locale, "image.closeTabTitle")}
-            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
           >
             <X className="w-3.5 h-3.5" />
           </button>

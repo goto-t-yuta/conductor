@@ -9,9 +9,12 @@ import type {
   ChatSessionSummary,
   ModelOption,
   Project,
+  ProviderQuotaSnapshot,
+  ProviderQuotasMap,
   ProviderStatus,
   RemoteAccessStatus,
   ToolActivityChip,
+  UsageBudgetSettings,
   UsageRecord,
   WorkerActivityEntry,
 } from "../../shared/types.js";
@@ -269,6 +272,76 @@ function areUsageRecordsEqual(a: UsageRecord, b: UsageRecord): boolean {
   );
 }
 
+function areUsageBudgetsEqual(
+  a: UsageBudgetSettings | undefined,
+  b: UsageBudgetSettings | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.weekly.unit === b.weekly.unit &&
+    a.weekly.limit === b.weekly.limit &&
+    a.monthly.unit === b.monthly.unit &&
+    a.monthly.limit === b.monthly.limit
+  );
+}
+
+function areProviderQuotaSnapshotsEqual(
+  a: ProviderQuotaSnapshot | undefined,
+  b: ProviderQuotaSnapshot | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (
+    a.provider !== b.provider ||
+    a.status !== b.status ||
+    a.planType !== b.planType ||
+    a.limitName !== b.limitName ||
+    a.updatedAt !== b.updatedAt ||
+    a.note !== b.note ||
+    a.windows.length !== b.windows.length
+  ) {
+    return false;
+  }
+  if (a.credits !== b.credits) {
+    if (!a.credits || !b.credits) return false;
+    if (
+      a.credits.hasCredits !== b.credits.hasCredits ||
+      a.credits.unlimited !== b.credits.unlimited ||
+      a.credits.balance !== b.credits.balance
+    ) {
+      return false;
+    }
+  }
+  for (let i = 0; i < a.windows.length; i += 1) {
+    const wa = a.windows[i];
+    const wb = b.windows[i];
+    if (
+      wa.id !== wb.id ||
+      wa.windowDurationMins !== wb.windowDurationMins ||
+      wa.usedPercent !== wb.usedPercent ||
+      wa.remainingPercent !== wb.remainingPercent ||
+      wa.resetsAt !== wb.resetsAt
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function areProviderQuotasMapEqual(
+  a: ProviderQuotasMap | undefined,
+  b: ProviderQuotasMap | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    areProviderQuotaSnapshotsEqual(a.codex, b.codex) &&
+    areProviderQuotaSnapshotsEqual(a.agy, b.agy) &&
+    areProviderQuotaSnapshotsEqual(a.claude, b.claude)
+  );
+}
+
 function areRemoteAccessEqual(
   a: RemoteAccessStatus | undefined,
   b: RemoteAccessStatus | undefined,
@@ -392,6 +465,12 @@ export function reconcileAppSnapshot(
       : prev.usageRecords === next.usageRecords
         ? prev.usageRecords
         : next.usageRecords;
+  const usageBudgets = areUsageBudgetsEqual(prev.usageBudgets, next.usageBudgets)
+    ? prev.usageBudgets
+    : next.usageBudgets;
+  const providerQuotas = areProviderQuotasMapEqual(prev.providerQuotas, next.providerQuotas)
+    ? prev.providerQuotas
+    : next.providerQuotas;
 
   const unchanged =
     projects === prev.projects &&
@@ -425,6 +504,8 @@ export function reconcileAppSnapshot(
     prev.remoteAccessToken === next.remoteAccessToken &&
     remoteAccess === prev.remoteAccess &&
     usageRecords === prev.usageRecords &&
+    usageBudgets === prev.usageBudgets &&
+    providerQuotas === prev.providerQuotas &&
     prev.lastErrorBanner === next.lastErrorBanner;
 
   if (unchanged) {
@@ -443,5 +524,7 @@ export function reconcileAppSnapshot(
     models,
     remoteAccess,
     usageRecords,
+    usageBudgets,
+    providerQuotas,
   };
 }

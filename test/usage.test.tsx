@@ -12,12 +12,15 @@ import {
 import type { BrowserManager } from "../src/main/browser-manager.js";
 import {
   extractAgyStreamJsonUsage,
+  extractClaudeRateLimitEvent,
   extractClaudeStreamJsonUsage,
   type CliTurnCallbacks,
   type RunningCliTurn,
 } from "../src/main/cli-agent-runner.js";
 import {
+  extractCodexRateLimitUpdate,
   extractCodexTokenUsage,
+  parseCodexRateLimits,
   type CodexAppServerClient,
   type CodexNotification,
 } from "../src/main/codex-client.js";
@@ -26,14 +29,27 @@ import { StateStore } from "../src/main/state-store.js";
 import { SettingsModal } from "../src/renderer/components/SettingsModal.js";
 import { UnifiedChat } from "../src/renderer/components/UnifiedChat.js";
 import { UsagePanel } from "../src/renderer/components/UsagePanel.js";
-import type { AppSnapshot, Project, UsageRecord } from "../src/shared/types.js";
+import type {
+  AppSnapshot,
+  Project,
+  ProviderQuotasMap,
+  UsageBudgetSettings,
+  UsageRecord,
+} from "../src/shared/types.js";
 import {
+  buildDailyUsageTrend,
+  buildWeeklyUsageTrend,
   compactUsageRecords,
   createUsageRecord,
+  DEFAULT_USAGE_BUDGETS,
   estimateUsageCostUsd,
+  evaluateUsageBudget,
   formatTokenCount,
+  formatUsagePercent,
   formatUsdCost,
+  mergeProviderQuotaSnapshot,
   normalizeRawTokenUsage,
+  normalizeUsageBudgetSettings,
   normalizeUsageRecords,
   resolveModelPricing,
   summarizeAllUsagePeriods,
@@ -340,6 +356,108 @@ describe("Shared usage normalization, pricing, compaction & aggregation (src/sha
     expect(formatUsdCost(0.0042, { estimated: true, compact: true })).toBe("~$0.004");
     expect(formatUsdCost(1.234)).toBe("$1.23");
     expect(formatUsdCost(1.234, { estimated: true })).toBe("~$1.23");
+    expect(formatUsagePercent(0)).toBe("0%");
+    expect(formatUsagePercent(0.45)).toBe("0.5%");
+    expect(formatUsagePercent(45)).toBe("45%");
+    expect(formatUsagePercent(82.4)).toBe("82.4%");
+    expect(formatUsagePercent(112.7)).toBe("113%");
+  });
+
+  it("computes local Monday-start weekly summaries across month boundaries, evaluates budgets, and builds daily/weekly trends", () => {
+    // 2026-12-02 is Wednesday -> Monday of this week is 2026-11-30 (previous month!)
+    const now = new Date(2026, 11, 2, 15, 0, 0);
+    const monPrevMonthTs = new Date(2026, 10, 30, 10, 0, 0).toISOString(); // Nov 30 (in this week, NOT in Dec month)
+    const sunPrevWeekTs = new Date(2026, 10, 29, 22, 0, 0).toISOString(); // Nov 29 (previous week)
+    const todayTs = new Date(2026, 11, 2, 11, 0, 0).toISOString(); // Dec 2 (today, this week, this month)
+
+    const records: UsageRecord[] = [
+      createUsageRecord({
+        id: "w1",
+        timestamp: todayTs,
+        source: "chat",
+        provider: "codex",
+        model: "gpt-5.4",
+        tokens: { inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 500_000 },
+        exactCostUsd: 10.0,
+      })!,
+      createUsageRecord({
+        id: "w2",
+        timestamp: monPrevMonthTs,
+        source: "worker",
+        provider: "claude",
+        model: "claude-sonnet-4-5",
+        projectName: "conductor",
+        tokens: { inputTokens: 500_000, cachedInputTokens: 0, outputTokens: 200_000 },
+        exactCostUsd: 11.5,
+      })!,
+      createUsageRecord({
+        id: "w3",
+        timestamp: sunPrevWeekTs,
+        source: "worker",
+        provider: "agy",
+        model: "gemini-4-neon-high",
+        projectName: "conductor",
+        tokens: { inputTokens: 300_000, cachedInputTokens: 0, outputTokens: 100_000 },
+        exactCostUsd: 5.0,
+      })!,
+    ];
+
+    const periods = summarizeAllUsagePeriods(records, now);
+    expect(periods.today.turnCount).toBe(1);
+    expect(periods.today.costUsd).toBeCloseTo(10.0, 6);
+    // Week includes Dec 2 (10.0) + Nov 30 (11.5) = 21.5, excludes Nov 29
+    expect(periods.week.turnCount).toBe(2);
+    expect(periods.week.costUsd).toBeCloseTo(21.5, 6);
+    expect(periods.week.totalTokens).toBe(1_500_000 + 700_000);
+    // Month (Dec) includes only Dec 2
+    expect(periods.month.turnCount).toBe(1);
+    expect(periods.month.costUsd).toBeCloseTo(10.0, 6);
+    expect(periods.all.turnCount).toBe(3);
+
+    // Budget normalization & threshold evaluation (ok / warning >80% / exceeded >=100%)
+    const defaults = normalizeUsageBudgetSettings(undefined);
+    expect(defaults).toEqual(DEFAULT_USAGE_BUDGETS);
+
+    const custom = normalizeUsageBudgetSettings({
+      weekly: { unit: "usd", limit: 25 },
+      monthly: { unit: "tokens", limit: 1_000_000 },
+    });
+    const weeklyEval = evaluateUsageBudget(periods.week.costUsd, periods.week.totalTokens, custom.weekly);
+    expect(weeklyEval.percent).toBeCloseTo(86, 4);
+    expect(weeklyEval.severity).toBe("warning");
+    expect(weeklyEval.remaining).toBeCloseTo(3.5, 4);
+    expect(weeklyEval.overage).toBe(0);
+
+    const monthlyEval = evaluateUsageBudget(
+      periods.month.costUsd,
+      periods.month.totalTokens,
+      custom.monthly,
+    );
+    expect(monthlyEval.unit).toBe("tokens");
+    expect(monthlyEval.percent).toBeCloseTo(150, 4);
+    expect(monthlyEval.barPercent).toBe(100);
+    expect(monthlyEval.severity).toBe("exceeded");
+    expect(monthlyEval.remaining).toBe(0);
+    expect(monthlyEval.overage).toBe(500_000);
+
+    const okEval = evaluateUsageBudget(5, 100_000, { unit: "usd", limit: 25 });
+    expect(okEval.severity).toBe("ok");
+    expect(okEval.percent).toBeCloseTo(20, 4);
+
+    // Daily (14d) & Weekly (8w) trend buckets
+    const daily = buildDailyUsageTrend(records, 14, now);
+    expect(daily).toHaveLength(14);
+    expect(daily.at(-1)?.isCurrent).toBe(true);
+    expect(daily.at(-1)?.costUsd).toBeCloseTo(10.0, 6);
+    expect(daily.at(-1)?.byProviderCostUsd.codex).toBeCloseTo(10.0, 6);
+    expect(daily.at(-3)?.costUsd).toBeCloseTo(11.5, 6); // Nov 30
+    expect(daily.at(-4)?.costUsd).toBeCloseTo(5.0, 6); // Nov 29
+
+    const weekly = buildWeeklyUsageTrend(records, 8, now);
+    expect(weekly).toHaveLength(8);
+    expect(weekly.at(-1)?.isCurrent).toBe(true);
+    expect(weekly.at(-1)?.costUsd).toBeCloseTo(21.5, 6);
+    expect(weekly.at(-2)?.costUsd).toBeCloseTo(5.0, 6);
   });
 });
 
@@ -531,6 +649,85 @@ describe("Provider usage event parsing (Codex / AGY / Claude)", () => {
       reasoningTokens: 0,
       costUsd: 0.0384,
       model: "claude-sonnet-4-5-20250929",
+    });
+  });
+
+  it("parses Codex account/rateLimits/read, sparse rolling updates, and Claude rate_limit_event", () => {
+    const fixedNow = new Date("2026-11-26T08:00:00.000Z");
+    const codexSnap = parseCodexRateLimits(
+      {
+        rateLimits: {
+          limitId: "codex",
+          planType: "pro",
+          primary: {
+            usedPercent: 45,
+            windowDurationMins: 10080,
+            resetsAt: 1796054662,
+          },
+          secondary: {
+            usedPercent: 18,
+            windowDurationMins: 300,
+            resetsAt: 1795700000,
+          },
+          credits: {
+            hasCredits: true,
+            unlimited: false,
+            balance: "59818.99",
+          },
+        },
+      },
+      fixedNow,
+    );
+    expect(codexSnap).not.toBeNull();
+    expect(codexSnap!.provider).toBe("codex");
+    expect(codexSnap!.planType).toBe("pro");
+    expect(codexSnap!.windows).toHaveLength(2);
+    expect(codexSnap!.windows[0]).toMatchObject({
+      id: "primary",
+      windowDurationMins: 10080,
+      usedPercent: 45,
+      remainingPercent: 55,
+    });
+    expect(codexSnap!.credits?.balance).toBe("59818.99");
+
+    // Sparse rolling notification omits planType & credits -> merge preserves them
+    const rolling = extractCodexRateLimitUpdate(
+      {
+        method: "account/rateLimits/updated",
+        params: {
+          rateLimits: {
+            primary: {
+              usedPercent: 52,
+              windowDurationMins: 10080,
+              resetsAt: 1796054662,
+            },
+          },
+        },
+      },
+      fixedNow,
+    );
+    expect(rolling).not.toBeNull();
+    const merged = mergeProviderQuotaSnapshot(codexSnap!, rolling!);
+    expect(merged.planType).toBe("pro");
+    expect(merged.credits?.balance).toBe("59818.99");
+    expect(merged.windows.find((w) => w.id === "primary")?.usedPercent).toBe(52);
+    expect(merged.windows.find((w) => w.id === "secondary")?.usedPercent).toBe(18);
+
+    // Claude rate_limit_event with fractional utilization
+    const claudeWin = extractClaudeRateLimitEvent({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "allowed_warning",
+        rateLimitType: "seven_day",
+        utilization: 0.84,
+        resetsAt: 1796054662,
+      },
+    });
+    expect(claudeWin).toMatchObject({
+      id: "seven_day",
+      windowDurationMins: 10080,
+      usedPercent: 84,
+      remainingPercent: 16,
     });
   });
 });
@@ -767,6 +964,83 @@ describe("ConductorController & StateStore end-to-end usage ledger persistence",
     expect(reloaded.getSnapshot().usageRecords).toEqual([]);
     expect(normalizeUsageRecords(store.load().usageRecords)).toEqual([]);
   });
+
+  it("persists editable usage budgets and captures live Codex & Claude provider quotas", async () => {
+    const dataDir = makeTempDir("conductor-budget-ctrl-");
+    const store = new StateStore(dataDir);
+
+    let workerNotifHandler: ((n: CodexNotification) => void) | null = null;
+    const fakeWorkerClient = {
+      label: "fake-worker",
+      isConnected: () => true,
+      onNotification: (fn: (n: CodexNotification) => void) => {
+        workerNotifHandler = fn;
+        return () => {};
+      },
+      onDisconnect: () => () => {},
+      stop: () => {},
+      readAccountRateLimits: async () => ({
+        provider: "codex" as const,
+        status: "live" as const,
+        planType: "pro",
+        limitName: "codex",
+        credits: { hasCredits: true, unlimited: false, balance: "50000" },
+        windows: [
+          {
+            id: "primary",
+            windowDurationMins: 10080,
+            usedPercent: 45,
+            remainingPercent: 55,
+            resetsAt: "2026-12-01T10:00:00.000Z",
+          },
+        ],
+        updatedAt: "2026-11-26T08:00:00.000Z",
+      }),
+    } as unknown as CodexAppServerClient;
+
+    const controller = new ConductorController({
+      store,
+      browser: createFakeBrowserManager(),
+      onSnapshot: () => {},
+      workerClient: fakeWorkerClient,
+    });
+
+    const nextBudgets: UsageBudgetSettings = {
+      weekly: { unit: "usd", limit: 40 },
+      monthly: { unit: "tokens", limit: 15_000_000 },
+    };
+    controller.setUsageBudgets(nextBudgets);
+    expect(controller.getSnapshot().usageBudgets).toEqual(nextBudgets);
+
+    // Persists across reload
+    const reloaded = new ConductorController({
+      store,
+      browser: createFakeBrowserManager(),
+      onSnapshot: () => {},
+    });
+    expect(reloaded.getSnapshot().usageBudgets).toEqual(nextBudgets);
+
+    // Refresh Codex official quota
+    const quotas = await controller.refreshProviderQuotas();
+    expect(quotas.codex?.planType).toBe("pro");
+    expect(quotas.codex?.windows[0]?.usedPercent).toBe(45);
+
+    // Rolling notification without threadId updates Codex quota
+    expect(workerNotifHandler).not.toBeNull();
+    workerNotifHandler!({
+      method: "account/rateLimits/updated",
+      threadId: null,
+      turnId: null,
+      itemId: null,
+      params: {
+        rateLimits: {
+          primary: { usedPercent: 61, windowDurationMins: 10080 },
+        },
+      },
+    });
+    expect(controller.getSnapshot().providerQuotas?.codex?.windows[0]?.usedPercent).toBe(61);
+    expect(controller.getSnapshot().providerQuotas?.codex?.planType).toBe("pro");
+  });
 });
 
 describe("Usage UI (Header Pill, SettingsModal Usage Tab, UsagePanel)", () => {
@@ -808,8 +1082,14 @@ describe("Usage UI (Header Pill, SettingsModal Usage Tab, UsagePanel)", () => {
     );
 
     expect(html).toContain('data-testid="usage-period-today"');
+    expect(html).toContain('data-testid="usage-period-week"');
     expect(html).toContain('data-testid="usage-period-month"');
     expect(html).toContain('data-testid="usage-period-all"');
+    expect(html).toContain('data-testid="usage-budget-section"');
+    expect(html).toContain('data-testid="usage-gauge-weekly"');
+    expect(html).toContain('data-testid="usage-gauge-monthly"');
+    expect(html).toContain('data-testid="usage-trend-section"');
+    expect(html).toContain('data-testid="usage-trend-chart"');
     expect(html).toContain('data-testid="usage-total-tokens"');
     expect(html).toContain('data-testid="usage-token-breakdown"');
     expect(html).toContain('data-testid="usage-total-cost"');
@@ -825,6 +1105,115 @@ describe("Usage UI (Header Pill, SettingsModal Usage Tab, UsagePanel)", () => {
     expect(html).toContain("サブスクリプション");
     expect(html).toContain('data-testid="usage-reset-btn"');
     expect(html).toContain("履歴をリセット");
+  });
+
+  it("renders weekly/monthly gauge warning & exceeded states, inline limit editor, official provider quotas, and clean English i18n", () => {
+    const heavyRecords: UsageRecord[] = [
+      createUsageRecord({
+        id: "h1",
+        timestamp: new Date(2026, 10, 26, 11, 0, 0).toISOString(),
+        source: "worker",
+        provider: "claude",
+        model: "claude-opus-4-5",
+        projectName: "conductor",
+        tokens: { inputTokens: 1_000_000, cachedInputTokens: 500_000, outputTokens: 200_000 },
+        exactCostUsd: 22.0, // 88% of $25 weekly -> warning
+      })!,
+      createUsageRecord({
+        id: "h2",
+        timestamp: new Date(2026, 10, 10, 11, 0, 0).toISOString(),
+        source: "worker",
+        provider: "codex",
+        model: "gpt-5.4",
+        projectName: "conductor",
+        tokens: { inputTokens: 5_000_000, cachedInputTokens: 2_000_000, outputTokens: 1_000_000 },
+        exactCostUsd: 90.0, // total month = 112.0 -> 112% of $100 monthly -> exceeded
+      })!,
+    ];
+
+    const providerQuotas: ProviderQuotasMap = {
+      codex: {
+        provider: "codex",
+        status: "live",
+        planType: "pro",
+        credits: { hasCredits: true, unlimited: false, balance: "59818" },
+        windows: [
+          {
+            id: "primary",
+            windowDurationMins: 10080,
+            usedPercent: 45,
+            remainingPercent: 55,
+            resetsAt: "2026-12-01T10:00:00.000Z",
+          },
+        ],
+        updatedAt: now.toISOString(),
+      },
+      claude: {
+        provider: "claude",
+        status: "live",
+        windows: [
+          {
+            id: "seven_day",
+            windowDurationMins: 10080,
+            usedPercent: 85,
+            remainingPercent: 15,
+            resetsAt: "2026-12-03T00:00:00.000Z",
+          },
+        ],
+        updatedAt: now.toISOString(),
+      },
+    };
+
+    const jaHtml = renderToStaticMarkup(
+      <UsagePanel
+        usageRecords={heavyRecords}
+        usageBudgets={{ weekly: { unit: "usd", limit: 25 }, monthly: { unit: "usd", limit: 100 } }}
+        providerQuotas={providerQuotas}
+        locale="ja"
+        onUpdateBudgets={vi.fn()}
+        onRefreshProviderQuotas={vi.fn()}
+        defaultEditingBudgets={true}
+        now={now}
+      />,
+    );
+    expect(jaHtml).toContain('data-testid="usage-gauge-weekly" data-severity="warning"');
+    expect(jaHtml).toContain('data-testid="usage-gauge-monthly" data-severity="exceeded"');
+    expect(jaHtml).toContain("88%");
+    expect(jaHtml).toContain("112%");
+    expect(jaHtml).toContain("注意 (80%超)");
+    expect(jaHtml).toContain("上限超過");
+    expect(jaHtml).toContain('data-testid="usage-budget-editor"');
+    expect(jaHtml).toContain('data-testid="usage-provider-quota-codex"');
+    expect(jaHtml).toContain('data-testid="usage-provider-quota-claude"');
+    expect(jaHtml).toContain("週次クォータ (7日間)");
+    expect(jaHtml).toContain("残り 55%");
+
+    const enHtml = renderToStaticMarkup(
+      <UsagePanel
+        usageRecords={heavyRecords}
+        usageBudgets={{
+          weekly: { unit: "tokens", limit: 2_000_000 },
+          monthly: { unit: "usd", limit: 100 },
+        }}
+        providerQuotas={providerQuotas}
+        locale="en"
+        onUpdateBudgets={vi.fn()}
+        onRefreshProviderQuotas={vi.fn()}
+        onClearUsage={vi.fn()}
+        defaultEditingBudgets={true}
+        initialTrendGranularity="weekly"
+        now={now}
+      />,
+    );
+    expect(enHtml).toContain("Today");
+    expect(enHtml).toContain("This Week");
+    expect(enHtml).toContain("This Month");
+    expect(enHtml).toContain("All Time");
+    expect(enHtml).toContain("Weekly &amp; Monthly Quota");
+    expect(enHtml).toContain("Official Provider Quotas / Rate Limits");
+    expect(enHtml).toContain("Usage Trend");
+    expect(enHtml).toContain("Weekly (8w)");
+    expect(enHtml).not.toMatch(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/);
   });
 
   it("renders SettingsModal opened directly on the Usage tab", () => {

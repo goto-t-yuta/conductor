@@ -13,6 +13,7 @@ import {
   GitMerge,
   GitPullRequest,
   Globe,
+  Layers,
   ListTodo,
   Loader2,
   MessageSquare,
@@ -45,13 +46,23 @@ import {
   QUESTIONS_SECTION_MAX_HEIGHT_RATIO,
   QUESTIONS_SECTION_MIN_HEIGHT,
   clampQuestionsSectionHeight,
+  countTasksByProjectGroup,
   filterCompletedTasks,
   formatCompletedCountBadge,
   getQuickStatusTransition,
   getTaskCardSubtitle,
+  groupTasksByProject,
+  loadCollapsedProjectGroups,
   loadQuestionsSectionHeight,
+  loadTaskGroupByProject,
+  makeProjectGroupCollapseKey,
   partitionSidebarTasks,
+  saveCollapsedProjectGroups,
   saveQuestionsSectionHeight,
+  saveTaskGroupByProject,
+  toggleCollapsedProjectGroup,
+  type TaskProjectGroup,
+  type TaskSidebarSection,
 } from "../lib/task-sidebar.js";
 
 export interface TaskSidebarProps {
@@ -63,6 +74,9 @@ export interface TaskSidebarProps {
   selectedProjectId: string | null;
   selectedTaskId: string | null;
   defaultCompletedExpanded?: boolean;
+  defaultCompletedSearch?: string;
+  defaultGroupByProject?: boolean;
+  defaultCollapsedProjectGroups?: readonly string[];
   defaultQuestionsExpanded?: boolean;
   defaultQuestionsSearch?: string;
   onSelectProjectFilter: (id: string | null) => void;
@@ -115,6 +129,9 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
   selectedProjectId,
   selectedTaskId,
   defaultCompletedExpanded = false,
+  defaultCompletedSearch = "",
+  defaultGroupByProject,
+  defaultCollapsedProjectGroups,
   defaultQuestionsExpanded = true,
   defaultQuestionsSearch = "",
   onSelectProjectFilter,
@@ -135,7 +152,15 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
   const [projectsExpanded, setProjectsExpanded] = useState(false);
   const [projectSearch, setProjectSearch] = useState("");
   const [completedExpanded, setCompletedExpanded] = useState(defaultCompletedExpanded);
-  const [completedSearch, setCompletedSearch] = useState("");
+  const [completedSearch, setCompletedSearch] = useState(defaultCompletedSearch);
+  const [groupByProject, setGroupByProject] = useState<boolean>(() =>
+    defaultGroupByProject !== undefined ? defaultGroupByProject : loadTaskGroupByProject(),
+  );
+  const [collapsedProjectGroups, setCollapsedProjectGroups] = useState<Set<string>>(() =>
+    defaultCollapsedProjectGroups !== undefined
+      ? new Set(defaultCollapsedProjectGroups)
+      : loadCollapsedProjectGroups(),
+  );
   const [questionsExpanded, setQuestionsExpanded] = useState(defaultQuestionsExpanded);
   const [questionsSearch, setQuestionsSearch] = useState(defaultQuestionsSearch);
   const [questionsHeight, setQuestionsHeight] = useState<number | null>(() =>
@@ -324,7 +349,58 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
     completedTasks.length,
     hasCompletedQuery,
   );
+  const activeProjectGroups = useMemo(
+    () => groupTasksByProject(activeTasks, projects, locale),
+    [activeTasks, projects, locale],
+  );
+  const completedProjectGroups = useMemo(
+    () => groupTasksByProject(filteredCompletedTasks, projects, locale),
+    [filteredCompletedTasks, projects, locale],
+  );
+  const completedTotalByGroup = useMemo(
+    () => countTasksByProjectGroup(completedTasks, projects),
+    [completedTasks, projects],
+  );
   const runningCount = tasks.filter((t) => t.status === "running").length;
+
+  const handleToggleGroupByProject = () => {
+    setGroupByProject((prev) => {
+      const next = !prev;
+      saveTaskGroupByProject(next);
+      return next;
+    });
+  };
+
+  const handleToggleProjectGroupCollapse = (collapseKey: string) => {
+    setCollapsedProjectGroups((prev) => {
+      const next = toggleCollapsedProjectGroup(prev, collapseKey);
+      saveCollapsedProjectGroups(next);
+      return next;
+    });
+  };
+
+  const renderTaskCard = (task: AgentTask, hideProjectBadge = false) => {
+    const proj = findTaskProject(projects, task);
+    return (
+      <TaskCard
+        key={task.id}
+        task={task}
+        colorHex={projectColor(projects, task)}
+        effectiveMode={getEffectiveProjectMode(proj, defaultIntegrationMode)}
+        parentBranch={proj?.gitBranch ?? null}
+        locale={locale}
+        hideProjectBadge={hideProjectBadge}
+        isSelected={selectedTaskId === task.id}
+        onSelect={() => onSelectTask(task.id)}
+        onOpenPreview={(url) => onOpenPreviewUrl(url, task)}
+        onMention={() => onMentionTask(task)}
+        onUpdateStatus={(status) => onUpdateTaskStatus(task.id, status)}
+        onStop={() => onStopWorker(task.id)}
+        onDelete={() => onDeleteTask(task.id)}
+        onLand={onLandTask ? (opts) => onLandTask(task.id, opts) : undefined}
+      />
+    );
+  };
 
   return (
     <aside
@@ -332,24 +408,47 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
       className="flex flex-col h-full bg-zinc-50 dark:bg-[#13161c] border-r border-zinc-200/80 dark:border-zinc-800/90"
     >
       {/* Header with space for macOS traffic lights */}
-      <div className="drag-region h-11 flex items-center justify-between pl-[78px] pr-3 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0">
+      <div className="drag-region h-11 flex items-center justify-between gap-2 pl-[78px] pr-3 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0">
           <ListTodo className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-          <span className="text-[12.5px] font-semibold truncate">{t(locale, "sidebar.tasks")}</span>
+          <span className="text-[12.5px] font-semibold truncate whitespace-nowrap">
+            {t(locale, "sidebar.tasks")}
+          </span>
           {runningCount > 0 && (
-            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-400">
+            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 shrink-0 whitespace-nowrap">
               {runningCount}
             </span>
           )}
         </div>
-        <button
-          type="button"
-          onClick={onAddProject}
-          title={t(locale, "sidebar.addProjectTitle")}
-          className="no-drag p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-        >
-          <FolderPlus className="w-3.5 h-3.5" />
-        </button>
+        <div className="no-drag flex items-center gap-0.5 shrink-0">
+          <button
+            type="button"
+            data-testid="toggle-project-grouping"
+            aria-pressed={groupByProject}
+            aria-label={t(locale, "sidebar.groupByProjectAria")}
+            onClick={handleToggleGroupByProject}
+            title={
+              groupByProject
+                ? t(locale, "sidebar.groupByProjectOnTitle")
+                : t(locale, "sidebar.groupByProjectOffTitle")
+            }
+            className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+              groupByProject
+                ? "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/25"
+                : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={onAddProject}
+            title={t(locale, "sidebar.addProjectTitle")}
+            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+          >
+            <FolderPlus className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       {/* Compact Auto-Discovered Projects Section */}
@@ -545,27 +644,25 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
                   </span>
                   <span className="text-[10px] text-zinc-400 tabular-nums">{activeTasks.length}</span>
                 </div>
-                {activeTasks.map((task) => {
-                  const proj = findTaskProject(projects, task);
-                  return (
-                    <TaskCard
-                      key={task.id}
-                      task={task}
-                      colorHex={projectColor(projects, task)}
-                      effectiveMode={getEffectiveProjectMode(proj, defaultIntegrationMode)}
-                      parentBranch={proj?.gitBranch ?? null}
-                      locale={locale}
-                      isSelected={selectedTaskId === task.id}
-                      onSelect={() => onSelectTask(task.id)}
-                      onOpenPreview={(url) => onOpenPreviewUrl(url, task)}
-                      onMention={() => onMentionTask(task)}
-                      onUpdateStatus={(status) => onUpdateTaskStatus(task.id, status)}
-                      onStop={() => onStopWorker(task.id)}
-                      onDelete={() => onDeleteTask(task.id)}
-                      onLand={onLandTask ? (opts) => onLandTask(task.id, opts) : undefined}
-                    />
-                  );
-                })}
+                {groupByProject ? (
+                  <div className="space-y-2" data-testid="active-project-groups">
+                    {activeProjectGroups.map((group) => (
+                      <ProjectTaskGroupSection
+                        key={makeProjectGroupCollapseKey("active", group.groupKey)}
+                        group={group}
+                        section="active"
+                        locale={locale}
+                        isCollapsed={collapsedProjectGroups.has(
+                          makeProjectGroupCollapseKey("active", group.groupKey),
+                        )}
+                        onToggleCollapse={handleToggleProjectGroupCollapse}
+                        renderTaskCard={(task) => renderTaskCard(task, true)}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  activeTasks.map((task) => renderTaskCard(task, false))
+                )}
               </div>
             )}
 
@@ -645,28 +742,26 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
                           </button>
                         )}
                       </div>
-                    ) : (
-                      filteredCompletedTasks.map((task) => {
-                        const proj = findTaskProject(projects, task);
-                        return (
-                          <TaskCard
-                            key={task.id}
-                            task={task}
-                            colorHex={projectColor(projects, task)}
-                            effectiveMode={getEffectiveProjectMode(proj, defaultIntegrationMode)}
-                            parentBranch={proj?.gitBranch ?? null}
+                    ) : groupByProject ? (
+                      <div className="space-y-2" data-testid="completed-project-groups">
+                        {completedProjectGroups.map((group) => (
+                          <ProjectTaskGroupSection
+                            key={makeProjectGroupCollapseKey("completed", group.groupKey)}
+                            group={group}
+                            section="completed"
                             locale={locale}
-                            isSelected={selectedTaskId === task.id}
-                            onSelect={() => onSelectTask(task.id)}
-                            onOpenPreview={(url) => onOpenPreviewUrl(url, task)}
-                            onMention={() => onMentionTask(task)}
-                            onUpdateStatus={(status) => onUpdateTaskStatus(task.id, status)}
-                            onStop={() => onStopWorker(task.id)}
-                            onDelete={() => onDeleteTask(task.id)}
-                            onLand={onLandTask ? (opts) => onLandTask(task.id, opts) : undefined}
+                            isCollapsed={collapsedProjectGroups.has(
+                              makeProjectGroupCollapseKey("completed", group.groupKey),
+                            )}
+                            forceExpanded={hasCompletedQuery}
+                            totalCountInGroup={completedTotalByGroup.get(group.groupKey)}
+                            onToggleCollapse={handleToggleProjectGroupCollapse}
+                            renderTaskCard={(task) => renderTaskCard(task, true)}
                           />
-                        );
-                      })
+                        ))}
+                      </div>
+                    ) : (
+                      filteredCompletedTasks.map((task) => renderTaskCard(task, false))
                     )}
                   </div>
                 )}
@@ -867,12 +962,149 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
   );
 });
 
+export interface ProjectTaskGroupSectionProps {
+  group: TaskProjectGroup;
+  section: TaskSidebarSection;
+  locale: UiLocale;
+  isCollapsed: boolean;
+  forceExpanded?: boolean;
+  totalCountInGroup?: number;
+  onToggleCollapse: (collapseKey: string) => void;
+  renderTaskCard: (task: AgentTask) => React.ReactNode;
+}
+
+export const ProjectTaskGroupSection: React.FC<ProjectTaskGroupSectionProps> = ({
+  group,
+  section,
+  locale,
+  isCollapsed,
+  forceExpanded = false,
+  totalCountInGroup,
+  onToggleCollapse,
+  renderTaskCard,
+}) => {
+  const collapseKey = makeProjectGroupCollapseKey(section, group.groupKey);
+  const isExpanded = forceExpanded || !isCollapsed;
+  const totalInProject = totalCountInGroup ?? group.tasks.length;
+  const countBadgeText = formatCompletedCountBadge(
+    group.tasks.length,
+    totalInProject,
+    forceExpanded,
+  );
+
+  return (
+    <div
+      data-testid="project-group-section"
+      data-project-group={group.groupKey}
+      data-section={section}
+      className="space-y-1.5"
+    >
+      <button
+        type="button"
+        data-testid="project-group-header"
+        data-project-group={group.groupKey}
+        data-section={section}
+        aria-expanded={isExpanded}
+        onClick={() => {
+          if (!forceExpanded) {
+            onToggleCollapse(collapseKey);
+          }
+        }}
+        title={
+          forceExpanded
+            ? t(locale, "sidebar.projectGroupMatchTitle", {
+                filtered: group.tasks.length,
+                total: totalInProject,
+              })
+            : isExpanded
+              ? t(locale, "sidebar.projectGroupCollapseTitle", { name: group.projectName })
+              : t(locale, "sidebar.projectGroupExpandTitle", { name: group.projectName })
+        }
+        className={`w-full flex items-center justify-between gap-1.5 px-1.5 py-1 rounded-lg text-left transition-colors ${
+          forceExpanded
+            ? "bg-indigo-500/[0.08] dark:bg-indigo-500/[0.14] cursor-default"
+            : "hover:bg-zinc-200/55 dark:hover:bg-zinc-800/60 cursor-pointer"
+        }`}
+      >
+        <span className="inline-flex items-center gap-1.5 min-w-0">
+          {isExpanded ? (
+            <ChevronDown className="w-3 h-3 text-zinc-400 shrink-0" />
+          ) : (
+            <ChevronRight className="w-3 h-3 text-zinc-400 shrink-0" />
+          )}
+          <span
+            className="w-2 h-2 rounded-full shrink-0"
+            style={{ backgroundColor: group.colorHex }}
+          />
+          <span className="text-[11px] font-semibold text-zinc-700 dark:text-zinc-200 truncate">
+            {group.projectName}
+          </span>
+        </span>
+        <span className="inline-flex items-center gap-1 shrink-0">
+          {group.runningCount > 0 && (
+            <span
+              data-testid="project-group-running-badge"
+              title={t(locale, "sidebar.projectGroupRunningTitle", {
+                count: group.runningCount,
+              })}
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9.5px] font-semibold bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 tabular-nums"
+            >
+              <Loader2 className="w-2.5 h-2.5 animate-spin shrink-0" />
+              {group.runningCount}
+            </span>
+          )}
+          {group.needsReviewCount > 0 && (
+            <span
+              data-testid="project-group-review-badge"
+              title={t(locale, "sidebar.projectGroupReviewTitle", {
+                count: group.needsReviewCount,
+              })}
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9.5px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 tabular-nums"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+              {group.needsReviewCount}
+            </span>
+          )}
+          <span
+            data-testid="project-group-count"
+            title={
+              forceExpanded
+                ? t(locale, "sidebar.projectGroupMatchTitle", {
+                    filtered: group.tasks.length,
+                    total: totalInProject,
+                  })
+                : t(locale, "sidebar.projectGroupTotalTitle", {
+                    count: group.tasks.length,
+                  })
+            }
+            className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-zinc-200/70 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 tabular-nums"
+          >
+            {countBadgeText}
+          </span>
+        </span>
+      </button>
+
+      {isExpanded && (
+        <div
+          data-testid="project-group-tasks"
+          data-project-group={group.groupKey}
+          data-section={section}
+          className="pl-2 ml-1.5 border-l border-zinc-200/80 dark:border-zinc-800/80 space-y-1.5"
+        >
+          {group.tasks.map((task) => renderTaskCard(task))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export interface TaskCardProps {
   task: AgentTask;
   colorHex: string;
   effectiveMode?: IntegrationMode;
   parentBranch?: string | null;
   locale?: UiLocale;
+  hideProjectBadge?: boolean;
   isSelected: boolean;
   onSelect: () => void;
   onOpenPreview: (url: string) => void;
@@ -889,6 +1121,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   effectiveMode = "feature-branch",
   parentBranch = null,
   locale = "ja",
+  hideProjectBadge = false,
   isSelected,
   onSelect,
   onOpenPreview,
@@ -935,12 +1168,14 @@ export const TaskCard: React.FC<TaskCardProps> = ({
         >
           {formatTaskCode(task.taskNumber)}
         </span>
-        <span
-          className="px-1.5 py-0.5 rounded text-[10px] font-semibold truncate max-w-[96px]"
-          style={{ backgroundColor: `${colorHex}22`, color: colorHex }}
-        >
-          {task.projectName}
-        </span>
+        {!hideProjectBadge && (
+          <span
+            className="px-1.5 py-0.5 rounded text-[10px] font-semibold truncate max-w-[96px]"
+            style={{ backgroundColor: `${colorHex}22`, color: colorHex }}
+          >
+            {task.projectName}
+          </span>
+        )}
         {task.provider && (
           <span className="px-1.5 py-0.5 rounded text-[9.5px] font-medium bg-zinc-200/70 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">
             {task.provider === "agy" ? "AGY" : task.provider === "claude" ? "Claude" : "Codex"}

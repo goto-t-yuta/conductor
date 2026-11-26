@@ -3,7 +3,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
-import { Check, Copy, FileText, Image as ImageIcon, ImageOff, RotateCw } from "lucide-react";
+import { Check, Copy, Film, FileText, FolderOpen, Image as ImageIcon, ImageOff, RotateCw, VideoOff } from "lucide-react";
 import type { AgentTask, Project } from "../../shared/types.js";
 import {
   defaultMarkdownImageCache,
@@ -11,9 +11,17 @@ import {
   type MarkdownImageCache,
 } from "../lib/markdown-image-cache.js";
 import {
+  defaultMarkdownVideoCache,
+  type LocalMarkdownVideoLoader,
+  type MarkdownVideoCache,
+} from "../lib/markdown-video-cache.js";
+import {
   classifyLinkHref,
   classifyMarkdownImageSrc,
+  classifyMarkdownVideoSrc,
   createRehypeHighlightMentions,
+  isVideoPathOrUrl,
+  normalizeMarkdownSpacedMediaDestinations,
   remarkSingleLineBreaks,
   transformMarkdownUrl,
   uniqueSlug,
@@ -49,20 +57,42 @@ interface MarkdownViewProps {
   imageReloadVersion?: number;
   imageCache?: MarkdownImageCache;
   loadLocalImage?: LocalMarkdownImageLoader;
+  videoCache?: MarkdownVideoCache;
+  loadLocalVideo?: LocalMarkdownVideoLoader;
 }
 
 export const CONDUCTOR_SANITIZE_SCHEMA = {
   ...defaultSchema,
+  tagNames: Array.from(new Set([...(defaultSchema.tagNames ?? []), "video"])),
   protocols: {
     ...defaultSchema.protocols,
     href: [...(defaultSchema.protocols?.href ?? []), "file"],
-    src: ["http", "https", "file", "data", "blob"],
+    src: ["http", "https", "file", "data", "blob", "conductor-media"],
   },
   attributes: {
     ...defaultSchema.attributes,
     code: [["className", /^language-./]],
     img: [...(defaultSchema.attributes?.img ?? []), "loading", "decoding"],
-    source: [...(defaultSchema.attributes?.source ?? []), "srcSet", "media", "type", "sizes"],
+    source: [
+      ...(defaultSchema.attributes?.source ?? []),
+      "src",
+      "srcSet",
+      "media",
+      "type",
+      "sizes",
+    ],
+    video: [
+      "src",
+      "poster",
+      "controls",
+      "loop",
+      "muted",
+      "playsInline",
+      "preload",
+      "width",
+      "height",
+      "title",
+    ],
   },
 };
 
@@ -329,6 +359,362 @@ const MarkdownImage: React.FC<MarkdownImageProps> = React.memo(({
   );
 });
 
+type LocalVideoLoadState =
+  | { key: string; status: "loading" }
+  | { key: string; status: "loaded"; mediaUrl: string; filePath: string; fileName?: string }
+  | { key: string; status: "error"; error: string; filePath?: string };
+
+interface MarkdownVideoProps {
+  src?: string;
+  alt?: string;
+  title?: string;
+  poster?: string;
+  loop?: boolean;
+  muted?: boolean;
+  width?: number | string;
+  height?: number | string;
+  className?: string;
+  style?: React.CSSProperties;
+  baseFilePath?: string;
+  imageReloadVersion: number;
+  videoCache: MarkdownVideoCache;
+  loadLocalVideo?: LocalMarkdownVideoLoader;
+  locale: UiLocale;
+}
+
+function getBaseFileName(rawPath: string | undefined): string {
+  if (!rawPath) return "";
+  const cleaned = rawPath.split("#")[0]?.split("?")[0] ?? rawPath;
+  const parts = cleaned.split(/[/\\]/);
+  return parts[parts.length - 1] || cleaned;
+}
+
+function openVideoInFinder(filePath: string): void {
+  const g = globalThis as {
+    window?: { conductor?: { openPathInFinder?: (targetPath: string) => Promise<void> | void } };
+  };
+  void g.window?.conductor?.openPathInFinder?.(filePath);
+}
+
+const MarkdownVideo: React.FC<MarkdownVideoProps> = React.memo(({
+  src,
+  alt,
+  title,
+  poster,
+  loop,
+  muted,
+  width,
+  height,
+  className,
+  style,
+  baseFilePath,
+  imageReloadVersion,
+  videoCache,
+  loadLocalVideo,
+  locale,
+}) => {
+  const classified = useMemo(
+    () => classifyMarkdownVideoSrc(src, baseFilePath),
+    [src, baseFilePath],
+  );
+  const [retryState, setRetryState] = useState<{ cacheKey: string; nonce: number }>({
+    cacheKey: "",
+    nonce: 0,
+  });
+  const [directErrorKey, setDirectErrorKey] = useState<string | null>(null);
+  const [localState, setLocalState] = useState<LocalVideoLoadState | null>(null);
+
+  const activeRetryNonce =
+    classified.kind === "local" && retryState.cacheKey === classified.cacheKey
+      ? retryState.nonce
+      : 0;
+
+  const requestKey =
+    classified.kind === "local"
+      ? `${classified.cacheKey}::${imageReloadVersion}::${activeRetryNonce}`
+      : "";
+
+  const directKey =
+    classified.kind === "direct" ? `${classified.src}::${imageReloadVersion}` : "";
+
+  useEffect(() => {
+    if (classified.kind !== "local") return;
+
+    const cached = activeRetryNonce === 0 ? videoCache.get(classified.cacheKey) : null;
+    if (cached) {
+      setLocalState({
+        key: requestKey,
+        status: "loaded",
+        mediaUrl: cached.mediaUrl,
+        filePath: cached.filePath,
+        fileName: cached.fileName,
+      });
+      return;
+    }
+
+    let cancelled = false;
+    setLocalState({ key: requestKey, status: "loading" });
+
+    void videoCache
+      .load({
+        target: classified.target,
+        baseFilePath: classified.baseFilePath,
+        cacheKey: classified.cacheKey,
+        forceReload: activeRetryNonce > 0,
+        loader: loadLocalVideo,
+      })
+      .then((res) => {
+        if (cancelled) return;
+        if (res.ok && res.mediaUrl) {
+          setLocalState({
+            key: requestKey,
+            status: "loaded",
+            mediaUrl: res.mediaUrl,
+            filePath: res.filePath || classified.resolvedPath || classified.target,
+            fileName: res.fileName,
+          });
+        } else {
+          setLocalState({
+            key: requestKey,
+            status: "error",
+            error: res.error ?? `${t(locale, "markdown.videoLoadFailed")}。`,
+            filePath: res.filePath || classified.resolvedPath || classified.target,
+          });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [classified, videoCache, loadLocalVideo, requestKey, activeRetryNonce, locale]);
+
+  const videoClassName = [
+    "block max-w-full max-h-[420px] w-full bg-black",
+    className ?? "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  if (classified.kind === "direct") {
+    if (directErrorKey === directKey) {
+      return (
+        <span
+          data-testid="markdown-video-error"
+          className="inline-flex items-center gap-2 max-w-full my-1 px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-100/80 dark:bg-zinc-900/70 text-[11.5px] text-zinc-600 dark:text-zinc-400 align-middle"
+        >
+          <VideoOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+          <span className="truncate">
+            {alt ? `${alt} — ` : ""}
+            {t(locale, "markdown.videoLoadFailed")} ({classified.src})
+          </span>
+        </span>
+      );
+    }
+
+    const label = alt?.trim() || title?.trim() || getBaseFileName(classified.src);
+
+    return (
+      <span
+        data-testid="markdown-video-container"
+        className="block my-2 max-w-full rounded-lg overflow-hidden border border-zinc-200/80 dark:border-zinc-800 bg-zinc-950"
+      >
+        <video
+          src={classified.src}
+          controls
+          playsInline
+          preload="metadata"
+          poster={poster}
+          loop={loop}
+          muted={muted}
+          width={width}
+          height={height}
+          title={title ?? alt}
+          aria-label={alt || title || label || undefined}
+          style={style}
+          data-testid="markdown-video"
+          onError={() => setDirectErrorKey(directKey)}
+          className={videoClassName}
+        />
+        {label && (
+          <span className="flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-100/90 dark:bg-zinc-900/90 border-t border-zinc-200/70 dark:border-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-400">
+            <Film className="w-3 h-3 text-indigo-500 shrink-0" />
+            <span className="truncate">{label}</span>
+          </span>
+        )}
+      </span>
+    );
+  }
+
+  if (classified.kind === "invalid") {
+    return (
+      <span
+        data-testid="markdown-video-error"
+        className="inline-flex items-center gap-2 max-w-full my-1 px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-100/80 dark:bg-zinc-900/70 text-[11.5px] text-zinc-600 dark:text-zinc-400 align-middle"
+      >
+        <VideoOff className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+        <span className="truncate">
+          {alt ? `${alt}: ` : ""}
+          {classified.error}
+          {classified.raw ? ` (${classified.raw})` : ""}
+        </span>
+      </span>
+    );
+  }
+
+  // Local video: prefer synchronous cache hit to avoid flicker on re-render
+  const syncCached = activeRetryNonce === 0 ? videoCache.get(classified.cacheKey) : null;
+  const activeState: LocalVideoLoadState =
+    localState && localState.key === requestKey
+      ? localState
+      : syncCached
+        ? {
+            key: requestKey,
+            status: "loaded",
+            mediaUrl: syncCached.mediaUrl,
+            filePath: syncCached.filePath,
+            fileName: syncCached.fileName,
+          }
+        : { key: requestKey, status: "loading" };
+
+  if (activeState.status === "loaded") {
+    const label =
+      alt?.trim() ||
+      title?.trim() ||
+      activeState.fileName ||
+      getBaseFileName(activeState.filePath);
+
+    return (
+      <span
+        data-testid="markdown-video-container"
+        className="block my-2 max-w-full rounded-lg overflow-hidden border border-zinc-200/80 dark:border-zinc-800 bg-zinc-950"
+      >
+        <video
+          src={activeState.mediaUrl}
+          controls
+          playsInline
+          preload="metadata"
+          poster={poster}
+          loop={loop}
+          muted={muted}
+          width={width}
+          height={height}
+          title={title ?? alt ?? activeState.filePath}
+          aria-label={alt || title || label || undefined}
+          style={style}
+          data-testid="markdown-video"
+          data-markdown-video-path={activeState.filePath}
+          onError={() =>
+            setLocalState({
+              key: requestKey,
+              status: "error",
+              error: t(locale, "markdown.videoRenderFailed"),
+              filePath: activeState.filePath,
+            })
+          }
+          className={videoClassName}
+        />
+        <span className="flex items-center justify-between gap-2 px-2.5 py-1.5 bg-zinc-100/90 dark:bg-zinc-900/90 border-t border-zinc-200/70 dark:border-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-400">
+          <span className="inline-flex items-center gap-1.5 min-w-0">
+            <Film className="w-3 h-3 text-indigo-500 shrink-0" />
+            <span className="truncate" title={activeState.filePath}>
+              {label}
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              openVideoInFinder(activeState.filePath);
+            }}
+            title={t(locale, "markdown.videoOpenInFinderTitle")}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-300/70 dark:hover:bg-zinc-700 text-[10.5px] font-medium text-zinc-700 dark:text-zinc-200 cursor-pointer shrink-0"
+          >
+            <FolderOpen className="w-2.5 h-2.5" />
+            <span>{t(locale, "markdown.videoRevealInFinder")}</span>
+          </button>
+        </span>
+      </span>
+    );
+  }
+
+  if (activeState.status === "error") {
+    const displayPath = activeState.filePath ?? classified.resolvedPath ?? classified.target;
+    return (
+      <span
+        data-testid="markdown-video-error"
+        data-markdown-video-path={displayPath}
+        className="inline-flex flex-wrap items-center gap-2 max-w-full my-1 px-2.5 py-1.5 rounded-lg border border-rose-500/25 bg-rose-500/5 text-[11.5px] text-zinc-600 dark:text-zinc-300 align-middle"
+      >
+        <VideoOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+        <span className="min-w-0 break-all">
+          {alt ? <span className="font-medium mr-1">{alt}</span> : null}
+          <span className="text-rose-600 dark:text-rose-400">{activeState.error}</span>
+          <span className="ml-1.5 font-mono text-[10.5px] text-zinc-400">{displayPath}</span>
+        </span>
+        {displayPath && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              openVideoInFinder(displayPath);
+            }}
+            title={t(locale, "markdown.videoOpenInFinderTitle")}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-300/70 dark:hover:bg-zinc-700 text-[10.5px] font-medium cursor-pointer shrink-0"
+          >
+            <FolderOpen className="w-2.5 h-2.5" />
+            <span>{t(locale, "markdown.videoRevealInFinder")}</span>
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            videoCache.invalidate(classified.cacheKey);
+            setRetryState((prev) => ({
+              cacheKey: classified.cacheKey,
+              nonce: prev.cacheKey === classified.cacheKey ? prev.nonce + 1 : 1,
+            }));
+          }}
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-300/70 dark:hover:bg-zinc-700 text-[10.5px] font-medium cursor-pointer shrink-0"
+        >
+          <RotateCw className="w-2.5 h-2.5" />
+          <span>{t(locale, "common.retry")}</span>
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <span
+      data-testid="markdown-video-loading"
+      data-markdown-video-path={classified.resolvedPath ?? classified.target}
+      className="inline-flex items-center gap-1.5 max-w-full my-1 px-2.5 py-1.5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-100/70 dark:bg-zinc-900/60 text-[11.5px] text-zinc-500 dark:text-zinc-400 align-middle"
+    >
+      <Film className="w-3.5 h-3.5 text-zinc-400 animate-pulse shrink-0" />
+      <span className="truncate">
+        {t(locale, "markdown.videoLoading", { name: alt || classified.target })}
+      </span>
+    </span>
+  );
+});
+
+function extractVideoSourceFromChildren(children: React.ReactNode): string | undefined {
+  for (const child of React.Children.toArray(children)) {
+    if (React.isValidElement<{ src?: string; srcSet?: string }>(child)) {
+      if (typeof child.props?.src === "string" && child.props.src.trim()) {
+        return child.props.src;
+      }
+      if (typeof child.props?.srcSet === "string" && child.props.srcSet.trim()) {
+        return child.props.srcSet.split(",")[0]?.trim().split(/\s+/)[0];
+      }
+    }
+  }
+  return undefined;
+}
+
 interface MarkdownPictureSourceProps extends React.SourceHTMLAttributes<HTMLSourceElement> {
   baseFilePath?: string;
   imageReloadVersion: number;
@@ -508,6 +894,8 @@ export const MarkdownView: React.FC<MarkdownViewProps> = React.memo(({
   imageReloadVersion = 0,
   imageCache = defaultMarkdownImageCache,
   loadLocalImage,
+  videoCache = defaultMarkdownVideoCache,
+  loadLocalVideo,
 }) => {
   const isUserBubble = variant === "user";
   const enableSingleLineBreaks = preserveSingleLineBreaks ?? isUserBubble;
@@ -537,24 +925,93 @@ export const MarkdownView: React.FC<MarkdownViewProps> = React.memo(({
       height,
       className,
       style,
-    }: React.ImgHTMLAttributes<HTMLImageElement>) => (
-      <MarkdownImage
-        src={typeof src === "string" ? src : undefined}
-        alt={alt}
-        title={title}
-        width={width}
-        height={height}
-        className={className}
-        style={style}
-        baseFilePath={baseFilePath}
-        onOpenImage={onOpenImage}
-        imageReloadVersion={imageReloadVersion}
-        imageCache={imageCache}
-        loadLocalImage={loadLocalImage}
-        locale={locale}
-      />
-    ),
-    [baseFilePath, onOpenImage, imageReloadVersion, imageCache, loadLocalImage, locale],
+    }: React.ImgHTMLAttributes<HTMLImageElement>) => {
+      const normalizedSrc = typeof src === "string" ? src : undefined;
+      if (isVideoPathOrUrl(normalizedSrc)) {
+        return (
+          <MarkdownVideo
+            src={normalizedSrc}
+            alt={alt}
+            title={title}
+            width={width}
+            height={height}
+            className={className}
+            style={style}
+            baseFilePath={baseFilePath}
+            imageReloadVersion={imageReloadVersion}
+            videoCache={videoCache}
+            loadLocalVideo={loadLocalVideo}
+            locale={locale}
+          />
+        );
+      }
+      return (
+        <MarkdownImage
+          src={normalizedSrc}
+          alt={alt}
+          title={title}
+          width={width}
+          height={height}
+          className={className}
+          style={style}
+          baseFilePath={baseFilePath}
+          onOpenImage={onOpenImage}
+          imageReloadVersion={imageReloadVersion}
+          imageCache={imageCache}
+          loadLocalImage={loadLocalImage}
+          locale={locale}
+        />
+      );
+    },
+    [
+      baseFilePath,
+      onOpenImage,
+      imageReloadVersion,
+      imageCache,
+      loadLocalImage,
+      videoCache,
+      loadLocalVideo,
+      locale,
+    ],
+  );
+
+  const renderVideo = useCallback(
+    ({
+      src,
+      title,
+      poster,
+      loop,
+      muted,
+      width,
+      height,
+      className,
+      style,
+      children,
+    }: React.VideoHTMLAttributes<HTMLVideoElement>) => {
+      const resolvedSrc =
+        (typeof src === "string" && src.trim() ? src : undefined) ??
+        extractVideoSourceFromChildren(children);
+      return (
+        <MarkdownVideo
+          src={resolvedSrc}
+          alt={title}
+          title={title}
+          poster={poster}
+          loop={loop}
+          muted={muted}
+          width={width}
+          height={height}
+          className={className}
+          style={style}
+          baseFilePath={baseFilePath}
+          imageReloadVersion={imageReloadVersion}
+          videoCache={videoCache}
+          loadLocalVideo={loadLocalVideo}
+          locale={locale}
+        />
+      );
+    },
+    [baseFilePath, imageReloadVersion, videoCache, loadLocalVideo, locale],
   );
 
   const renderSource = useCallback(
@@ -592,6 +1049,7 @@ export const MarkdownView: React.FC<MarkdownViewProps> = React.memo(({
       h5: makeHeading("h5"),
       h6: makeHeading("h6"),
       img: renderImage,
+      video: renderVideo,
       source: renderSource,
       span(props) {
         const rawProps = props as React.HTMLAttributes<HTMLSpanElement> & {
@@ -729,6 +1187,7 @@ export const MarkdownView: React.FC<MarkdownViewProps> = React.memo(({
   }, [
     headingIdPrefix,
     renderImage,
+    renderVideo,
     renderSource,
     mentionContext,
     baseFilePath,
@@ -746,6 +1205,11 @@ export const MarkdownView: React.FC<MarkdownViewProps> = React.memo(({
         ? "conductor-markdown-user"
         : "";
 
+  const normalizedContent = useMemo(
+    () => (isUserBubble ? content : normalizeMarkdownSpacedMediaDestinations(content)),
+    [content, isUserBubble],
+  );
+
   return (
     <div
       className={`conductor-markdown ${variantClass} select-text ${
@@ -758,7 +1222,7 @@ export const MarkdownView: React.FC<MarkdownViewProps> = React.memo(({
         urlTransform={conductorUrlTransform}
         components={markdownComponents}
       >
-        {content}
+        {normalizedContent}
       </ReactMarkdown>
     </div>
   );

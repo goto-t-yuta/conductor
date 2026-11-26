@@ -1,5 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import type { ModelOption } from "../shared/types.js";
+import type {
+  ModelOption,
+  ProviderQuotaCredits,
+  ProviderQuotaSnapshot,
+  ProviderQuotaWindow,
+} from "../shared/types.js";
 import { normalizeRawTokenUsage, type NormalizedRawUsage } from "../shared/usage.js";
 import { enrichedEnvironment, resolveCodexExecutable } from "./shell-env.js";
 
@@ -80,6 +85,142 @@ export function extractCodexTokenUsage(
 
   if (!total && !last && !direct) return null;
   return { total, last, direct };
+}
+
+function asFiniteNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim()) {
+    const parsed = Number(v);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function normalizeResetTimestamp(raw: unknown): string | null {
+  if (typeof raw === "string" && raw.trim()) {
+    const parsedMs = Date.parse(raw);
+    if (!Number.isNaN(parsedMs)) {
+      return new Date(parsedMs).toISOString();
+    }
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      const ms = numeric > 1_000_000_000_000 ? numeric : numeric * 1000;
+      return new Date(ms).toISOString();
+    }
+    return null;
+  }
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+    const ms = raw > 1_000_000_000_000 ? raw : raw * 1000;
+    return new Date(ms).toISOString();
+  }
+  return null;
+}
+
+function parseCodexRateLimitWindow(id: string, raw: unknown): ProviderQuotaWindow | null {
+  const rec = asRecord(raw);
+  if (!rec) return null;
+  const usedRaw = asFiniteNumber(rec.usedPercent ?? rec.used_percent);
+  if (usedRaw === null) return null;
+  const usedPercent = Math.max(0, Math.round(usedRaw * 10) / 10);
+  const remainingPercent = Math.max(0, Math.round((100 - usedPercent) * 10) / 10);
+  const durationMins = asFiniteNumber(
+    rec.windowDurationMins ?? rec.window_minutes ?? rec.windowMinutes,
+  );
+  const resetsAt = normalizeResetTimestamp(rec.resetsAt ?? rec.resets_at);
+  return {
+    id,
+    windowDurationMins: durationMins !== null && durationMins > 0 ? Math.round(durationMins) : null,
+    usedPercent,
+    remainingPercent,
+    resetsAt,
+  };
+}
+
+function parseCodexCredits(raw: unknown): ProviderQuotaCredits | null {
+  const rec = asRecord(raw);
+  if (!rec) return null;
+  if (typeof rec.hasCredits !== "boolean" && typeof rec.has_credits !== "boolean") {
+    return null;
+  }
+  const hasCredits = Boolean(rec.hasCredits ?? rec.has_credits);
+  const unlimited = Boolean(rec.unlimited);
+  const balance =
+    typeof rec.balance === "string"
+      ? rec.balance
+      : typeof rec.balance === "number" && Number.isFinite(rec.balance)
+        ? String(rec.balance)
+        : null;
+  return { hasCredits, unlimited, balance };
+}
+
+/**
+ * Parses a Codex `account/rateLimits/read` response or `RateLimitSnapshot` payload
+ * into a normalized `ProviderQuotaSnapshot`.
+ */
+export function parseCodexRateLimits(
+  raw: unknown,
+  now: Date = new Date(),
+): ProviderQuotaSnapshot | null {
+  const root = asRecord(raw);
+  if (!root) return null;
+
+  const byLimitId = asRecord(root.rateLimitsByLimitId ?? root.rate_limits_by_limit_id);
+  const snapshot =
+    asRecord(root.rateLimits) ??
+    asRecord(root.rate_limits) ??
+    (byLimitId ? asRecord(byLimitId.codex) ?? asRecord(Object.values(byLimitId)[0]) : null) ??
+    root;
+
+  const windows: ProviderQuotaWindow[] = [];
+  const primary = parseCodexRateLimitWindow("primary", snapshot.primary);
+  if (primary) windows.push(primary);
+  const secondary = parseCodexRateLimitWindow("secondary", snapshot.secondary);
+  if (secondary) windows.push(secondary);
+
+  const planType = asString(snapshot.planType ?? snapshot.plan_type);
+  const limitName =
+    asString(snapshot.limitName ?? snapshot.limit_name) ??
+    asString(snapshot.limitId ?? snapshot.limit_id);
+  const credits = parseCodexCredits(snapshot.credits);
+
+  if (windows.length === 0 && !planType && !credits) {
+    return null;
+  }
+
+  return {
+    provider: "codex",
+    status: "live",
+    planType: planType ?? null,
+    limitName: limitName ?? null,
+    credits,
+    windows,
+    updatedAt: now.toISOString(),
+  };
+}
+
+export function extractCodexRateLimitUpdate(
+  notification: Pick<CodexNotification, "method" | "params">,
+  now: Date = new Date(),
+): ProviderQuotaSnapshot | null {
+  const { method, params } = notification;
+  if (method === "account/rateLimits/updated") {
+    return parseCodexRateLimits(params, now);
+  }
+  if (method === "token_count" || method === "codex/event/token_count") {
+    const msg = asRecord(params.msg);
+    const info = asRecord(params.info) ?? asRecord(msg?.info);
+    const rateLimits =
+      params.rateLimits ??
+      params.rate_limits ??
+      msg?.rate_limits ??
+      msg?.rateLimits ??
+      info?.rate_limits ??
+      info?.rateLimits;
+    if (rateLimits) {
+      return parseCodexRateLimits({ rateLimits }, now);
+    }
+  }
+  return null;
 }
 
 export class CodexAppServerClient {
@@ -369,6 +510,15 @@ export class CodexAppServerClient {
 
   public async interruptTurn(threadId: string, turnId: string): Promise<void> {
     await this.request("turn/interrupt", { threadId, turnId });
+  }
+
+  public async readAccountRateLimits(): Promise<ProviderQuotaSnapshot | null> {
+    const res = await this.request(
+      "account/rateLimits/read",
+      { excludeResetCreditDetails: true },
+      15_000,
+    );
+    return parseCodexRateLimits(res);
   }
 
   private request(method: string, params: Record<string, unknown>, timeoutMs = 45_000): Promise<unknown> {

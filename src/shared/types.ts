@@ -6,12 +6,57 @@ import type {
   TextFileReadResult,
 } from "./file-tree.js";
 import type { PreferredLanguage } from "./language.js";
-import type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
+import type {
+  TerminalBackendKind,
+  TerminalCloseResult,
+  TerminalCreateOptions,
+  TerminalCreateResult,
+  TerminalDataEvent,
+  TerminalExitEvent,
+  TerminalResizeResult,
+  TerminalSessionInfo,
+  TerminalWriteResult,
+} from "./terminal.js";
+import type {
+  ProviderQuotaCredits,
+  ProviderQuotaSnapshot,
+  ProviderQuotasMap,
+  ProviderQuotaWindow,
+  TokenUsage,
+  UsageBudgetLimit,
+  UsageBudgetSettings,
+  UsageBudgetStatus,
+  UsageBudgetUnit,
+  UsagePeriod,
+  UsageQuotaSeverity,
+  UsageRecord,
+  UsageSource,
+  UsageSummary,
+  UsageTrendBucket,
+  UsageTrendGranularity,
+} from "./usage.js";
 import type {
   VoiceMicPermissionResult,
   VoiceSpeakRequest,
   VoiceSpeakResult,
 } from "./voice.js";
+import type {
+  AppUpdateDownloadProgress,
+  AppUpdateErrorCode,
+  AppUpdateReleaseAsset,
+  AppUpdateReleaseInfo,
+  AppUpdateState,
+  AppUpdateStatus,
+} from "./updater.js";
+
+export type {
+  AppUpdateDownloadProgress,
+  AppUpdateErrorCode,
+  AppUpdateReleaseAsset,
+  AppUpdateReleaseInfo,
+  AppUpdateState,
+  AppUpdateStatus,
+} from "./updater.js";
 
 export type {
   ListDirectoryResult,
@@ -21,7 +66,35 @@ export type {
   TextFileReadResult,
 } from "./file-tree.js";
 export type { PreferredLanguage } from "./language.js";
-export type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
+export type {
+  TerminalBackendKind,
+  TerminalCloseResult,
+  TerminalCreateOptions,
+  TerminalCreateResult,
+  TerminalDataEvent,
+  TerminalExitEvent,
+  TerminalResizeResult,
+  TerminalSessionInfo,
+  TerminalWriteResult,
+} from "./terminal.js";
+export type {
+  ProviderQuotaCredits,
+  ProviderQuotaSnapshot,
+  ProviderQuotasMap,
+  ProviderQuotaWindow,
+  TokenUsage,
+  UsageBudgetLimit,
+  UsageBudgetSettings,
+  UsageBudgetStatus,
+  UsageBudgetUnit,
+  UsagePeriod,
+  UsageQuotaSeverity,
+  UsageRecord,
+  UsageSource,
+  UsageSummary,
+  UsageTrendBucket,
+  UsageTrendGranularity,
+} from "./usage.js";
 export type {
   VoiceMicPermissionResult,
   VoiceSpeakRequest,
@@ -277,13 +350,23 @@ export interface BrowserBounds {
   visible: boolean;
 }
 
-export type RightPaneMode = "browser" | "markdown" | "image" | "code";
+export type RightPaneMode = "browser" | "markdown" | "image" | "code" | "terminal";
 
 export interface ImageReadResult {
   ok: boolean;
   filePath: string;
   fileName?: string;
   dataUrl?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  error?: string;
+}
+
+export interface VideoReadResult {
+  ok: boolean;
+  filePath: string;
+  fileName?: string;
+  mediaUrl?: string;
   mimeType?: string;
   sizeBytes?: number;
   error?: string;
@@ -376,6 +459,8 @@ export interface AppSnapshot {
   remoteAccessToken?: string;
   remoteAccess?: RemoteAccessStatus;
   usageRecords?: UsageRecord[];
+  usageBudgets?: UsageBudgetSettings;
+  providerQuotas?: ProviderQuotasMap;
   lastErrorBanner: string | null;
 }
 
@@ -405,6 +490,7 @@ export interface PersistedState {
   remoteAccessPort?: number;
   remoteAccessToken?: string;
   usageRecords?: UsageRecord[];
+  usageBudgets?: UsageBudgetSettings;
 }
 
 export interface TaskStatusUpdateResult {
@@ -483,6 +569,8 @@ export interface ConductorAPI {
   regenerateRemoteAccessToken(): Promise<RemoteAccessStatus>;
   refreshRemoteAccessStatus(): Promise<RemoteAccessStatus>;
   clearUsageRecords(): Promise<void>;
+  setUsageBudgets(budgets: UsageBudgetSettings): Promise<void>;
+  refreshProviderQuotas(): Promise<ProviderQuotasMap>;
 
   // Voice (TTS & macOS Microphone Permission)
   voiceSpeak(request: VoiceSpeakRequest): Promise<VoiceSpeakResult>;
@@ -524,6 +612,7 @@ export interface ConductorAPI {
 
   // Local Image Viewer
   imageReadFile(filePathOrUrl: string, baseFilePath?: string): Promise<ImageReadResult>;
+  mediaReadVideo(filePathOrUrl: string, baseFilePath?: string): Promise<VideoReadResult>;
 
   // Project File Tree (read-only)
   fsListDir(
@@ -534,6 +623,24 @@ export interface ConductorAPI {
     filePath: string,
     options?: { rootPath?: string },
   ): Promise<TextFileReadResult>;
+
+  // Interactive Terminal (PTY)
+  terminalCreate(options?: TerminalCreateOptions): Promise<TerminalCreateResult>;
+  terminalWrite(sessionId: string, data: string): Promise<TerminalWriteResult>;
+  terminalResize(sessionId: string, cols: number, rows: number): Promise<TerminalResizeResult>;
+  terminalClose(sessionId: string): Promise<TerminalCloseResult>;
+  onTerminalData(listener: (event: TerminalDataEvent) => void): () => void;
+  onTerminalExit(listener: (event: TerminalExitEvent) => void): () => void;
+
+  // App Updates (GitHub Releases)
+  updaterGetState(): Promise<AppUpdateState>;
+  updaterCheckForUpdates(): Promise<AppUpdateState>;
+  updaterDownloadAndOpen(): Promise<AppUpdateState>;
+  updaterCancelDownload(): Promise<AppUpdateState>;
+  updaterOpenDownloaded(): Promise<{ ok: boolean; error?: string }>;
+  updaterShowInFolder(): Promise<{ ok: boolean; error?: string }>;
+  updaterOpenReleasePage(url?: string): Promise<void>;
+  onUpdaterStateChanged(listener: (state: AppUpdateState) => void): () => void;
 
   getPathForFile(file: File): string;
 }

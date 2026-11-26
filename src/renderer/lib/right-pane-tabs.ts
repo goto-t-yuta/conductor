@@ -6,6 +6,7 @@ import type {
   ExplicitMentionTarget,
   MarkdownDocument,
   Project,
+  TerminalBackendKind,
   TextFileDocument,
 } from "../../shared/types.js";
 import type { ImageViewerTab } from "./image-viewer.js";
@@ -45,11 +46,26 @@ export interface CodeViewerTab {
   lastReloadedAt: number | null;
 }
 
+export interface TerminalTab {
+  id: string;
+  title: string;
+  cwd: string;
+  shell: string | null;
+  shellName: string | null;
+  pid: number | null;
+  backend: TerminalBackendKind | null;
+  projectId: string | null;
+  status: "starting" | "running" | "exited" | "error";
+  exitCode: number | null;
+  error: string | null;
+  sequenceNumber: number;
+}
+
 export const GENERAL_PROJECT_SCOPE = "__general__" as const;
 export const RIGHT_PANE_WORKSPACE_STORAGE_KEY = "conductor:rightPaneWorkspace:v1";
 
 export type ProjectScopeKey = string;
-export type UnifiedRightPaneTabKind = "browser" | "markdown" | "image" | "code";
+export type UnifiedRightPaneTabKind = "browser" | "markdown" | "image" | "code" | "terminal";
 
 export type UnifiedRightPaneTab =
   | {
@@ -91,6 +107,16 @@ export type UnifiedRightPaneTab =
       isLoading: boolean;
       hasError: boolean;
       codeTab: CodeViewerTab;
+    }
+  | {
+      id: string;
+      kind: "terminal";
+      projectScope: ProjectScopeKey;
+      title: string;
+      subtitle: string;
+      isLoading: boolean;
+      hasError: boolean;
+      terminalTab: TerminalTab;
     };
 
 export interface ProjectWorkspaceTabsState {
@@ -122,6 +148,7 @@ export interface ProjectSwitcherItem {
   markdownCount: number;
   imageCount: number;
   codeCount?: number;
+  terminalCount?: number;
   isActive: boolean;
   isGeneral: boolean;
 }
@@ -131,6 +158,7 @@ export interface RightPaneTabSources {
   mdTabs: readonly MarkdownViewerTab[];
   imageTabs: readonly ImageViewerTab[];
   codeTabs?: readonly CodeViewerTab[];
+  terminalTabs?: readonly TerminalTab[];
   projects: readonly Project[];
   tasks?: readonly AgentTask[];
   pendingMarkdownPaths?: ReadonlySet<string>;
@@ -154,6 +182,10 @@ export function makeCodeUnifiedTabId(filePath: string): string {
   return `code:${filePath}`;
 }
 
+export function makeTerminalUnifiedTabId(terminalId: string): string {
+  return `terminal:${terminalId}`;
+}
+
 export function parseUnifiedTabId(
   tabId: string,
 ): { kind: UnifiedRightPaneTabKind; rawId: string } | null {
@@ -168,6 +200,9 @@ export function parseUnifiedTabId(
   }
   if (tabId.startsWith("code:")) {
     return { kind: "code", rawId: tabId.slice("code:".length) };
+  }
+  if (tabId.startsWith("terminal:")) {
+    return { kind: "terminal", rawId: tabId.slice("terminal:".length) };
   }
   return null;
 }
@@ -542,7 +577,16 @@ export function reconcileWorkspaceState(
   state: RightPaneWorkspaceState,
   sources: RightPaneTabSources,
 ): RightPaneWorkspaceState {
-  const { browserTabs, mdTabs, imageTabs, codeTabs = [], projects, tasks, pendingMarkdownPaths } = sources;
+  const {
+    browserTabs,
+    mdTabs,
+    imageTabs,
+    codeTabs = [],
+    terminalTabs = [],
+    projects,
+    tasks,
+    pendingMarkdownPaths,
+  } = sources;
   const validProjectIds = new Set(projects.map((p) => p.id));
 
   const resolveValidScope = (raw: string | null | undefined): ProjectScopeKey => {
@@ -599,6 +643,17 @@ export function reconcileWorkspaceState(
     const scope = existing
       ? resolveValidScope(existing)
       : (inferProjectFromFilePath(ct.filePath, projects, tasks)?.id ?? GENERAL_PROJECT_SCOPE);
+    liveTabScope.set(id, scope);
+  }
+
+  for (const tt of terminalTabs) {
+    const id = makeTerminalUnifiedTabId(tt.id);
+    const scope = tt.projectId
+      ? resolveValidScope(tt.projectId)
+      : resolveValidScope(
+          state.tabProjects[id] ??
+            (tt.cwd ? inferProjectFromFilePath(tt.cwd, projects, tasks)?.id : undefined),
+        );
     liveTabScope.set(id, scope);
   }
 
@@ -808,13 +863,19 @@ export function switchActiveProjectScope(
 export function getProjectUnifiedTabs(
   state: RightPaneWorkspaceState,
   scopeKey: ProjectScopeKey,
-  sources: Pick<RightPaneTabSources, "browserTabs" | "mdTabs" | "imageTabs" | "codeTabs">,
+  sources: Pick<
+    RightPaneTabSources,
+    "browserTabs" | "mdTabs" | "imageTabs" | "codeTabs" | "terminalTabs"
+  >,
 ): UnifiedRightPaneTab[] {
   const browserById = new Map(sources.browserTabs.map((t) => [makeBrowserUnifiedTabId(t.id), t]));
   const mdById = new Map(sources.mdTabs.map((t) => [makeMarkdownUnifiedTabId(t.filePath), t]));
   const imageById = new Map(sources.imageTabs.map((t) => [makeImageUnifiedTabId(t.id), t]));
   const codeById = new Map(
     (sources.codeTabs ?? []).map((t) => [makeCodeUnifiedTabId(t.filePath), t]),
+  );
+  const terminalById = new Map(
+    (sources.terminalTabs ?? []).map((t) => [makeTerminalUnifiedTabId(t.id), t]),
   );
 
   const ws = state.workspaces[scopeKey];
@@ -879,6 +940,21 @@ export function getProjectUnifiedTabs(
         hasError: Boolean(ct.error),
         codeTab: ct,
       });
+      continue;
+    }
+
+    const tt = terminalById.get(id);
+    if (tt) {
+      result.push({
+        id,
+        kind: "terminal",
+        projectScope: scopeKey,
+        title: tt.title,
+        subtitle: tt.cwd || tt.shell || tt.title,
+        isLoading: tt.status === "starting",
+        hasError: tt.status === "error" || (tt.status === "exited" && (tt.exitCode ?? 0) !== 0),
+        terminalTab: tt,
+      });
     }
   }
 
@@ -887,7 +963,10 @@ export function getProjectUnifiedTabs(
 
 export function getActiveUnifiedTab(
   state: RightPaneWorkspaceState,
-  sources: Pick<RightPaneTabSources, "browserTabs" | "mdTabs" | "imageTabs" | "codeTabs">,
+  sources: Pick<
+    RightPaneTabSources,
+    "browserTabs" | "mdTabs" | "imageTabs" | "codeTabs" | "terminalTabs"
+  >,
 ): UnifiedRightPaneTab | null {
   const tabs = getProjectUnifiedTabs(state, state.activeProjectScope, sources);
   if (tabs.length === 0) return null;
@@ -904,7 +983,10 @@ export function isRightPaneBrowserTabActive(
 
 export function buildProjectSwitcherItems(
   state: RightPaneWorkspaceState,
-  sources: Pick<RightPaneTabSources, "browserTabs" | "mdTabs" | "imageTabs" | "codeTabs" | "projects">,
+  sources: Pick<
+    RightPaneTabSources,
+    "browserTabs" | "mdTabs" | "imageTabs" | "codeTabs" | "terminalTabs" | "projects"
+  >,
   query = "",
 ): {
   withTabs: ProjectSwitcherItem[];
@@ -919,11 +1001,13 @@ export function buildProjectSwitcherItems(
     let markdownCount = 0;
     let imageCount = 0;
     let codeCount = 0;
+    let terminalCount = 0;
     for (const tab of tabs) {
       if (tab.kind === "browser") browserCount += 1;
       else if (tab.kind === "markdown") markdownCount += 1;
       else if (tab.kind === "image") imageCount += 1;
       else if (tab.kind === "code") codeCount += 1;
+      else if (tab.kind === "terminal") terminalCount += 1;
     }
     return {
       scopeKey,
@@ -936,6 +1020,7 @@ export function buildProjectSwitcherItems(
       markdownCount,
       imageCount,
       codeCount,
+      terminalCount,
       isActive: state.activeProjectScope === scopeKey,
       isGeneral: project === null,
     };
@@ -988,8 +1073,9 @@ export function serializeRightPaneWorkspace(
       state.tabProjects[makeMarkdownUnifiedTabId(tab.filePath)] ?? GENERAL_PROJECT_SCOPE,
   }));
 
-  // Strip transient image & code tab entries from persisted workspaces so localStorage stays lean
-  const isTransientTabId = (id: string) => id.startsWith("image:") || id.startsWith("code:");
+  // Strip transient image, code & terminal tab entries from persisted workspaces so localStorage stays lean
+  const isTransientTabId = (id: string) =>
+    id.startsWith("image:") || id.startsWith("code:") || id.startsWith("terminal:");
   const workspaces: Record<ProjectScopeKey, ProjectWorkspaceTabsState> = {};
   for (const [scope, ws] of Object.entries(state.workspaces)) {
     const persistableOrder = ws.tabOrder.filter((id) => !isTransientTabId(id));

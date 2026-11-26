@@ -1,0 +1,73 @@
+appId: com.conductor.app
+productName: Conductor
+copyright: Copyright © 2026 Conductor Contributors
+
+directories:
+  output: release
+
+asar: true
+npmRebuild: false
+buildDependenciesFromSource: false
+forceCodeSigning: false
+
+files:
+  - dist/**/*
+  - "!dist/**/*.map"
+  - "!node_modules/**/*"
+
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+mac:
+  category: public.app-category.developer-tools
+  darkModeSupport: true
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  extendInfo:
+    NSMicrophoneUsageDescription: Conductor uses the microphone for voice input.
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+
+dmg:
+  sign: false
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
+
+portable:
+  artifactName: ${productName}-${version}-win-${arch}-portable.${ext}
+
+linux:
+  category: Development
+  maintainer: Conductor Maintainers <noreply@users.noreply.github.com>
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  desktop:
+    entry:
+      Name: Conductor
+      Comment: Desktop multi-agent orchestrator for Codex, AGY, and Claude
+      Categories: Development;

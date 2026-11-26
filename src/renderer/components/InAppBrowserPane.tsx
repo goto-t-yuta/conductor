@@ -122,14 +122,14 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Navigation Toolbar */}
-      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0">
+      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 min-w-0">
         <button
           type="button"
           onClick={onBack}
           disabled={!activeTab?.canGoBack}
           title={t(locale, "browser.back")}
           aria-label={t(locale, "browser.back")}
-          className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-30 cursor-pointer"
+          className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-30 cursor-pointer shrink-0"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
         </button>
@@ -139,7 +139,7 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
           disabled={!activeTab?.canGoForward}
           title={t(locale, "browser.forward")}
           aria-label={t(locale, "browser.forward")}
-          className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-30 cursor-pointer"
+          className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-30 cursor-pointer shrink-0"
         >
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
@@ -150,7 +150,7 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
           aria-label={
             activeTab?.isLoading ? t(locale, "browser.stopLoading") : t(locale, "browser.reload")
           }
-          className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
+          className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer shrink-0"
         >
           {activeTab?.isLoading ? <X className="w-3.5 h-3.5" /> : <RotateCw className="w-3.5 h-3.5" />}
         </button>
@@ -176,7 +176,7 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
           onClick={onToggleDevTools}
           title={t(locale, "browser.devToolsTitle")}
           aria-label={t(locale, "browser.devToolsAria")}
-          className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
+          className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer shrink-0"
         >
           <Code2 className="w-3.5 h-3.5" />
         </button>
@@ -186,7 +186,7 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
           onClick={onOpenExternal}
           title={t(locale, "browser.openExternal")}
           aria-label={t(locale, "browser.openExternal")}
-          className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
+          className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer shrink-0"
         >
           <ExternalLink className="w-3.5 h-3.5" />
         </button>
@@ -203,9 +203,9 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
           onClick={onCaptureScreenshot}
           title={t(locale, "browser.screenshotTitle")}
           aria-label={t(locale, "browser.screenshotAria")}
-          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
+          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
         >
-          <Camera className="w-3.5 h-3.5" />
+          <Camera className="w-3.5 h-3.5 shrink-0" />
           <span>{t(locale, "browser.screenshotBtn")}</span>
         </button>
 
@@ -216,13 +216,13 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
           title={t(locale, "browser.pickerTitle")}
           aria-label={t(locale, "browser.pickerAria")}
           aria-pressed={isPickingElement}
-          className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer shrink-0 ${
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer shrink-0 whitespace-nowrap ${
             isPickingElement
               ? "bg-indigo-600 text-white"
               : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800"
           }`}
         >
-          <Crosshair className="w-3.5 h-3.5" />
+          <Crosshair className="w-3.5 h-3.5 shrink-0" />
           <span>{t(locale, "browser.pickerBtn")}</span>
         </button>
 
@@ -238,9 +238,9 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
                 : t(locale, "browser.attachUrlDisabledTitle")
             }
             aria-label={t(locale, "browser.attachUrlTitle")}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer shrink-0"
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer shrink-0 whitespace-nowrap"
           >
-            <Link2 className="w-3.5 h-3.5" />
+            <Link2 className="w-3.5 h-3.5 shrink-0" />
             <span>{t(locale, "browser.attachUrlBtn")}</span>
           </button>
         )}
@@ -256,13 +256,13 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
               : t(locale, "browser.attachErrorsEmptyTitle")
           }
           aria-label={t(locale, "browser.attachErrorsAria")}
-          className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors shrink-0 ${
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors shrink-0 whitespace-nowrap ${
             totalErrors > 0
               ? "bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 cursor-pointer font-semibold"
               : "text-zinc-400 dark:text-zinc-500 opacity-55 cursor-not-allowed"
           }`}
         >
-          <AlertTriangle className="w-3.5 h-3.5" />
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
           <span>{t(locale, "browser.attachErrorsBtn")}</span>
           {totalErrors > 0 && (
             <span className="px-1 py-0.5 rounded-full text-[10px] leading-none bg-rose-500/20 text-rose-700 dark:text-rose-300">
@@ -274,12 +274,12 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
 
       {/* Picker Active Banner */}
       {isPickingElement && (
-        <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-indigo-600 text-white text-[11.5px] shrink-0">
-          <span>{t(locale, "browser.pickerBanner")}</span>
+        <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-indigo-600 text-white text-[11.5px] shrink-0 min-w-0">
+          <span className="truncate">{t(locale, "browser.pickerBanner")}</span>
           <button
             type="button"
             onClick={onTogglePicker}
-            className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 text-[11px] font-medium cursor-pointer shrink-0"
+            className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 text-[11px] font-medium cursor-pointer shrink-0 whitespace-nowrap"
           >
             {t(locale, "browser.pickerDone")}
           </button>

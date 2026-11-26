@@ -242,9 +242,9 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="@container flex-1 flex flex-col min-h-0 min-w-0">
       {/* Path Input & Viewer Toolbar */}
-      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0">
+      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 min-w-0">
         <button
           type="button"
           onClick={onOpenDialog}
@@ -310,13 +310,13 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
               ? t(locale, "markdown.tocTitle", { count: headings.length })
               : t(locale, "markdown.noHeadingsTitle")
           }
-          className={`inline-flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
+          className={`inline-flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed shrink-0 whitespace-nowrap ${
             showToc && headings.length > 0
               ? "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400"
               : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
           }`}
         >
-          <List className="w-3.5 h-3.5" />
+          <List className="w-3.5 h-3.5 shrink-0" />
           {headings.length > 0 && <span className="text-[10px] font-medium">{headings.length}</span>}
         </button>
 
@@ -329,7 +329,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
               ? t(locale, "markdown.autoReloadOnTitle")
               : t(locale, "markdown.autoReloadOffTitle")
           }
-          className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+          className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
             autoReload
               ? isWatching
                 ? "text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20"
@@ -346,7 +346,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
           onClick={handleManualRefresh}
           disabled={!activeTab}
           title={isDirty ? t(locale, "markdown.checkDiskTitle") : t(locale, "markdown.manualReloadTitle")}
-          className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-35 cursor-pointer"
+          className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-35 cursor-pointer shrink-0"
         >
           <RotateCw className={`w-3.5 h-3.5 ${activeTab?.isLoading ? "animate-spin" : ""}`} />
         </button>
@@ -357,7 +357,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
             type="button"
             onClick={() => onAttachFileToChat(activeTab.filePath, activeTab.fileName)}
             title={t(locale, "markdown.attachFileTitle")}
-            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
+            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer shrink-0"
           >
             <MessageSquarePlus className="w-3.5 h-3.5" />
           </button>
@@ -366,8 +366,8 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
 
       {/* Document Meta Header Strip */}
       {activeTab && (
-        <div className="flex items-center justify-between gap-2 px-3 py-1.5 text-[11px] bg-zinc-100/70 dark:bg-[#171b24] border-b border-zinc-200/70 dark:border-zinc-800/80 text-zinc-500 dark:text-zinc-400 shrink-0">
-          <div className="flex items-center gap-1.5 min-w-0">
+        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 py-1.5 text-[11px] bg-zinc-100/70 dark:bg-[#171b24] border-b border-zinc-200/70 dark:border-zinc-800/80 text-zinc-500 dark:text-zinc-400 shrink-0 min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0 flex-1">
             {isDirty && (
               <span
                 data-testid="markdown-dirty-indicator"
@@ -381,7 +381,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
               {activeTab.fileName}
             </span>
             {isDirty && (
-              <span className="px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 text-[10px] font-medium shrink-0">
+              <span className="px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 text-[10px] font-medium shrink-0 whitespace-nowrap">
                 {t(locale, "markdown.unsavedBadge")}
               </span>
             )}
@@ -405,15 +405,15 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
               type="button"
               onClick={() => onRevealInFinder(activeTab.filePath)}
               title={t(locale, "common.revealInFinder")}
-              className="text-[10.5px] hover:text-indigo-500 hover:underline cursor-pointer shrink-0"
+              className="text-[10.5px] hover:text-indigo-500 hover:underline cursor-pointer shrink-0 whitespace-nowrap"
             >
               {t(locale, "common.finder")}
             </button>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0 ml-auto">
             {activeTab.document && (isDirty || viewMode === "raw") && (
-              <div className="inline-flex items-center gap-1">
+              <div className="inline-flex items-center gap-1 shrink-0">
                 {isDirty && onDiscardActive && (
                   <button
                     type="button"
@@ -421,9 +421,9 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
                     onClick={() => void onDiscardActive()}
                     disabled={isSaving}
                     title={t(locale, "markdown.discardTitle")}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-300/80 dark:hover:bg-zinc-700 disabled:opacity-40 transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-300/80 dark:hover:bg-zinc-700 disabled:opacity-40 transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   >
-                    <RotateCcw className="w-3 h-3" />
+                    <RotateCcw className="w-3 h-3 shrink-0" />
                     <span>{t(locale, "markdown.discardBtn")}</span>
                   </button>
                 )}
@@ -434,13 +434,13 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
                     onClick={() => void onSaveActive()}
                     disabled={!canSave}
                     title={t(locale, "markdown.saveTitle")}
-                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium transition-colors cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium transition-colors cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed whitespace-nowrap shrink-0 ${
                       canSave
                         ? "bg-indigo-600 hover:bg-indigo-500 text-white shadow-xs"
                         : "bg-zinc-200/70 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400"
                     }`}
                   >
-                    <Save className="w-3 h-3" />
+                    <Save className="w-3 h-3 shrink-0" />
                     <span>
                       {isSaving ? t(locale, "markdown.savingBtn") : t(locale, "markdown.saveBtn")}
                     </span>
@@ -451,13 +451,13 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
 
             {activeTab.document && (
               <>
-                <span className="hidden sm:inline">
+                <span className="hidden @[480px]:inline whitespace-nowrap">
                   {t(locale, "markdown.linesCount", { count: stats.lines })} ·{" "}
                   {formatByteSize(effectiveByteSize)}
                 </span>
                 {formattedUpdatedTime && (
-                  <span className="inline-flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
+                  <span className="hidden @[420px]:inline-flex items-center gap-1 whitespace-nowrap">
+                    <Clock className="w-3 h-3 shrink-0" />
                     {formattedUpdatedTime}
                   </span>
                 )}
@@ -467,18 +467,18 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(
             {showSavedPulse ? (
               <span
                 data-testid="markdown-saved-feedback"
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium whitespace-nowrap shrink-0"
               >
-                <Check className="w-2.5 h-2.5" />
+                <Check className="w-2.5 h-2.5 shrink-0" />
                 {t(locale, "markdown.savedFeedback")}
               </span>
             ) : showReloadPulse ? (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium">
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium whitespace-nowrap shrink-0">
                 {t(locale, "markdown.reloadedFeedback")}
               </span>
             ) : autoReload && isWatching ? (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium whitespace-nowrap shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
                 Live
               </span>
             ) : null}

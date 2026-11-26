@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import dev.conductor.mobile.ui.ConductorViewModel
 import dev.conductor.mobile.ui.screens.ChatScreen
+import dev.conductor.mobile.ui.screens.QrScannerScreen
 import dev.conductor.mobile.ui.screens.SettingsScreen
 import dev.conductor.mobile.ui.screens.SetupScreen
 import dev.conductor.mobile.ui.screens.TasksScreen
@@ -63,6 +64,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleIntent(intent)
     }
 
@@ -79,11 +81,25 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
     val state by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var currentTab by rememberSaveable { mutableStateOf(MainTab.CHAT) }
+    var showQrScanner by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(state.bannerMessage) {
         val msg = state.bannerMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         viewModel.clearBanner()
+    }
+
+    if (showQrScanner) {
+        QrScannerScreen(
+            onQrCodeScanned = { rawPayload ->
+                showQrScanner = false
+                if (viewModel.handleIncomingConnectUri(rawPayload)) {
+                    currentTab = MainTab.CHAT
+                }
+            },
+            onClose = { showQrScanner = false },
+        )
+        return
     }
 
     if (!state.isLoaded) {
@@ -104,6 +120,7 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                     isTesting = state.isTestingConnection,
                     lastTestResult = state.lastTestResult,
                     onConsumeDeepLink = viewModel::consumePendingDeepLink,
+                    onOpenQrScanner = { showQrScanner = true },
                     onTestConnection = viewModel::testConnection,
                     onSaveAndConnect = viewModel::saveAndConnect,
                 )
@@ -195,6 +212,7 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                     snapshot = state.snapshot,
                     isTesting = state.isTestingConnection,
                     lastTestResult = state.lastTestResult,
+                    onOpenQrScanner = { showQrScanner = true },
                     onReconnect = viewModel::reconnect,
                     onTestConnection = viewModel::testConnection,
                     onSaveConfig = viewModel::saveAndConnect,

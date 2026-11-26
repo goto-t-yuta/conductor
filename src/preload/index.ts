@@ -3,6 +3,7 @@ import { PROJECT_FILE_TREE_IPC_CHANNELS } from "../shared/file-tree.js";
 import type {
   AgentTaskStatus,
   AppSnapshot,
+  AppUpdateState,
   BrowserBounds,
   ChatAttachment,
   ConductorAPI,
@@ -10,6 +11,10 @@ import type {
   MarkdownWatchEvent,
   PreferredLanguage,
   SendMessagePayload,
+  TerminalCreateOptions,
+  TerminalDataEvent,
+  TerminalExitEvent,
+  UsageBudgetSettings,
   VoiceSpeakRequest,
 } from "../shared/types.js";
 
@@ -76,6 +81,9 @@ const api: ConductorAPI = {
   refreshRemoteAccessStatus: () =>
     ipcRenderer.invoke("conductor:refreshRemoteAccessStatus"),
   clearUsageRecords: () => ipcRenderer.invoke("conductor:clearUsageRecords"),
+  setUsageBudgets: (budgets: UsageBudgetSettings) =>
+    ipcRenderer.invoke("conductor:setUsageBudgets", budgets),
+  refreshProviderQuotas: () => ipcRenderer.invoke("conductor:refreshProviderQuotas"),
 
   voiceSpeak: (request: VoiceSpeakRequest) => ipcRenderer.invoke("voice:speak", request),
   voiceStop: () => ipcRenderer.invoke("voice:stop"),
@@ -121,10 +129,44 @@ const api: ConductorAPI = {
   },
   imageReadFile: (filePathOrUrl, baseFilePath) =>
     ipcRenderer.invoke("image:readFile", filePathOrUrl, baseFilePath),
+  mediaReadVideo: (filePathOrUrl, baseFilePath) =>
+    ipcRenderer.invoke("media:readVideo", filePathOrUrl, baseFilePath),
   fsListDir: (dirPath, options) =>
     ipcRenderer.invoke(PROJECT_FILE_TREE_IPC_CHANNELS.listDir, dirPath, options),
   fsReadTextFile: (filePath, options) =>
     ipcRenderer.invoke(PROJECT_FILE_TREE_IPC_CHANNELS.readTextFile, filePath, options),
+
+  terminalCreate: (options?: TerminalCreateOptions) =>
+    ipcRenderer.invoke("terminal:create", options),
+  terminalWrite: (sessionId: string, data: string) =>
+    ipcRenderer.invoke("terminal:write", sessionId, data),
+  terminalResize: (sessionId: string, cols: number, rows: number) =>
+    ipcRenderer.invoke("terminal:resize", sessionId, cols, rows),
+  terminalClose: (sessionId: string) => ipcRenderer.invoke("terminal:close", sessionId),
+  onTerminalData: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: TerminalDataEvent) => listener(event);
+    ipcRenderer.on("terminal:data", handler);
+    return () => ipcRenderer.off("terminal:data", handler);
+  },
+  onTerminalExit: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: TerminalExitEvent) => listener(event);
+    ipcRenderer.on("terminal:exit", handler);
+    return () => ipcRenderer.off("terminal:exit", handler);
+  },
+
+  updaterGetState: () => ipcRenderer.invoke("updater:getState"),
+  updaterCheckForUpdates: () => ipcRenderer.invoke("updater:check"),
+  updaterDownloadAndOpen: () => ipcRenderer.invoke("updater:downloadAndOpen"),
+  updaterCancelDownload: () => ipcRenderer.invoke("updater:cancelDownload"),
+  updaterOpenDownloaded: () => ipcRenderer.invoke("updater:openDownloaded"),
+  updaterShowInFolder: () => ipcRenderer.invoke("updater:showInFolder"),
+  updaterOpenReleasePage: (url?: string) => ipcRenderer.invoke("updater:openReleasePage", url),
+  onUpdaterStateChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: AppUpdateState) => listener(state);
+    ipcRenderer.on("updater:stateChanged", handler);
+    return () => ipcRenderer.off("updater:stateChanged", handler);
+  },
+
   getPathForFile: (file: File) => {
     try {
       return webUtils.getPathForFile(file);

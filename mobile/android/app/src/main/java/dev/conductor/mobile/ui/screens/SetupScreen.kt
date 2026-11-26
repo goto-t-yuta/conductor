@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -58,6 +59,7 @@ fun SetupScreen(
     isTesting: Boolean,
     lastTestResult: ConnectionTestResult?,
     onConsumeDeepLink: () -> Unit,
+    onOpenQrScanner: () -> Unit,
     onTestConnection: (url: String, token: String) -> Unit,
     onSaveAndConnect: (url: String, token: String) -> Unit,
 ) {
@@ -111,10 +113,46 @@ fun SetupScreen(
                 fontWeight = FontWeight.Bold,
             )
             Text(
-                text = "Mac 上の Conductor と Tailscale 経由で接続します。デスクトップの「設定 → リモートアクセス」を ON にして、表示された URI または URL・トークンを入力してください。",
+                text = "Mac 上の Conductor と Tailscale 経由で接続します。デスクトップの「設定 → リモートアクセス」を開き、Step 2 の QR コードをスキャンするだけで自動接続できます。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            // Primary QR Code Scan Card
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                ),
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = "QRコードでかんたんリンク（推奨）",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = "デスクトップの Step 2 QR コードを読み取ると、URL と認証トークンが自動保存されて即座に接続します。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(
+                        onClick = onOpenQrScanner,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.QrCodeScanner,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Text("QRコードをスキャンしてリンク")
+                    }
+                }
+            }
 
             // One-paste URI Card
             Card(

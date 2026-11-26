@@ -52,10 +52,10 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
   const lineNumberWidth = Math.max(3, String(lines.length).length);
 
   return (
-    <div data-testid="code-viewer-pane" className="flex-1 flex flex-col min-h-0 min-w-0">
+    <div data-testid="code-viewer-pane" className="@container flex-1 flex flex-col min-h-0 min-w-0">
       {/* Toolbar & File Meta Header */}
       {activeTab && (
-        <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 bg-zinc-100/70 dark:bg-[#171b24] border-b border-zinc-200/70 dark:border-zinc-800/80 text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0">
+        <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 bg-zinc-100/70 dark:bg-[#171b24] border-b border-zinc-200/70 dark:border-zinc-800/80 text-[11px] text-zinc-500 dark:text-zinc-400 shrink-0 min-w-0">
           <div className="flex items-center gap-1.5 min-w-0">
             <FileCode2 className="w-3.5 h-3.5 text-sky-500 shrink-0" />
             <span
@@ -65,7 +65,7 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
               {activeTab.fileName}
             </span>
             {activeTab.document?.language && (
-              <span className="px-1.5 py-0.25 rounded bg-sky-500/12 text-sky-700 dark:text-sky-300 text-[10px] font-medium shrink-0">
+              <span className="px-1.5 py-0.25 rounded bg-sky-500/12 text-sky-700 dark:text-sky-300 text-[10px] font-medium shrink-0 whitespace-nowrap">
                 {activeTab.document.language}
               </span>
             )}
@@ -90,7 +90,7 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
               type="button"
               onClick={() => onRevealInFinder(activeTab.filePath)}
               title={t(locale, "common.revealInFinder")}
-              className="text-[10.5px] hover:text-indigo-500 hover:underline cursor-pointer shrink-0"
+              className="text-[10.5px] hover:text-indigo-500 hover:underline cursor-pointer shrink-0 whitespace-nowrap"
             >
               {t(locale, "common.finder")}
             </button>
@@ -98,14 +98,14 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
 
           <div className="flex items-center gap-1.5 shrink-0">
             {activeTab.document && (
-              <span className="hidden sm:inline font-mono text-[10.5px] text-zinc-400">
+              <span className="hidden @[480px]:inline font-mono text-[10.5px] text-zinc-400 whitespace-nowrap">
                 {t(locale, "markdown.linesCount", { count: lines.length })} ·{" "}
                 {formatByteSize(activeTab.document.sizeBytes)}
               </span>
             )}
             {formattedUpdatedTime && (
-              <span className="hidden md:inline-flex items-center gap-1 text-[10.5px] text-zinc-400">
-                <Clock className="w-3 h-3" />
+              <span className="hidden @[580px]:inline-flex items-center gap-1 text-[10.5px] text-zinc-400 whitespace-nowrap">
+                <Clock className="w-3 h-3 shrink-0" />
                 {formattedUpdatedTime}
               </span>
             )}

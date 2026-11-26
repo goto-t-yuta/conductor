@@ -3,6 +3,10 @@ import crypto from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
+import {
+  buildConductorConnectUri,
+  parseConductorConnectUri,
+} from "../shared/remote-access.js";
 import type {
   AgentTask,
   AgentTaskStatus,
@@ -15,6 +19,8 @@ import type {
   TaskStatusUpdateResult,
   TaskWorktreeStatus,
 } from "../shared/types.js";
+
+export { buildConductorConnectUri, parseConductorConnectUri };
 
 export const DEFAULT_REMOTE_ACCESS_PORT = 4789;
 const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB
@@ -202,27 +208,6 @@ export function detectTailscaleNetwork(options?: {
   }
 
   return { tailscaleIp, magicDnsName, lanIp };
-}
-
-export function buildConductorConnectUri(url: string, token: string): string {
-  const params = new URLSearchParams();
-  params.set("url", url);
-  params.set("token", token);
-  return `conductor://connect?${params.toString()}`;
-}
-
-export function parseConductorConnectUri(uri: string): { url: string; token: string } | null {
-  const trimmed = uri.trim();
-  if (!trimmed.toLowerCase().startsWith("conductor://")) return null;
-  try {
-    const parsed = new URL(trimmed);
-    const url = parsed.searchParams.get("url")?.trim() ?? "";
-    const token = parsed.searchParams.get("token")?.trim() ?? "";
-    if (!url || !token) return null;
-    return { url: url.replace(/\/+$/, ""), token };
-  } catch {
-    return null;
-  }
 }
 
 function timingSafeTokenEquals(expected: string, actual: string | null | undefined): boolean {

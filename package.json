@@ -4,13 +4,24 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "macOS desktop single-chat multi-agent orchestrator for Codex, AGY, and Claude with parallel Git worktree workers, auto-land, and a unified Chromium/Markdown/Image viewer.",
+  "author": "Conductor Contributors <noreply@users.noreply.github.com>",
+  "homepage": "https://github.com/goto-t-yuta/conductor",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/goto-t-yuta/conductor.git"
+  },
+  "description": "Desktop single-chat multi-agent orchestrator for Codex, AGY, and Claude with parallel Git worktree workers, auto-land, and a unified Chromium/Markdown/Image viewer.",
   "main": "dist/main/index.cjs",
   "type": "module",
   "scripts": {
     "build:main": "node scripts/build-main.mjs",
     "build:renderer": "vite build",
     "build": "pnpm build:main && pnpm build:renderer",
+    "package": "pnpm build && electron-builder --publish never",
+    "package:dir": "pnpm build && electron-builder --dir --publish never",
+    "package:mac": "pnpm build && electron-builder --mac --publish never",
+    "package:win": "pnpm build && electron-builder --win --publish never",
+    "package:linux": "pnpm build && electron-builder --linux --publish never",
     "start": "pnpm build && electron .",
     "dev": "node scripts/dev.mjs",
     "typecheck:main": "tsc -p tsconfig.main.json --noEmit",
@@ -20,8 +31,12 @@
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "lucide-react": "^0.511.0",
     "mermaid": "^12.3.0",
+    "node-pty": "^1.1.0",
+    "qrcode": "^1.5.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
@@ -32,10 +47,12 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.8",
     "@types/node": "^22.15.29",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.1.6",
     "@types/react-dom": "^19.1.5",
     "@vitejs/plugin-react": "^4.5.2",
     "electron": "^36.3.2",
+    "electron-builder": "^26.18.0",
     "esbuild": "^0.25.5",
     "tailwindcss": "^4.1.8",
     "typescript": "^5.8.3",
@@ -45,7 +62,8 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "electron",
-      "esbuild"
+      "esbuild",
+      "node-pty"
     ]
   }
 }

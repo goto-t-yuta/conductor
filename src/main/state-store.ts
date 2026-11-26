@@ -5,7 +5,11 @@ import { normalizeChatSessions } from "../shared/chat-sessions.js";
 import { DEFAULT_PREFERRED_LANGUAGE, isValidPreferredLanguage } from "../shared/language.js";
 import { normalizeTaskNumbers } from "../shared/mentions.js";
 import type { PersistedState } from "../shared/types.js";
-import { normalizeUsageRecords } from "../shared/usage.js";
+import {
+  DEFAULT_USAGE_BUDGETS,
+  normalizeUsageBudgetSettings,
+  normalizeUsageRecords,
+} from "../shared/usage.js";
 import { DEFAULT_VOICE_READBACK_ENABLED } from "../shared/voice.js";
 
 const DEFAULT_REMOTE_ACCESS_PORT = 4789;
@@ -46,6 +50,7 @@ const DEFAULT_STATE: PersistedState = {
   remoteAccessPort: DEFAULT_REMOTE_ACCESS_PORT,
   remoteAccessToken: "",
   usageRecords: [],
+  usageBudgets: DEFAULT_USAGE_BUDGETS,
 };
 
 export class StateStore {
@@ -114,6 +119,7 @@ export class StateStore {
         remoteAccessPort: normalizeRemoteAccessPort(parsed.remoteAccessPort),
         remoteAccessToken,
         usageRecords: normalizeUsageRecords(parsed.usageRecords),
+        usageBudgets: normalizeUsageBudgetSettings(parsed.usageBudgets),
       };
       if (normalized.changed || normalizedChats.changed || !hasValidToken) {
         this.save(state);
