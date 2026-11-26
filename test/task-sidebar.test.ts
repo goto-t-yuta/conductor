@@ -1,26 +1,42 @@
 import { describe, expect, it } from "vitest";
-import type { AgentTask, AgentTaskStatus } from "../src/shared/types.js";
+import type { AgentTask, AgentTaskStatus, Project } from "../src/shared/types.js";
 import {
   RUNNING_TASK_DONE_BLOCKED_REASON,
   canMarkTaskDone,
   validateManualTaskStatusTransition,
 } from "../src/shared/task-status.js";
 import {
+  COLLAPSED_PROJECT_GROUPS_STORAGE_KEY,
+  DEFAULT_TASK_GROUP_BY_PROJECT,
   QUESTIONS_SECTION_HEIGHT_STORAGE_KEY,
   QUESTIONS_SECTION_MIN_HEIGHT,
   REOPEN_TARGET_STATUS,
+  TASK_GROUP_BY_PROJECT_STORAGE_KEY,
+  UNASSIGNED_PROJECT_GROUP_KEY,
   clampQuestionsSectionHeight,
+  countTasksByProjectGroup,
   filterCompletedTasks,
   formatCompletedCountBadge,
   getQuestionsSectionMaxHeight,
   getQuickStatusTransition,
   getTaskCardSubtitle,
+  groupTasksByProject,
+  loadCollapsedProjectGroups,
   loadQuestionsSectionHeight,
+  loadTaskGroupByProject,
+  makeProjectGroupCollapseKey,
   matchesCompletedTaskQuery,
+  normalizeProjectGroupKey,
+  parseCollapsedProjectGroups,
   parseQuestionsSectionHeight,
+  parseTaskGroupByProject,
   partitionSidebarTasks,
+  saveCollapsedProjectGroups,
   saveQuestionsSectionHeight,
+  saveTaskGroupByProject,
+  toggleCollapsedProjectGroup,
   type QuestionsHeightStorageLike,
+  type SidebarStorageLike,
 } from "../src/renderer/lib/task-sidebar.js";
 
 function makeTask(
@@ -282,5 +298,209 @@ describe("task-sidebar helpers", () => {
     expect(() => saveQuestionsSectionHeight(200, throwingStorage)).not.toThrow();
     expect(() => saveQuestionsSectionHeight(null, throwingStorage)).not.toThrow();
     expect(loadQuestionsSectionHeight(throwingStorage)).toBeNull();
+  });
+
+  it("groups tasks by projectName (case-insensitive), counts statuses, and sorts running/needs_review/recent groups first", () => {
+    const projects: Project[] = [
+      {
+        id: "p-alpha",
+        name: "Alpha",
+        path: "/tmp/alpha",
+        colorHex: "#3B82F6",
+        gitBranch: "main",
+        addedAt: "2026-11-26T00:00:00.000Z",
+      },
+      {
+        id: "p-beta",
+        name: "Beta",
+        path: "/tmp/beta",
+        colorHex: "#10B981",
+        gitBranch: "main",
+        addedAt: "2026-11-26T00:00:00.000Z",
+      },
+      {
+        id: "p-gamma",
+        name: "Gamma",
+        path: "/tmp/gamma",
+        colorHex: "#F59E0B",
+        gitBranch: "main",
+        addedAt: "2026-11-26T00:00:00.000Z",
+      },
+      {
+        id: "p-delta",
+        name: "Delta",
+        path: "/tmp/delta",
+        colorHex: "#EC4899",
+        gitBranch: "main",
+        addedAt: "2026-11-26T00:00:00.000Z",
+      },
+    ];
+
+    const tasks: AgentTask[] = [
+      // Delta: queued only, very recent
+      makeTask({
+        id: "t-delta",
+        taskNumber: 1,
+        title: "Queued task",
+        status: "queued",
+        projectId: "p-delta",
+        projectName: "Delta",
+        updatedAt: "2026-11-26T12:00:00.000Z",
+      }),
+      // Alpha: running, older than Beta's running task
+      makeTask({
+        id: "t-alpha-1",
+        taskNumber: 2,
+        title: "Alpha running",
+        status: "running",
+        projectId: "p-alpha",
+        projectName: "Alpha",
+        updatedAt: "2026-11-26T09:00:00.000Z",
+      }),
+      // Alpha second task with different casing/spacing -> merges into same group
+      makeTask({
+        id: "t-alpha-2",
+        taskNumber: 3,
+        title: "Alpha review",
+        status: "needs_review",
+        projectId: "p-alpha",
+        projectName: "  alpha ",
+        updatedAt: "2026-11-26T09:30:00.000Z",
+      }),
+      // Beta: running and more recently updated than Alpha
+      makeTask({
+        id: "t-beta-1",
+        taskNumber: 4,
+        title: "Beta running",
+        status: "running",
+        projectId: "p-beta",
+        projectName: "Beta",
+        updatedAt: "2026-11-26T10:00:00.000Z",
+      }),
+      // Gamma: needs_review only
+      makeTask({
+        id: "t-gamma-1",
+        taskNumber: 5,
+        title: "Gamma review",
+        status: "needs_review",
+        projectId: "p-gamma",
+        projectName: "Gamma",
+        updatedAt: "2026-11-26T11:00:00.000Z",
+      }),
+      // Unassigned: blank projectName and no projectId
+      makeTask({
+        id: "t-unassigned",
+        taskNumber: 6,
+        title: "Orphan failed task",
+        status: "failed",
+        projectId: null,
+        projectName: "   ",
+        updatedAt: "2026-11-26T08:00:00.000Z",
+      }),
+    ];
+
+    const groups = groupTasksByProject(tasks, projects, "ja");
+    expect(groups.map((g) => g.groupKey)).toEqual([
+      "beta",
+      "alpha",
+      "gamma",
+      "delta",
+      UNASSIGNED_PROJECT_GROUP_KEY,
+    ]);
+
+    const alphaGroup = groups.find((g) => g.groupKey === "alpha")!;
+    expect(alphaGroup.projectName).toBe("Alpha");
+    expect(alphaGroup.colorHex).toBe("#3B82F6");
+    expect(alphaGroup.tasks.map((t) => t.id)).toEqual(["t-alpha-1", "t-alpha-2"]);
+    expect(alphaGroup.runningCount).toBe(1);
+    expect(alphaGroup.needsReviewCount).toBe(1);
+
+    const unassignedJa = groups.find((g) => g.groupKey === UNASSIGNED_PROJECT_GROUP_KEY)!;
+    expect(unassignedJa.projectName).toBe("未分類");
+    expect(unassignedJa.failedCount).toBe(1);
+
+    const unassignedEn = groupTasksByProject([tasks[5]!], projects, "en")[0]!;
+    expect(unassignedEn.projectName).toBe("Unassigned");
+
+    const counts = countTasksByProjectGroup(tasks, projects);
+    expect(counts.get("alpha")).toBe(2);
+    expect(counts.get("beta")).toBe(1);
+    expect(counts.get(UNASSIGNED_PROJECT_GROUP_KEY)).toBe(1);
+    expect(normalizeProjectGroupKey("  Conductor ")).toBe("conductor");
+    expect(normalizeProjectGroupKey("")).toBe(UNASSIGNED_PROJECT_GROUP_KEY);
+  });
+
+  it("persists and restores project grouping toggle and collapsed project groups safely", () => {
+    const store = new Map<string, string>();
+    const memoryStorage: SidebarStorageLike = {
+      getItem: (key) => store.get(key) ?? null,
+      setItem: (key, value) => {
+        store.set(key, value);
+      },
+      removeItem: (key) => {
+        store.delete(key);
+      },
+    };
+
+    // Grouping toggle defaults to true
+    expect(DEFAULT_TASK_GROUP_BY_PROJECT).toBe(true);
+    expect(parseTaskGroupByProject(null)).toBe(true);
+    expect(parseTaskGroupByProject("invalid")).toBe(true);
+    expect(parseTaskGroupByProject("false")).toBe(false);
+    expect(parseTaskGroupByProject("0")).toBe(false);
+    expect(parseTaskGroupByProject("true")).toBe(true);
+    expect(loadTaskGroupByProject(memoryStorage)).toBe(true);
+
+    saveTaskGroupByProject(false, memoryStorage);
+    expect(store.get(TASK_GROUP_BY_PROJECT_STORAGE_KEY)).toBe("false");
+    expect(loadTaskGroupByProject(memoryStorage)).toBe(false);
+
+    saveTaskGroupByProject(true, memoryStorage);
+    expect(store.get(TASK_GROUP_BY_PROJECT_STORAGE_KEY)).toBe("true");
+    expect(loadTaskGroupByProject(memoryStorage)).toBe(true);
+
+    // Collapsed project groups
+    expect(parseCollapsedProjectGroups(null).size).toBe(0);
+    expect(parseCollapsedProjectGroups("not-json").size).toBe(0);
+    expect(parseCollapsedProjectGroups('{"a":1}').size).toBe(0);
+    expect(loadCollapsedProjectGroups(memoryStorage).size).toBe(0);
+
+    const k1 = makeProjectGroupCollapseKey("active", "conductor");
+    const k2 = makeProjectGroupCollapseKey("completed", "conductor");
+    let collapsed = toggleCollapsedProjectGroup(new Set(), k1);
+    collapsed = toggleCollapsedProjectGroup(collapsed, k2);
+    saveCollapsedProjectGroups(collapsed, memoryStorage);
+
+    expect(store.get(COLLAPSED_PROJECT_GROUPS_STORAGE_KEY)).toBe(
+      JSON.stringify(["active:conductor", "completed:conductor"]),
+    );
+    const restored = loadCollapsedProjectGroups(memoryStorage);
+    expect(Array.from(restored).sort()).toEqual(["active:conductor", "completed:conductor"]);
+
+    // Toggling off and saving empty set clears the key
+    collapsed = toggleCollapsedProjectGroup(restored, k1);
+    collapsed = toggleCollapsedProjectGroup(collapsed, k2);
+    saveCollapsedProjectGroups(collapsed, memoryStorage);
+    expect(store.has(COLLAPSED_PROJECT_GROUPS_STORAGE_KEY)).toBe(false);
+    expect(loadCollapsedProjectGroups(memoryStorage).size).toBe(0);
+
+    // Handles throwing or null storage gracefully
+    const throwingStorage: SidebarStorageLike = {
+      getItem: () => {
+        throw new Error("denied");
+      },
+      setItem: () => {
+        throw new Error("quota");
+      },
+      removeItem: () => {
+        throw new Error("denied");
+      },
+    };
+    expect(loadTaskGroupByProject(null)).toBe(true);
+    expect(loadTaskGroupByProject(throwingStorage)).toBe(true);
+    expect(() => saveTaskGroupByProject(false, throwingStorage)).not.toThrow();
+    expect(loadCollapsedProjectGroups(null).size).toBe(0);
+    expect(loadCollapsedProjectGroups(throwingStorage).size).toBe(0);
+    expect(() => saveCollapsedProjectGroups(new Set([k1]), throwingStorage)).not.toThrow();
   });
 });

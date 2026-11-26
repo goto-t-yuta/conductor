@@ -266,6 +266,16 @@ describe("English UI rendering has zero leaked Japanese strings across all major
         projects={[SAMPLE_PROJECT]}
         tasks={[
           SAMPLE_TASK,
+          { ...SAMPLE_TASK, id: "task-2", taskNumber: 2, title: "Running task", status: "running" },
+          {
+            ...SAMPLE_TASK,
+            id: "task-4",
+            taskNumber: 4,
+            title: "Unassigned task",
+            projectId: null,
+            projectName: "",
+            status: "queued",
+          },
           { ...SAMPLE_TASK, id: "task-1", taskNumber: 1, title: "Done task", status: "done" },
         ]}
         questions={questions}
@@ -293,6 +303,8 @@ describe("English UI rendering has zero leaked Japanese strings across all major
     expect(sidebarHtml).toContain("Completed");
     expect(sidebarHtml).toContain("Questions");
     expect(sidebarHtml).toContain("Search questions...");
+    expect(sidebarHtml).toContain("Group by project: ON (click for flat list)");
+    expect(sidebarHtml).toContain("Unassigned");
     expect(sidebarHtml).not.toMatch(JAPANESE_CHAR_RE);
 
     const sidebarEmptyQuestionsSearchHtml = renderToStaticMarkup(
