@@ -324,10 +324,10 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = React.memo(({
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
-      className="relative flex flex-col h-full bg-zinc-50 dark:bg-[#13161c] border-l border-zinc-200/80 dark:border-zinc-800/90"
+      className="relative flex flex-col h-full min-w-0 bg-zinc-50 dark:bg-[#13161c] border-l border-zinc-200/80 dark:border-zinc-800/90"
     >
       {/* Unified Header: Project Switcher + File Tree Toggle + Mixed Tab Strip + Quick Actions + Close */}
-      <div className="drag-region relative z-20 h-11 flex items-center gap-1.5 px-2 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0">
+      <div className="drag-region relative z-20 h-11 flex items-center gap-1.5 px-2 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 min-w-0">
         <RightPaneProjectSwitcher
           activeItem={activeProjectItem}
           withTabs={switcherWithTabs}

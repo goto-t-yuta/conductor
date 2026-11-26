@@ -408,12 +408,14 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
       className="flex flex-col h-full bg-zinc-50 dark:bg-[#13161c] border-r border-zinc-200/80 dark:border-zinc-800/90"
     >
       {/* Header with space for macOS traffic lights */}
-      <div className="drag-region h-11 flex items-center justify-between pl-[78px] pr-3 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0">
+      <div className="drag-region h-11 flex items-center justify-between gap-2 pl-[78px] pr-3 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0">
           <ListTodo className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-          <span className="text-[12.5px] font-semibold truncate">{t(locale, "sidebar.tasks")}</span>
+          <span className="text-[12.5px] font-semibold truncate whitespace-nowrap">
+            {t(locale, "sidebar.tasks")}
+          </span>
           {runningCount > 0 && (
-            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-400">
+            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 shrink-0 whitespace-nowrap">
               {runningCount}
             </span>
           )}

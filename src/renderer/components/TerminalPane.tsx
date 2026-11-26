@@ -356,7 +356,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           </span>
           <span
             data-testid="terminal-status-badge"
-            className={`px-1.5 py-0.25 rounded text-[10px] font-medium shrink-0 ${statusBadgeClass}`}
+            className={`px-1.5 py-0.25 rounded text-[10px] font-medium shrink-0 whitespace-nowrap ${statusBadgeClass}`}
           >
             {statusLabel}
           </span>
@@ -364,7 +364,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             <span
               data-testid="terminal-fallback-badge"
               title={t(locale, "terminal.fallbackBanner", { backend: tab.backend })}
-              className="hidden sm:inline px-1.5 py-0.25 rounded bg-amber-500/12 text-amber-700 dark:text-amber-300 text-[10px] font-medium shrink-0"
+              className="hidden sm:inline px-1.5 py-0.25 rounded bg-amber-500/12 text-amber-700 dark:text-amber-300 text-[10px] font-medium shrink-0 whitespace-nowrap"
             >
               {tab.backend}
             </span>
@@ -463,7 +463,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 type="button"
                 onClick={() => onRevealInFinder(tab.cwd)}
                 title={t(locale, "common.revealInFinder")}
-                className="text-[10.5px] hover:text-indigo-500 hover:underline cursor-pointer"
+                className="text-[10.5px] hover:text-indigo-500 hover:underline cursor-pointer whitespace-nowrap"
               >
                 {t(locale, "common.finder")}
               </button>
@@ -476,7 +476,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       {tab.status === "exited" && (
         <div
           data-testid="terminal-exited-banner"
-          className="flex items-center justify-between gap-2 px-3 py-1.5 bg-amber-500/10 border-b border-amber-500/20 text-[11.5px] text-amber-800 dark:text-amber-200 shrink-0"
+          className="flex items-center justify-between gap-2 px-3 py-1.5 bg-amber-500/10 border-b border-amber-500/20 text-[11.5px] text-amber-800 dark:text-amber-200 shrink-0 min-w-0"
         >
           <span className="truncate">
             {tab.exitCode !== null
@@ -487,7 +487,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             <button
               type="button"
               onClick={() => onRestart(tab.id)}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors shrink-0 whitespace-nowrap cursor-pointer"
             >
               <RotateCw className="w-3 h-3" />
               <span>{t(locale, "terminal.restartBtn")}</span>

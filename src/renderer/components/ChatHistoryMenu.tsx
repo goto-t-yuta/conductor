@@ -157,9 +157,9 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
   };
 
   return (
-    <div className="relative flex items-center gap-0.5">
+    <div className="relative flex items-center gap-0.5 shrink-0">
       {/* Chat History Dropdown Button */}
-      <div className="relative">
+      <div className="relative shrink-0">
         <button
           type="button"
           data-testid="chat-history-button"
@@ -171,17 +171,17 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
             setHistoryOpen((v) => !v);
           }}
           title={t(locale, "history.buttonTitle")}
-          className={`inline-flex items-center gap-1 px-1.5 py-1 rounded-md text-[11.5px] transition-colors cursor-pointer ${
+          className={`inline-flex items-center gap-1 px-1.5 py-1 rounded-md text-[11.5px] transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
             historyOpen
               ? "text-indigo-500 bg-indigo-500/10"
               : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
           }`}
         >
-          <History className="w-4 h-4" />
+          <History className="w-4 h-4 shrink-0" />
           {pastSavedCount > 0 && (
             <span
               data-testid="chat-history-count"
-              className="min-w-[16px] h-4 px-1 rounded-full bg-zinc-200/80 dark:bg-zinc-700/80 text-zinc-700 dark:text-zinc-200 text-[10px] font-semibold inline-flex items-center justify-center leading-none"
+              className="min-w-[16px] h-4 px-1 rounded-full bg-zinc-200/80 dark:bg-zinc-700/80 text-zinc-700 dark:text-zinc-200 text-[10px] font-semibold inline-flex items-center justify-center leading-none shrink-0"
             >
               {savedSessionCount}
             </span>
@@ -199,7 +199,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
             />
             <div
               data-testid="chat-history-popover"
-              className="absolute right-0 mt-1.5 z-40 w-[330px] rounded-xl bg-white dark:bg-[#191d26] border border-zinc-200 dark:border-zinc-700 shadow-xl overflow-hidden"
+              className="absolute right-0 mt-1.5 z-40 w-[min(330px,calc(100vw-24px))] rounded-xl bg-white dark:bg-[#191d26] border border-zinc-200 dark:border-zinc-700 shadow-xl overflow-hidden"
             >
               <div className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-200/80 dark:border-zinc-800">
                 <div className="flex items-center gap-1.5">
@@ -371,13 +371,13 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
       </div>
 
       {/* New Chat Button + Lightweight Confirmation Popover when non-empty */}
-      <div className="relative">
+      <div className="relative shrink-0">
         <button
           type="button"
           data-testid="new-chat-button"
           onClick={handleNewChatButtonClick}
           title={t(locale, "history.newChatBtnTitle")}
-          className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+          className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
             confirmNewChatOpen
               ? "text-indigo-500 bg-indigo-500/10"
               : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
@@ -396,7 +396,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
               data-testid="new-chat-confirm-popover"
               role="dialog"
               aria-label={t(locale, "history.confirmDialogAria")}
-              className="absolute right-0 mt-1.5 z-40 w-[290px] rounded-xl bg-white dark:bg-[#191d26] border border-zinc-200 dark:border-zinc-700 shadow-xl p-3 space-y-2.5"
+              className="absolute right-0 mt-1.5 z-40 w-[min(290px,calc(100vw-24px))] rounded-xl bg-white dark:bg-[#191d26] border border-zinc-200 dark:border-zinc-700 shadow-xl p-3 space-y-2.5"
             >
               <div className="space-y-1">
                 <div className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100">

@@ -132,7 +132,7 @@ export const RightPaneProjectSwitcher: React.FC<RightPaneProjectSwitcherProps> =
         aria-expanded={isOpen}
         onClick={() => onOpenChange(!isOpen)}
         title={t(locale, "switcher.title", { name: activeItem.name })}
-        className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer max-w-[168px] ${
+        className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer max-w-[168px] whitespace-nowrap ${
           isOpen
             ? "bg-white dark:bg-[#1d222d] border-indigo-500/50 text-zinc-900 dark:text-zinc-100 shadow-xs"
             : "bg-zinc-200/70 dark:bg-zinc-800/90 border-zinc-200/80 dark:border-zinc-700/80 text-zinc-800 dark:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-zinc-800"
