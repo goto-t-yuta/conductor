@@ -15,6 +15,7 @@ import type {
   VoiceSpeakRequest,
 } from "../shared/types.js";
 import { AppUpdater } from "./app-updater.js";
+import { loadAppIcon } from "./app-icon.js";
 import { BrowserManager } from "./browser-manager.js";
 import { ConductorController } from "./conductor-controller.js";
 import { readLocalImageFile } from "./image-viewer.js";
@@ -535,6 +536,7 @@ function registerIpcHandlers(): void {
 
 async function createWindow(): Promise<void> {
   stateStore = new StateStore(path.join(app.getPath("userData"), "conductor-data"));
+  const windowIcon = loadAppIcon();
 
   mainWindow = new BrowserWindow({
     width: 1520,
@@ -542,6 +544,7 @@ async function createWindow(): Promise<void> {
     minWidth: 960,
     minHeight: 620,
     title: "Conductor",
+    ...(windowIcon ? { icon: windowIcon } : {}),
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 14, y: 12 },
     backgroundColor: "#0f1115",
@@ -641,6 +644,12 @@ protocol.registerSchemesAsPrivileged([
 app.setName("Conductor");
 
 app.whenReady().then(async () => {
+  if (process.platform === "darwin" && app.dock) {
+    const dockIcon = loadAppIcon();
+    if (dockIcon) {
+      app.dock.setIcon(dockIcon);
+    }
+  }
   protocol.handle(CONDUCTOR_MEDIA_PROTOCOL, (request) => handleConductorMediaRequest(request));
   createApplicationMenu();
   registerIpcHandlers();

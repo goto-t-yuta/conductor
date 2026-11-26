@@ -17,6 +17,7 @@
     "build:main": "node scripts/build-main.mjs",
     "build:renderer": "vite build",
     "build": "pnpm build:main && pnpm build:renderer",
+    "icons:generate": "node scripts/generate-icons.mjs",
     "package": "pnpm build && electron-builder --publish never",
     "package:dir": "pnpm build && electron-builder --dir --publish never",
     "package:mac": "pnpm build && electron-builder --mac --publish never",
