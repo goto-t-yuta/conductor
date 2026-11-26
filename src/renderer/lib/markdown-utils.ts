@@ -1,3 +1,6 @@
+import type { AgentTask, Project } from "../../shared/types.js";
+import { formatTaskCode, parseAndResolveMentions } from "../../shared/mentions.js";
+
 export const MARKDOWN_EXT_REGEX = /\.(?:md|markdown|mdown|mkd|mdx)$/i;
 
 export interface MarkdownHeading {
@@ -433,4 +436,159 @@ export function computeDocumentStats(content: string): {
   const trimmed = content.trim();
   const words = trimmed ? trimmed.split(/\s+/).length : 0;
   return { lines, words, chars: content.length };
+}
+
+interface MarkdownAstNode {
+  type: string;
+  tagName?: string;
+  value?: string;
+  properties?: Record<string, unknown>;
+  children?: MarkdownAstNode[];
+}
+
+const SOFT_BREAK_RE = /[ \t]*(?:\r?\n|\r)/g;
+
+/**
+ * Remark plugin that turns single newlines inside mdast `text` nodes into
+ * `break` (`<br />`) nodes so chat input line breaks are preserved without
+ * touching `code`, `inlineCode`, or `html` nodes.
+ */
+export function remarkSingleLineBreaks() {
+  const transformNode = (node: MarkdownAstNode): void => {
+    if (!Array.isArray(node.children) || node.children.length === 0) return;
+
+    const nextChildren: MarkdownAstNode[] = [];
+    let modified = false;
+
+    for (const child of node.children) {
+      if (child.type === "text" && typeof child.value === "string" && /[\r\n]/.test(child.value)) {
+        modified = true;
+        const value = child.value;
+        SOFT_BREAK_RE.lastIndex = 0;
+        let lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = SOFT_BREAK_RE.exec(value)) !== null) {
+          if (match.index > lastIndex) {
+            nextChildren.push({ type: "text", value: value.slice(lastIndex, match.index) });
+          }
+          nextChildren.push({ type: "break" });
+          lastIndex = match.index + match[0].length;
+        }
+        if (lastIndex < value.length) {
+          nextChildren.push({ type: "text", value: value.slice(lastIndex) });
+        }
+      } else {
+        transformNode(child);
+        nextChildren.push(child);
+      }
+    }
+
+    if (modified) {
+      node.children = nextChildren;
+    }
+  };
+
+  return (tree: MarkdownAstNode) => {
+    transformNode(tree);
+  };
+}
+
+const SKIP_MENTION_HAST_TAGS = new Set([
+  "code",
+  "pre",
+  "a",
+  "button",
+  "kbd",
+  "samp",
+  "var",
+  "script",
+  "style",
+]);
+
+/**
+ * Rehype plugin that wraps inline `@T#`, `@project`, and `@project/T#` tokens
+ * inside prose HAST text nodes into marker `<span>` elements while skipping
+ * code, links, and interactive subtrees.
+ */
+export function createRehypeHighlightMentions(projects: Project[], tasks: AgentTask[]) {
+  return function rehypeHighlightMentions() {
+    const transformNode = (node: MarkdownAstNode): void => {
+      if (
+        node.type === "element" &&
+        typeof node.tagName === "string" &&
+        SKIP_MENTION_HAST_TAGS.has(node.tagName.toLowerCase())
+      ) {
+        return;
+      }
+
+      if (!Array.isArray(node.children) || node.children.length === 0) return;
+
+      const nextChildren: MarkdownAstNode[] = [];
+      let modified = false;
+
+      for (const child of node.children) {
+        if (child.type === "text" && typeof child.value === "string" && child.value.includes("@")) {
+          const text = child.value;
+          const { mentions } = parseAndResolveMentions(text, projects, tasks);
+          if (mentions.length > 0) {
+            modified = true;
+            let cursor = 0;
+            for (const m of mentions) {
+              if (m.start > cursor) {
+                nextChildren.push({ type: "text", value: text.slice(cursor, m.start) });
+              }
+              if (m.task) {
+                nextChildren.push({
+                  type: "element",
+                  tagName: "span",
+                  properties: {
+                    dataConductorMentionKind: "task",
+                    dataConductorTaskId: m.task.id,
+                    dataConductorMentionTitle: `${formatTaskCode(m.task.taskNumber)} · ${m.task.projectName}: ${m.task.title} (${m.task.status})`,
+                  },
+                  children: [{ type: "text", value: m.raw }],
+                });
+              } else if (m.project) {
+                nextChildren.push({
+                  type: "element",
+                  tagName: "span",
+                  properties: {
+                    dataConductorMentionKind: "project",
+                    dataConductorProjectColor: m.project.colorHex,
+                    dataConductorMentionTitle: m.project.path,
+                  },
+                  children: [{ type: "text", value: m.raw }],
+                });
+              } else {
+                nextChildren.push({
+                  type: "element",
+                  tagName: "span",
+                  properties: {
+                    dataConductorMentionKind: "unresolved",
+                  },
+                  children: [{ type: "text", value: m.raw }],
+                });
+              }
+              cursor = m.end;
+            }
+            if (cursor < text.length) {
+              nextChildren.push({ type: "text", value: text.slice(cursor) });
+            }
+            continue;
+          }
+        }
+
+        transformNode(child);
+        nextChildren.push(child);
+      }
+
+      if (modified) {
+        node.children = nextChildren;
+      }
+    };
+
+    return (tree: MarkdownAstNode) => {
+      transformNode(tree);
+    };
+  };
 }

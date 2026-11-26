@@ -46,7 +46,6 @@ import {
   extractResolvedMentionChips,
   formatTaskCode,
   getMentionSuggestions,
-  parseAndResolveMentions,
   removeActiveMentionQuery,
   removeResolvedMentionChip,
   resolveMessageMentionBadges,
@@ -1282,75 +1281,6 @@ const EmptyWelcome: React.FC<{
   );
 };
 
-const HighlightedUserText: React.FC<{
-  text: string;
-  projects: Project[];
-  tasks: AgentTask[];
-  onOpenTask: (taskId: string) => void;
-}> = ({ text, projects, tasks, onOpenTask }) => {
-  const { mentions } = useMemo(
-    () => parseAndResolveMentions(text, projects, tasks),
-    [text, projects, tasks],
-  );
-
-  if (mentions.length === 0) {
-    return <>{text}</>;
-  }
-
-  const nodes: React.ReactNode[] = [];
-  let cursor = 0;
-
-  for (const m of mentions) {
-    if (m.start > cursor) {
-      nodes.push(<React.Fragment key={`t:${cursor}`}>{text.slice(cursor, m.start)}</React.Fragment>);
-    }
-
-    if (m.task) {
-      nodes.push(
-        <button
-          key={`m:${m.start}`}
-          type="button"
-          onClick={() => onOpenTask(m.task!.id)}
-          title={`${formatTaskCode(m.task.taskNumber)} · ${m.task.projectName}: ${m.task.title} (${m.task.status})`}
-          className="inline-flex items-center px-1.5 py-0.2 mx-0.2 rounded-md font-mono text-[12.5px] font-semibold bg-indigo-500/20 text-indigo-700 dark:text-indigo-200 hover:bg-indigo-500/30 transition-colors cursor-pointer align-baseline"
-        >
-          {m.raw}
-        </button>,
-      );
-    } else if (m.project) {
-      nodes.push(
-        <span
-          key={`m:${m.start}`}
-          title={m.project.path}
-          className="inline-flex items-center px-1.5 py-0.2 mx-0.2 rounded-md font-medium text-[13px] align-baseline"
-          style={{
-            backgroundColor: `${m.project.colorHex}24`,
-            color: m.project.colorHex,
-          }}
-        >
-          {m.raw}
-        </span>,
-      );
-    } else {
-      nodes.push(
-        <span
-          key={`m:${m.start}`}
-          className="inline-flex items-center px-1.5 py-0.2 mx-0.2 rounded-md font-mono text-[12.5px] bg-zinc-500/15 text-zinc-700 dark:text-zinc-300 align-baseline"
-        >
-          {m.raw}
-        </span>,
-      );
-    }
-    cursor = m.end;
-  }
-
-  if (cursor < text.length) {
-    nodes.push(<React.Fragment key={`t:${cursor}`}>{text.slice(cursor)}</React.Fragment>);
-  }
-
-  return <>{nodes}</>;
-};
-
 export interface TaskEventCardProps {
   message: ChatMessage;
   tasks: AgentTask[];
@@ -1619,6 +1549,10 @@ const MessageRow: React.FC<{
         : [],
     [message.role, message.text, message.mentions, message.inferredMentions, projects, tasks],
   );
+  const userMentionContext = useMemo(
+    () => (message.role === "user" ? { projects, tasks, onOpenTask } : undefined),
+    [message.role, projects, tasks, onOpenTask],
+  );
 
   if (message.role === "user") {
     const hasMetaChips = mentionBadges.length > 0 || message.attachments.length > 0;
@@ -1674,12 +1608,16 @@ const MessageRow: React.FC<{
             })}
           </div>
         )}
-        <div className="max-w-[82%] rounded-2xl px-4 py-2.5 text-[14px] leading-relaxed bg-indigo-500/12 dark:bg-indigo-500/20 text-zinc-900 dark:text-zinc-100 whitespace-pre-wrap select-text">
-          <HighlightedUserText
-            text={message.text}
-            projects={projects}
-            tasks={tasks}
-            onOpenTask={onOpenTask}
+        <div
+          data-testid="user-message-bubble"
+          className="max-w-[82%] min-w-0 rounded-2xl px-4 py-2.5 bg-indigo-500/12 dark:bg-indigo-500/20 text-zinc-900 dark:text-zinc-100 select-text"
+        >
+          <MarkdownView
+            content={message.text}
+            variant="user"
+            onOpenUrl={onOpenUrl}
+            onOpenMarkdownFile={onOpenMarkdownFile}
+            mentionContext={userMentionContext}
           />
         </div>
       </div>
