@@ -219,6 +219,11 @@ export const UI_STRINGS = {
     "chat.openTaskDetail": "タスク詳細を開く",
     "chat.reasoningProcess": "思考プロセス",
     "chat.preparingReply": "応答を準備中...",
+    "chat.toolChipsSummary": "ツール実行 {count}件（{breakdown}）",
+    "chat.toolChipsSummaryNoBreakdown": "ツール実行 {count}件",
+    "chat.toolChipsErrorSuffix": " · {count}件エラー",
+    "chat.toolChipsExpandAria": "ツール実行の詳細を展開",
+    "chat.toolChipsCollapseAria": "ツール実行の詳細を折りたたむ",
 
     // ChatHistoryMenu
     "history.buttonTitle": "チャット履歴 — 過去のチャットをワンクリックで復元",
@@ -273,6 +278,11 @@ export const UI_STRINGS = {
     "inspector.summary": "概要",
     "inspector.latestOutput": "ワーカー最新出力",
     "inspector.activityLog": "実行ログ ({count})",
+    "inspector.toolLogSummary": "ツール実行ログ（全 {count}件: {breakdown}）",
+    "inspector.toolLogSummaryEmptyBreakdown": "ツール実行ログ（全 {count}件）",
+    "inspector.toolLogMoreTools": "他 {count}種",
+    "inspector.toolLogExpandAria": "ツール実行ログを展開",
+    "inspector.toolLogCollapseAria": "ツール実行ログを折りたたむ",
     "inspector.openInBrowser": "ブラウザで開く",
 
     // SettingsModal
@@ -632,6 +642,11 @@ export const UI_STRINGS = {
     "chat.openTaskDetail": "Open Task Detail",
     "chat.reasoningProcess": "Reasoning",
     "chat.preparingReply": "Preparing response...",
+    "chat.toolChipsSummary": "{count} tool calls ({breakdown})",
+    "chat.toolChipsSummaryNoBreakdown": "{count} tool calls",
+    "chat.toolChipsErrorSuffix": " · {count} error(s)",
+    "chat.toolChipsExpandAria": "Expand tool call details",
+    "chat.toolChipsCollapseAria": "Collapse tool call details",
 
     // ChatHistoryMenu
     "history.buttonTitle": "Chat history — restore previous conversations in one click",
@@ -686,6 +701,11 @@ export const UI_STRINGS = {
     "inspector.summary": "Summary",
     "inspector.latestOutput": "Latest Worker Output",
     "inspector.activityLog": "Activity Log ({count})",
+    "inspector.toolLogSummary": "Tool execution log ({count} total: {breakdown})",
+    "inspector.toolLogSummaryEmptyBreakdown": "Tool execution log ({count} total)",
+    "inspector.toolLogMoreTools": "+{count} more",
+    "inspector.toolLogExpandAria": "Expand tool execution log",
+    "inspector.toolLogCollapseAria": "Collapse tool execution log",
     "inspector.openInBrowser": "Open in Browser",
 
     // SettingsModal

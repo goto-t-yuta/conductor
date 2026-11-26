@@ -45,6 +45,7 @@ import type {
   IntegrationMode,
   Project,
   RightPaneMode,
+  ToolActivityChip,
 } from "../../shared/types.js";
 import {
   detectActiveMention,
@@ -72,6 +73,10 @@ import {
   resolveSpeechLocale,
 } from "../../shared/voice.js";
 import { getEffectiveProjectMode } from "../lib/integration-mode.js";
+import {
+  buildToolChipDisplayPlan,
+  formatToolChipsSummary,
+} from "../lib/activity-log.js";
 import { isViewableImageAttachment } from "../lib/image-viewer.js";
 import { resolveTaskForTaskEvent } from "../lib/task-event.js";
 import { getQuickStatusTransition } from "../lib/task-sidebar.js";
@@ -2388,23 +2393,11 @@ const MessageRow: React.FC<{
       )}
 
       {message.toolChips.length > 0 && (
-        <div className="pl-7 flex flex-wrap gap-1.5">
-          {message.toolChips.map((chip) => (
-            <span
-              key={chip.id}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300"
-            >
-              {chip.isError ? (
-                <XCircle className="w-3 h-3 text-rose-500" />
-              ) : chip.isCompleted ? (
-                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
-              ) : (
-                <Loader2 className="w-3 h-3 text-indigo-500 animate-spin" />
-              )}
-              <span>{chip.label}</span>
-            </span>
-          ))}
-        </div>
+        <MessageToolChips
+          toolChips={message.toolChips}
+          isStreaming={message.isStreaming}
+          locale={locale}
+        />
       )}
 
       <div className="pl-7">
@@ -2419,6 +2412,98 @@ const MessageRow: React.FC<{
           <span className="text-[13px] text-zinc-400">{t(locale, "chat.preparingReply")}</span>
         ) : null}
       </div>
+    </div>
+  );
+});
+
+export interface MessageToolChipsProps {
+  toolChips: ToolActivityChip[];
+  isStreaming: boolean;
+  locale: UiLocale;
+  defaultExpanded?: boolean;
+}
+
+const ToolChipPill: React.FC<{ chip: ToolActivityChip }> = React.memo(({ chip }) => (
+  <span
+    data-testid="message-tool-chip"
+    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300"
+  >
+    {chip.isError ? (
+      <XCircle className="w-3 h-3 text-rose-500 shrink-0" />
+    ) : chip.isCompleted ? (
+      <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />
+    ) : (
+      <Loader2 className="w-3 h-3 text-indigo-500 animate-spin shrink-0" />
+    )}
+    <span>{chip.label}</span>
+  </span>
+));
+
+export const MessageToolChips: React.FC<MessageToolChipsProps> = React.memo(({
+  toolChips,
+  isStreaming,
+  locale,
+  defaultExpanded = false,
+}) => {
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  const plan = useMemo(
+    () => buildToolChipDisplayPlan(toolChips, { isStreaming }),
+    [toolChips, isStreaming],
+  );
+
+  if (toolChips.length === 0) {
+    return null;
+  }
+
+  return (
+    <div data-testid="message-tool-chips" className="pl-7 space-y-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {plan.shouldCollapseByDefault && (
+          <button
+            type="button"
+            data-testid="message-tool-chips-toggle"
+            aria-expanded={isExpanded}
+            aria-label={
+              isExpanded
+                ? t(locale, "chat.toolChipsCollapseAria")
+                : t(locale, "chat.toolChipsExpandAria")
+            }
+            onClick={() => setIsExpanded((prev) => !prev)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800/80 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 text-zinc-600 dark:text-zinc-300 border border-zinc-200/70 dark:border-zinc-700/70 transition-colors cursor-pointer"
+          >
+            {plan.errorCount > 0 ? (
+              <XCircle className="w-3 h-3 text-rose-500 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />
+            )}
+            <span>
+              {formatToolChipsSummary(
+                plan.collapsibleChips.length,
+                plan.toolCounts,
+                plan.errorCount,
+                locale,
+              )}
+            </span>
+            {isExpanded ? (
+              <ChevronDown className="w-3 h-3 text-zinc-400 shrink-0" />
+            ) : (
+              <ChevronRight className="w-3 h-3 text-zinc-400 shrink-0" />
+            )}
+          </button>
+        )}
+
+        {plan.visibleChips.map((chip) => (
+          <ToolChipPill key={chip.id} chip={chip} />
+        ))}
+      </div>
+
+      {plan.shouldCollapseByDefault && isExpanded && (
+        <div data-testid="message-tool-chips-expanded" className="flex flex-wrap gap-1.5">
+          {plan.collapsibleChips.map((chip) => (
+            <ToolChipPill key={chip.id} chip={chip} />
+          ))}
+        </div>
+      )}
     </div>
   );
 });

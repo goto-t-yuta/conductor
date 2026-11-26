@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ChevronRight,
   ExternalLink,
   FileText,
   Folder,
@@ -10,6 +11,7 @@ import {
   GitMerge,
   GitPullRequest,
   Globe,
+  Info,
   Loader2,
   MessageSquare,
   RefreshCw,
@@ -29,6 +31,7 @@ import type {
   Project,
   TaskLandStatus,
   TaskWorktreeStatus,
+  WorkerActivityEntry,
 } from "../../shared/types.js";
 import { formatTaskStatusLabel, t, type UiLocale } from "../../shared/i18n.js";
 import { formatTaskCode } from "../../shared/mentions.js";
@@ -37,6 +40,10 @@ import {
   requiresLandBeforeDone,
   validateManualTaskStatusTransition,
 } from "../../shared/task-status.js";
+import {
+  formatToolLogSummary,
+  partitionTaskActivities,
+} from "../lib/activity-log.js";
 import {
   getEffectiveProjectMode,
   getIntegrationModeOption,
@@ -176,6 +183,7 @@ export interface TaskInspectorModalProps {
   projectColorHex: string;
   defaultIntegrationMode?: IntegrationMode;
   locale?: UiLocale;
+  defaultToolLogExpanded?: boolean;
   onClose: () => void;
   onUpdateStatus: (status: AgentTaskStatus) => void;
   onOpenPreviewUrl: (url: string) => void;
@@ -194,6 +202,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
   projectColorHex,
   defaultIntegrationMode = "feature-branch",
   locale = "ja",
+  defaultToolLogExpanded,
   onClose,
   onUpdateStatus,
   onOpenPreviewUrl,
@@ -209,6 +218,20 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
   const [worktreeStatus, setWorktreeStatus] = useState<TaskWorktreeStatus | null>(null);
   const [isRefreshingGit, setIsRefreshingGit] = useState(false);
   const [isStartingConflictResolve, setIsStartingConflictResolve] = useState(false);
+
+  const partitionedActivities = useMemo(
+    () => partitionTaskActivities(task.activities),
+    [task.activities],
+  );
+  const [isToolLogExpanded, setIsToolLogExpanded] = useState(
+    defaultToolLogExpanded ?? !partitionedActivities.defaultToolLogCollapsed,
+  );
+
+  useEffect(() => {
+    setIsToolLogExpanded(
+      defaultToolLogExpanded ?? !partitionedActivities.defaultToolLogCollapsed,
+    );
+  }, [task.id, defaultToolLogExpanded, partitionedActivities.defaultToolLogCollapsed]);
 
   const effectiveMode =
     worktreeStatus?.effectiveMode ?? getEffectiveProjectMode(project, defaultIntegrationMode);
@@ -583,11 +606,11 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
           )}
 
           {task.latestOutput.trim() && (
-            <div>
+            <div data-testid="inspector-latest-output">
               <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
                 {t(locale, "inspector.latestOutput")}
               </div>
-              <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-900/80 border border-zinc-200/70 dark:border-zinc-800">
+              <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-900/80 border border-zinc-200/80 dark:border-zinc-800">
                 <MarkdownView
                   content={task.latestOutput}
                   locale={locale}
@@ -609,32 +632,82 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
           )}
 
           {task.activities.length > 0 && (
-            <div>
-              <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
+            <div data-testid="inspector-activity-section" className="space-y-2">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
                 {t(locale, "inspector.activityLog", { count: task.activities.length })}
               </div>
-              <div className="space-y-1.5">
-                {[...task.activities].reverse().map((act) => (
-                  <div
-                    key={act.id}
-                    className="p-2.5 rounded-lg bg-zinc-100/80 dark:bg-zinc-900/70 border border-zinc-200/60 dark:border-zinc-800/80"
+
+              {partitionedActivities.highSignal.length > 0 && (
+                <div data-testid="inspector-high-signal-activities" className="space-y-1.5">
+                  {partitionedActivities.highSignal.map((act) => (
+                    <HighSignalActivityItem key={act.id} activity={act} />
+                  ))}
+                </div>
+              )}
+
+              {partitionedActivities.toolActivities.length > 0 && (
+                <div
+                  data-testid="inspector-tool-log-section"
+                  className="rounded-xl border border-zinc-200/70 dark:border-zinc-800/80 bg-zinc-50/70 dark:bg-zinc-900/50 overflow-hidden"
+                >
+                  <button
+                    type="button"
+                    data-testid="inspector-tool-log-toggle"
+                    aria-expanded={isToolLogExpanded}
+                    aria-label={
+                      isToolLogExpanded
+                        ? t(locale, "inspector.toolLogCollapseAria")
+                        : t(locale, "inspector.toolLogExpandAria")
+                    }
+                    onClick={() => setIsToolLogExpanded((prev) => !prev)}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-[12px] font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100/90 dark:hover:bg-zinc-800/60 transition-colors cursor-pointer"
                   >
-                    <div className="flex items-center gap-1.5 text-[12px] font-medium">
-                      {act.kind === "command" ? (
-                        <Terminal className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                      ) : (
-                        <FileText className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                      )}
-                      <span className={act.kind === "command" ? "font-mono" : ""}>{act.title}</span>
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      <Terminal className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                      <span className="truncate">
+                        {formatToolLogSummary(
+                          partitionedActivities.toolActivities.length,
+                          partitionedActivities.toolCounts,
+                          locale,
+                        )}
+                      </span>
+                    </span>
+                    <ChevronRight
+                      className={`w-3.5 h-3.5 text-zinc-400 shrink-0 transition-transform duration-150 ${
+                        isToolLogExpanded ? "rotate-90" : ""
+                      }`}
+                    />
+                  </button>
+
+                  {isToolLogExpanded && (
+                    <div
+                      data-testid="inspector-tool-log-list"
+                      className="border-t border-zinc-200/70 dark:border-zinc-800/80 max-h-72 overflow-y-auto divide-y divide-zinc-200/60 dark:divide-zinc-800/70"
+                    >
+                      {partitionedActivities.toolActivities.map((act, index) => (
+                        <div
+                          key={act.id}
+                          data-testid="inspector-tool-log-item"
+                          className="px-3 py-2 bg-white/60 dark:bg-zinc-950/30"
+                        >
+                          <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-zinc-700 dark:text-zinc-300">
+                            <span className="text-[10px] font-mono text-zinc-400 tabular-nums shrink-0">
+                              #{index + 1}
+                            </span>
+                            <Terminal className="w-3 h-3 text-zinc-400 shrink-0" />
+                            <span className="font-mono truncate">{act.title}</span>
+                          </div>
+                          {act.detail && (
+                            <pre className="mt-1 pl-5 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap line-clamp-6">
+                              {act.detail}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
                     </div>
-                    {act.detail && (
-                      <pre className="mt-1 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap line-clamp-6">
-                        {act.detail}
-                      </pre>
-                    )}
-                  </div>
-                ))}
-              </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -689,6 +762,43 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
           </button>
         </div>
       </div>
+    </div>
+  );
+};
+
+const HighSignalActivityItem: React.FC<{ activity: WorkerActivityEntry }> = ({ activity }) => {
+  const isError = activity.kind === "error";
+  const isMessage = activity.kind === "message";
+  const isSystem = activity.kind === "system";
+
+  const containerClass = isError
+    ? "bg-rose-500/10 border-rose-500/25 text-rose-700 dark:text-rose-300"
+    : isMessage
+      ? "bg-indigo-500/[0.06] border-indigo-500/20 text-zinc-800 dark:text-zinc-200"
+      : "bg-zinc-100/80 dark:bg-zinc-900/70 border-zinc-200/60 dark:border-zinc-800/80 text-zinc-800 dark:text-zinc-200";
+
+  return (
+    <div
+      data-testid={`inspector-activity-${activity.kind}`}
+      className={`p-2.5 rounded-lg border ${containerClass}`}
+    >
+      <div className="flex items-center gap-1.5 text-[12px] font-medium">
+        {isError ? (
+          <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+        ) : isMessage ? (
+          <MessageSquare className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+        ) : isSystem ? (
+          <Info className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+        ) : (
+          <FileText className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+        )}
+        <span>{activity.title}</span>
+      </div>
+      {activity.detail && (
+        <pre className="mt-1 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap line-clamp-6">
+          {activity.detail}
+        </pre>
+      )}
     </div>
   );
 };
