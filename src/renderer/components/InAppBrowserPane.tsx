@@ -13,11 +13,13 @@ import {
   X,
 } from "lucide-react";
 import type { BrowserTab } from "../../shared/types.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 export interface InAppBrowserPaneProps {
   activeTab: BrowserTab | null;
   isPickingElement: boolean;
   hideNativeView: boolean;
+  locale?: UiLocale;
   /** Changing value forces an immediate bounds re-sync (e.g. file tree toggle/resize) */
   layoutSyncKey?: string | number;
   onNavigate: (url: string, newTab?: boolean) => void;
@@ -36,6 +38,7 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
   activeTab,
   isPickingElement,
   hideNativeView,
+  locale = "ja",
   layoutSyncKey,
   onNavigate,
   onBack,
@@ -124,8 +127,8 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
           type="button"
           onClick={onBack}
           disabled={!activeTab?.canGoBack}
-          title="戻る"
-          aria-label="戻る"
+          title={t(locale, "browser.back")}
+          aria-label={t(locale, "browser.back")}
           className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-30 cursor-pointer"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
@@ -134,8 +137,8 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
           type="button"
           onClick={onForward}
           disabled={!activeTab?.canGoForward}
-          title="進む"
-          aria-label="進む"
+          title={t(locale, "browser.forward")}
+          aria-label={t(locale, "browser.forward")}
           className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-30 cursor-pointer"
         >
           <ArrowRight className="w-3.5 h-3.5" />
@@ -143,8 +146,10 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
         <button
           type="button"
           onClick={onReload}
-          title={activeTab?.isLoading ? "読み込みを中止" : "再読み込み"}
-          aria-label={activeTab?.isLoading ? "読み込みを中止" : "再読み込み"}
+          title={activeTab?.isLoading ? t(locale, "browser.stopLoading") : t(locale, "browser.reload")}
+          aria-label={
+            activeTab?.isLoading ? t(locale, "browser.stopLoading") : t(locale, "browser.reload")
+          }
           className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
         >
           {activeTab?.isLoading ? <X className="w-3.5 h-3.5" /> : <RotateCw className="w-3.5 h-3.5" />}
@@ -161,7 +166,7 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
             type="text"
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
-            placeholder="localhost:3000 や URL を入力..."
+            placeholder={t(locale, "browser.urlPlaceholder")}
             className="w-full px-2.5 py-1 rounded-lg text-[12px] bg-white dark:bg-[#0f1115] border border-zinc-200 dark:border-zinc-800 focus:border-indigo-500/60 outline-none select-text"
           />
         </form>
@@ -169,8 +174,8 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
         <button
           type="button"
           onClick={onToggleDevTools}
-          title="Chrome DevTools を開閉 (⌘⌥I)"
-          aria-label="Chrome DevTools を開閉"
+          title={t(locale, "browser.devToolsTitle")}
+          aria-label={t(locale, "browser.devToolsAria")}
           className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
         >
           <Code2 className="w-3.5 h-3.5" />
@@ -179,8 +184,8 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
         <button
           type="button"
           onClick={onOpenExternal}
-          title="外部ブラウザで開く"
-          aria-label="外部ブラウザで開く"
+          title={t(locale, "browser.openExternal")}
+          aria-label={t(locale, "browser.openExternal")}
           className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
         >
           <ExternalLink className="w-3.5 h-3.5" />
@@ -196,20 +201,20 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
           type="button"
           data-testid="browser-toolbar-screenshot-btn"
           onClick={onCaptureScreenshot}
-          title="画面スクショをチャットに添付 (⌘⇧S)"
-          aria-label="画面スクショをチャットに添付"
+          title={t(locale, "browser.screenshotTitle")}
+          aria-label={t(locale, "browser.screenshotAria")}
           className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
         >
           <Camera className="w-3.5 h-3.5" />
-          <span>スクショ</span>
+          <span>{t(locale, "browser.screenshotBtn")}</span>
         </button>
 
         <button
           type="button"
           data-testid="browser-toolbar-element-picker-btn"
           onClick={onTogglePicker}
-          title="ページ上の要素を選択してチャットに添付 (⌘⇧P)"
-          aria-label="要素選択モード"
+          title={t(locale, "browser.pickerTitle")}
+          aria-label={t(locale, "browser.pickerAria")}
           aria-pressed={isPickingElement}
           className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer shrink-0 ${
             isPickingElement
@@ -218,7 +223,7 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
           }`}
         >
           <Crosshair className="w-3.5 h-3.5" />
-          <span>要素選択</span>
+          <span>{t(locale, "browser.pickerBtn")}</span>
         </button>
 
         {onAttachUrl && (
@@ -229,14 +234,14 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
             disabled={!activeTab?.url}
             title={
               activeTab?.url
-                ? "現在のブラウザURLをチャットに添付"
-                : "URL を開くとチャットに添付できます"
+                ? t(locale, "browser.attachUrlTitle")
+                : t(locale, "browser.attachUrlDisabledTitle")
             }
-            aria-label="現在のブラウザURLをチャットに添付"
+            aria-label={t(locale, "browser.attachUrlTitle")}
             className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer shrink-0"
           >
             <Link2 className="w-3.5 h-3.5" />
-            <span>URL添付</span>
+            <span>{t(locale, "browser.attachUrlBtn")}</span>
           </button>
         )}
 
@@ -247,10 +252,10 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
           disabled={totalErrors === 0}
           title={
             totalErrors > 0
-              ? `コンソール/通信エラー (${totalErrors}件) をチャットへ添付`
-              : "コンソール/通信エラーをチャットへ添付（現在エラーはありません）"
+              ? t(locale, "browser.attachErrorsTitleWithCount", { count: totalErrors })
+              : t(locale, "browser.attachErrorsEmptyTitle")
           }
-          aria-label="コンソール/通信エラーをチャットへ添付"
+          aria-label={t(locale, "browser.attachErrorsAria")}
           className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors shrink-0 ${
             totalErrors > 0
               ? "bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 cursor-pointer font-semibold"
@@ -258,7 +263,7 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
           }`}
         >
           <AlertTriangle className="w-3.5 h-3.5" />
-          <span>エラー添付</span>
+          <span>{t(locale, "browser.attachErrorsBtn")}</span>
           {totalErrors > 0 && (
             <span className="px-1 py-0.5 rounded-full text-[10px] leading-none bg-rose-500/20 text-rose-700 dark:text-rose-300">
               {totalErrors}
@@ -270,13 +275,13 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
       {/* Picker Active Banner */}
       {isPickingElement && (
         <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-indigo-600 text-white text-[11.5px] shrink-0">
-          <span>要素選択モード：ページ上の要素をクリックすると HTML/CSS とスクショをチャットに添付します (Esc で終了)</span>
+          <span>{t(locale, "browser.pickerBanner")}</span>
           <button
             type="button"
             onClick={onTogglePicker}
             className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 text-[11px] font-medium cursor-pointer shrink-0"
           >
-            終了
+            {t(locale, "browser.pickerDone")}
           </button>
         </div>
       )}
@@ -291,7 +296,7 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
             <div className="space-y-1">
               <h2 className="text-[15px] font-semibold">In-App Chromium Browser</h2>
               <p className="text-[12px] text-zinc-500 dark:text-zinc-400 max-w-xs leading-relaxed">
-                CDP 直結の内蔵 Chromium。Agent がクリック・入力・コンソールエラー監視・スクショ撮影を自動実行でき、本物の Chrome DevTools も開けます。
+                {t(locale, "browser.emptyDesc")}
               </p>
             </div>
             <div className="flex flex-wrap justify-center gap-1.5">

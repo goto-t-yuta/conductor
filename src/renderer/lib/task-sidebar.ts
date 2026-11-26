@@ -1,4 +1,5 @@
 import type { AgentTask, AgentTaskStatus } from "../../shared/types.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 export const REOPEN_TARGET_STATUS: AgentTaskStatus = "needs_review";
 
@@ -9,7 +10,10 @@ export interface QuickStatusTransition {
   title: string;
 }
 
-export function getQuickStatusTransition(status: AgentTaskStatus): QuickStatusTransition | null {
+export function getQuickStatusTransition(
+  status: AgentTaskStatus,
+  locale: UiLocale = "ja",
+): QuickStatusTransition | null {
   if (status === "running") {
     return null;
   }
@@ -18,14 +22,14 @@ export function getQuickStatusTransition(status: AgentTaskStatus): QuickStatusTr
       action: "reopen",
       label: "Reopen",
       nextStatus: REOPEN_TARGET_STATUS,
-      title: "再オープンする",
+      title: t(locale, "task.reopenTitle"),
     };
   }
   return {
     action: "done",
     label: "Done",
     nextStatus: "done",
-    title: "完了にする",
+    title: t(locale, "task.markDoneTitle"),
   };
 }
 

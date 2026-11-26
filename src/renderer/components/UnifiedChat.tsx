@@ -56,11 +56,12 @@ import {
   type ResolvedMentionChip,
 } from "../../shared/mentions.js";
 import {
-  getMarkTaskDoneBlockedReason,
+  getLocalizedMarkTaskDoneBlockedReason,
   requiresLandBeforeDone,
   validateManualTaskStatusTransition,
 } from "../../shared/task-status.js";
 import { formatTokenCount, formatUsdCost, summarizeUsage } from "../../shared/usage.js";
+import { resolveUiLocale, t, type UiLocale } from "../../shared/i18n.js";
 import { getEffectiveProjectMode } from "../lib/integration-mode.js";
 import { isViewableImageAttachment } from "../lib/image-viewer.js";
 import { resolveTaskForTaskEvent } from "../lib/task-event.js";
@@ -99,6 +100,7 @@ export interface ChatJumpRequest {
 
 interface UnifiedChatProps {
   snapshot: AppSnapshot;
+  locale?: UiLocale;
   composerText: string;
   attachments: ChatAttachment[];
   selectedMentions?: ExplicitMentionTarget[];
@@ -159,6 +161,7 @@ interface UnifiedChatProps {
 
 export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   snapshot,
+  locale,
   composerText,
   attachments,
   selectedMentions = [],
@@ -220,6 +223,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const activeLocale = locale ?? resolveUiLocale(snapshot.preferredLanguage);
 
   const registerMessageEl = useCallback((messageId: string, el: HTMLDivElement | null) => {
     if (el) {
@@ -621,7 +625,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
           <button
             type="button"
             onClick={onToggleSidebar}
-            title="タスク一覧を表示/非表示 (⌘B)"
+            title={t(activeLocale, "chat.toggleSidebarTitle")}
             className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
           >
             <PanelLeft className="w-4 h-4" />
@@ -649,7 +653,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 cursor-pointer"
             >
               <RefreshCw className="w-3 h-3" />
-              再接続
+              {t(activeLocale, "chat.reconnect")}
             </button>
           )}
         </div>
@@ -658,13 +662,17 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
           {snapshot.activeResponderCount > 0 && (
             <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-[11px] font-medium">
               <Loader2 className="w-3 h-3 animate-spin" />
-              <span>{snapshot.activeResponderCount}件 並列応答中</span>
+              <span>
+                {t(activeLocale, "chat.parallelResponding", {
+                  count: snapshot.activeResponderCount,
+                })}
+              </span>
               <button
                 type="button"
                 onClick={onStopAll}
                 className="text-rose-500 hover:underline ml-0.5 cursor-pointer"
               >
-                全停止
+                {t(activeLocale, "chat.stopAll")}
               </button>
             </div>
           )}
@@ -699,7 +707,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                   {/* Front-Desk Chat Provider & Model */}
                   <div className="space-y-1.5">
                     <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
-                      チャット窓口（高速レスポンス）
+                      {t(activeLocale, "chat.frontDeskProvider")}
                     </div>
                     <div className="grid grid-cols-3 gap-1">
                       {allProviders.map((pId) => {
@@ -761,7 +769,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                   {/* Background Worker Provider & Model */}
                   <div className="border-t border-zinc-200 dark:border-zinc-800 pt-2.5 space-y-1.5">
                     <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
-                      プロジェクト実行ワーカー（既定）
+                      {t(activeLocale, "chat.workerProvider")}
                     </div>
                     <div className="grid grid-cols-3 gap-1">
                       {allProviders.map((pId) => {
@@ -831,8 +839,17 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               onClick={onOpenUsage}
               title={
                 allTimeUsage.totalTokens > 0
-                  ? `Usage / API利用料 — 今日: ${formatTokenCount(todayUsage.totalTokens)} tokens (${formatUsdCost(todayUsage.costUsd, { estimated: todayUsage.hasEstimatedCost })}) / 累計: ${formatTokenCount(allTimeUsage.totalTokens)} tokens (${formatUsdCost(allTimeUsage.costUsd, { estimated: allTimeUsage.hasEstimatedCost })})`
-                  : "Usage / API利用料を表示"
+                  ? t(activeLocale, "chat.usagePillTitle", {
+                      todayTokens: formatTokenCount(todayUsage.totalTokens),
+                      todayCost: formatUsdCost(todayUsage.costUsd, {
+                        estimated: todayUsage.hasEstimatedCost,
+                      }),
+                      allTokens: formatTokenCount(allTimeUsage.totalTokens),
+                      allCost: formatUsdCost(allTimeUsage.costUsd, {
+                        estimated: allTimeUsage.hasEstimatedCost,
+                      }),
+                    })
+                  : t(activeLocale, "chat.usagePillEmptyTitle")
               }
               className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100/80 dark:bg-zinc-800/70 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer tabular-nums"
             >
@@ -859,7 +876,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               type="button"
               data-testid="open-settings-btn"
               onClick={onOpenSettings}
-              title="設定 (言語 / Git Worktree / Usage)"
+              title={t(activeLocale, "chat.settingsTitle")}
               className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
             >
               <Settings className="w-4 h-4" />
@@ -871,6 +888,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             activeSessionId={snapshot.activeChatSessionId}
             activeMessageCount={snapshot.messages.length}
             activeResponderCount={snapshot.activeResponderCount}
+            locale={activeLocale}
             newChatConfirmTrigger={newChatConfirmTrigger}
             onSelectSession={onSelectChatSession}
             onNewChat={onNewChat}
@@ -880,7 +898,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
           <button
             type="button"
             onClick={onToggleMarkdownViewer}
-            title="Markdown Viewer を開く/切替 (⌘⇧M)"
+            title={t(activeLocale, "chat.toggleMarkdownTitle")}
             className={`p-1.5 rounded-md transition-colors cursor-pointer ${
               snapshot.showBrowserPane && rightPaneMode === "markdown"
                 ? "text-indigo-500 bg-indigo-500/10"
@@ -893,7 +911,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
           <button
             type="button"
             onClick={onToggleBrowser}
-            title="右ペイン (Browser / Markdown) を表示/非表示 (⌘\)"
+            title={t(activeLocale, "chat.toggleRightPaneTitle")}
             className={`p-1.5 rounded-md transition-colors cursor-pointer ${
               snapshot.showBrowserPane
                 ? "text-indigo-500 bg-indigo-500/10"
@@ -934,6 +952,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             <EmptyWelcome
               projectCount={snapshot.projects.length}
               recentProjectNames={snapshot.projects.slice(0, 4).map((p) => p.name)}
+              locale={activeLocale}
               onAddProject={onAddProject}
               onPickPrompt={(prompt) => {
                 onComposerTextChange(prompt);
@@ -959,6 +978,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                     projects={snapshot.projects}
                     tasks={snapshot.tasks}
                     defaultIntegrationMode={snapshot.defaultIntegrationMode}
+                    locale={activeLocale}
                     onOpenUrl={(url) => onOpenUrl(url, { message: msg })}
                     onOpenMarkdownFile={(target, base) =>
                       onOpenMarkdownFile(target, base, { message: msg })
@@ -992,6 +1012,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               suggestions={mentionSuggestions}
               scopedProject={scopedProject}
               activeIndex={clampedMentionIndex}
+              locale={activeLocale}
               onHoverIndex={setActiveMentionIndex}
               onSelect={handleSelectMention}
             />
@@ -1016,8 +1037,12 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                             draftMentions: selectedMentions,
                           })
                         }
-                        title={`右ペインで画像を表示: ${att.label}`}
-                        aria-label={`画像を右ペインで表示: ${att.label}`}
+                        title={t(activeLocale, "chat.openImageInRightPaneTitle", {
+                          label: att.label,
+                        })}
+                        aria-label={t(activeLocale, "chat.openImageInRightPaneAria", {
+                          label: att.label,
+                        })}
                         className="group inline-flex items-center gap-1.5 min-w-0 rounded hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors cursor-pointer"
                       >
                         {att.imageDataUrl ? (
@@ -1046,7 +1071,9 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                     <button
                       type="button"
                       onClick={() => onRemoveAttachment(att.id)}
-                      aria-label={`${att.label} を削除`}
+                      aria-label={t(activeLocale, "chat.removeAttachmentAria", {
+                        label: att.label,
+                      })}
                       className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100 cursor-pointer"
                     >
                       <X className="w-3 h-3" />
@@ -1059,6 +1086,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
 
           <DraftMentionContextBar
             chips={draftMentionChips}
+            locale={activeLocale}
             onRemoveChip={handleRemoveDraftMention}
             hasAttachmentsAbove={attachments.length > 0}
           />
@@ -1155,7 +1183,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                 }
               }
             }}
-            placeholder="複数プロジェクトへの指示や質問を入力…（@ でプロジェクト/タスクを指定・応答中でも連投OK）"
+            placeholder={t(activeLocale, "chat.composerPlaceholder")}
             rows={1}
             className="w-full resize-none bg-transparent px-3.5 pt-3 pb-1.5 text-[14px] leading-relaxed outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 select-text"
           />
@@ -1166,8 +1194,8 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                 type="button"
                 data-testid="composer-attach-image-btn"
                 onClick={onPickLocalImages}
-                title="画像を添付"
-                aria-label="画像を添付"
+                title={t(activeLocale, "chat.attachImage")}
+                aria-label={t(activeLocale, "chat.attachImage")}
                 className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
               >
                 <Paperclip className="w-4 h-4" />
@@ -1179,18 +1207,18 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                     type="button"
                     data-testid="composer-screenshot-btn"
                     onClick={onCaptureScreenshot}
-                    title="右ブラウザのスクショを添付 (⌘⇧S)"
+                    title={t(activeLocale, "chat.screenshotTitle")}
                     className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                   >
                     <Camera className="w-3.5 h-3.5" />
-                    <span>スクショ</span>
+                    <span>{t(activeLocale, "chat.screenshotBtn")}</span>
                   </button>
 
                   <button
                     type="button"
                     data-testid="composer-element-picker-btn"
                     onClick={onToggleElementPicker}
-                    title="右ブラウザ上の要素を選択してチャットへ送る (⌘⇧P)"
+                    title={t(activeLocale, "chat.elementPickerTitle")}
                     className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] transition-colors cursor-pointer ${
                       snapshot.isPickingElement
                         ? "bg-indigo-500 text-white"
@@ -1198,14 +1226,14 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                     }`}
                   >
                     <Crosshair className="w-3.5 h-3.5" />
-                    <span>要素選択</span>
+                    <span>{t(activeLocale, "chat.elementPickerBtn")}</span>
                   </button>
 
                   <button
                     type="button"
                     data-testid="composer-attach-url-btn"
                     onClick={onAttachCurrentUrl}
-                    title="現在のブラウザURLを添付"
+                    title={t(activeLocale, "chat.attachUrlTitle")}
                     className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                   >
                     <Link2 className="w-3.5 h-3.5" />
@@ -1217,11 +1245,11 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                       type="button"
                       data-testid="composer-attach-errors-btn"
                       onClick={onAttachConsoleErrors}
-                      title="右ブラウザのコンソール/通信エラーをチャットへ添付"
+                      title={t(activeLocale, "chat.attachErrorsTitle")}
                       className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] font-medium bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 transition-colors cursor-pointer"
                     >
                       <AlertTriangle className="w-3.5 h-3.5" />
-                      <span>エラー ({browserErrorCount})</span>
+                      <span>{t(activeLocale, "chat.errorsCountBtn", { count: browserErrorCount })}</span>
                     </button>
                   )}
                 </>
@@ -1232,7 +1260,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               type="button"
               onClick={handleTriggerSend}
               disabled={!canSend}
-              title="送信 (Enter) — 連投OK"
+              title={t(activeLocale, "chat.sendTitle")}
               className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${
                 canSend
                   ? "bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer shadow-sm"
@@ -1251,26 +1279,27 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
 const EmptyWelcome: React.FC<{
   projectCount: number;
   recentProjectNames: string[];
+  locale: UiLocale;
   onAddProject: () => void;
   onPickPrompt: (prompt: string) => void;
-}> = ({ projectCount, recentProjectNames, onAddProject, onPickPrompt }) => {
-  const sampleName = recentProjectNames[0] ?? "プロジェクト";
+}> = ({ projectCount, recentProjectNames, locale, onAddProject, onPickPrompt }) => {
+  const sampleName = recentProjectNames[0] ?? t(locale, "chat.welcomeSampleFallback");
   const prompts = [
     {
-      title: "最近のプロジェクト状況を整理",
-      prompt: "最近触っているプロジェクトのブランチと未コミット変更をまとめて教えて。",
+      title: t(locale, "chat.welcomePrompt1Title"),
+      prompt: t(locale, "chat.welcomePrompt1Body"),
     },
     {
-      title: `${sampleName} の調査を依頼`,
-      prompt: `${sampleName} の現状を調査してタスクにまとめて。`,
+      title: t(locale, "chat.welcomePrompt2Title", { name: sampleName }),
+      prompt: t(locale, "chat.welcomePrompt2Body", { name: sampleName }),
     },
     {
-      title: "右ブラウザを自動操作して検証",
-      prompt: "右のIn-App Browserで開いているページをスナップショット確認して、コンソールエラーがないか調べて。",
+      title: t(locale, "chat.welcomePrompt3Title"),
+      prompt: t(locale, "chat.welcomePrompt3Body"),
     },
     {
-      title: "開発サーバー起動＋ブラウザ表示",
-      prompt: `${sampleName} の開発サーバーを起動して、右のIn-App Browserで開いて確認できるようにして。`,
+      title: t(locale, "chat.welcomePrompt4Title"),
+      prompt: t(locale, "chat.welcomePrompt4Body", { name: sampleName }),
     },
   ];
 
@@ -1281,10 +1310,10 @@ const EmptyWelcome: React.FC<{
       </div>
       <div className="space-y-1.5">
         <h1 className="text-[21px] font-semibold tracking-tight">
-          1つのチャットで、すべてのプロジェクトを動かす
+          {t(locale, "chat.welcomeHeading")}
         </h1>
         <p className="text-[13px] text-zinc-500 dark:text-zinc-400 max-w-md">
-          連投OKの並列高速チャット。左のタスクはエージェントが自動管理し、右の Chromium ブラウザを直接操作・検証できます。
+          {t(locale, "chat.welcomeSubtitle")}
         </p>
       </div>
 
@@ -1292,15 +1321,15 @@ const EmptyWelcome: React.FC<{
         <span className="w-2 h-2 rounded-full bg-emerald-500" />
         <span>
           {projectCount > 0
-            ? `${projectCount}個のプロジェクトを自動認識済み（そのまま名前で指示できます）`
-            : "プロジェクトを自動検出中..."}
+            ? t(locale, "chat.welcomeProjectsDetected", { count: projectCount })
+            : t(locale, "chat.welcomeProjectsScanning")}
         </span>
         <button
           type="button"
           onClick={onAddProject}
           className="text-indigo-500 hover:underline font-medium cursor-pointer ml-1"
         >
-          + フォルダ追加
+          {t(locale, "chat.welcomeAddFolder")}
         </button>
       </div>
 
@@ -1328,6 +1357,7 @@ export interface TaskEventCardProps {
   tasks: AgentTask[];
   projects?: Project[];
   defaultIntegrationMode?: IntegrationMode;
+  locale?: UiLocale;
   onOpenUrl: (url: string) => void;
   onOpenMarkdownFile: (target: string, baseFilePath?: string) => void;
   onOpenTask: (taskId: string) => void;
@@ -1340,6 +1370,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
   tasks,
   projects = [],
   defaultIntegrationMode = "feature-branch",
+  locale = "ja",
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenTask,
@@ -1348,13 +1379,13 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
 }) => {
   const resolvedTask = resolveTaskForTaskEvent(message, tasks);
   const targetTaskId = resolvedTask?.id ?? message.relatedTaskId;
-  const quickTransition = resolvedTask ? getQuickStatusTransition(resolvedTask.status) : null;
+  const quickTransition = resolvedTask ? getQuickStatusTransition(resolvedTask.status, locale) : null;
   const isDone = resolvedTask?.status === "done";
   const isRunning = resolvedTask?.status === "running";
   const needsLand = resolvedTask ? requiresLandBeforeDone(resolvedTask) : false;
   const doneBlockedReason =
     resolvedTask && quickTransition?.action === "done"
-      ? getMarkTaskDoneBlockedReason(resolvedTask)
+      ? getLocalizedMarkTaskDoneBlockedReason(resolvedTask, locale)
       : null;
   const isQuickDoneBlocked = Boolean(doneBlockedReason);
   const hasActiveWorktree = Boolean(resolvedTask?.worktreePath && resolvedTask?.worktreeBranch);
@@ -1412,7 +1443,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                   className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 shrink-0"
                 >
                   <CheckCircle2 className="w-3 h-3" />
-                  <span>Done</span>
+                  <span>{t(locale, "task.doneBadge")}</span>
                 </span>
               )}
               {isRunning && (
@@ -1421,7 +1452,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                   className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 shrink-0"
                 >
                   <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                  <span>Running</span>
+                  <span>{t(locale, "task.runningBadge")}</span>
                 </span>
               )}
               {needsLand && !isRunning && (
@@ -1430,7 +1461,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                   title={doneBlockedReason ?? undefined}
                   className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 shrink-0"
                 >
-                  未Land
+                  {t(locale, "task.unlandedBadge")}
                 </span>
               )}
             </div>
@@ -1447,8 +1478,10 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                   }}
                   title={
                     isPrMode
-                      ? `ブランチ ${resolvedTask.worktreeBranch} を Push / PR 作成`
-                      : `変更を Land (${effectiveMode})`
+                      ? t(locale, "sidebar.pushPrTitle", {
+                          branch: resolvedTask.worktreeBranch ?? "",
+                        })
+                      : t(locale, "sidebar.landChangesTitle", { mode: effectiveMode })
                   }
                   aria-label={`${resolvedTask.title}: ${isPrMode ? "Push / PR" : "Land"}`}
                   className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border transition-colors shrink-0 ${
@@ -1510,6 +1543,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
 
           <MarkdownView
             content={message.text}
+            locale={locale}
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
           />
@@ -1523,7 +1557,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
             <span className="font-mono text-[10.5px] font-semibold text-indigo-600 dark:text-indigo-300">
               {formatTaskCode(resolvedTask.taskNumber)}
             </span>
-            <span>タスク詳細を開く</span>
+            <span>{t(locale, "chat.openTaskDetail")}</span>
           </button>
         </div>
       ) : (
@@ -1532,6 +1566,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
           <div className="flex-1 min-w-0 space-y-2">
             <MarkdownView
               content={message.text}
+              locale={locale}
               onOpenUrl={onOpenUrl}
               onOpenMarkdownFile={onOpenMarkdownFile}
             />
@@ -1542,7 +1577,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                 onClick={() => onOpenTask(targetTaskId)}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/50 transition-colors cursor-pointer"
               >
-                <span>タスク詳細を開く</span>
+                <span>{t(locale, "chat.openTaskDetail")}</span>
               </button>
             )}
           </div>
@@ -1557,6 +1592,7 @@ const MessageRow: React.FC<{
   projects: Project[];
   tasks: AgentTask[];
   defaultIntegrationMode?: IntegrationMode;
+  locale: UiLocale;
   onOpenUrl: (url: string) => void;
   onOpenMarkdownFile: (target: string, baseFilePath?: string) => void;
   onOpenImageAttachment?: (attachment: ChatAttachment) => void;
@@ -1569,6 +1605,7 @@ const MessageRow: React.FC<{
   projects,
   tasks,
   defaultIntegrationMode,
+  locale,
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImageAttachment,
@@ -1605,7 +1642,11 @@ const MessageRow: React.FC<{
             data-testid="user-message-meta-chips"
             className="flex flex-wrap justify-end gap-1.5 max-w-[82%]"
           >
-            <UserMessageMentionBadges badges={mentionBadges} onOpenTask={onOpenTask} />
+            <UserMessageMentionBadges
+              badges={mentionBadges}
+              locale={locale}
+              onOpenTask={onOpenTask}
+            />
             {message.attachments.map((att) => {
               const viewableImage =
                 isViewableImageAttachment(att) && Boolean(onOpenImageAttachment);
@@ -1615,8 +1656,8 @@ const MessageRow: React.FC<{
                     key={att.id}
                     type="button"
                     onClick={() => onOpenImageAttachment?.(att)}
-                    title={`右ペインで画像を表示: ${att.label}`}
-                    aria-label={`画像を右ペインで表示: ${att.label}`}
+                    title={t(locale, "chat.openImageInRightPaneTitle", { label: att.label })}
+                    aria-label={t(locale, "chat.openImageInRightPaneAria", { label: att.label })}
                     className="group inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 border border-transparent hover:border-indigo-500/40 text-[11px] text-zinc-600 dark:text-zinc-300 hover:text-indigo-600 dark:hover:text-indigo-300 transition-all cursor-pointer"
                   >
                     {att.imageDataUrl ? (
@@ -1657,6 +1698,7 @@ const MessageRow: React.FC<{
           <MarkdownView
             content={message.text}
             variant="user"
+            locale={locale}
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
             mentionContext={userMentionContext}
@@ -1673,6 +1715,7 @@ const MessageRow: React.FC<{
         tasks={tasks}
         projects={projects}
         defaultIntegrationMode={defaultIntegrationMode}
+        locale={locale}
         onOpenUrl={onOpenUrl}
         onOpenMarkdownFile={onOpenMarkdownFile}
         onOpenTask={onOpenTask}
@@ -1711,7 +1754,7 @@ const MessageRow: React.FC<{
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] text-rose-500 hover:bg-rose-500/10 cursor-pointer"
             >
               <Square className="w-2.5 h-2.5 fill-current" />
-              停止
+              {t(locale, "common.stop")}
             </button>
           </>
         )}
@@ -1725,7 +1768,7 @@ const MessageRow: React.FC<{
             className="inline-flex items-center gap-1 text-[11.5px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer"
           >
             {showReasoning ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-            思考プロセス
+            {t(locale, "chat.reasoningProcess")}
           </button>
           {showReasoning && (
             <div className="mt-1 p-2.5 rounded-lg bg-zinc-100/70 dark:bg-zinc-900/70 text-[12px] text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap select-text">
@@ -1759,11 +1802,12 @@ const MessageRow: React.FC<{
         {message.text ? (
           <MarkdownView
             content={message.text}
+            locale={locale}
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
           />
         ) : message.isStreaming ? (
-          <span className="text-[13px] text-zinc-400">応答を準備中...</span>
+          <span className="text-[13px] text-zinc-400">{t(locale, "chat.preparingReply")}</span>
         ) : null}
       </div>
     </div>

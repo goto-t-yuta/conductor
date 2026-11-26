@@ -1,4 +1,5 @@
 import type { AgentProvider, ChatMessage, ToolActivityChip } from "../../shared/types.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 export type QuestionStatus = "streaming" | "completed" | "error" | "pending";
 
@@ -162,20 +163,24 @@ function withEllipsis(label: string): string {
   return `${trimmed}…`;
 }
 
-function buildQuestionSnippet(userMsg: ChatMessage | null, replyMsg: ChatMessage | null): string {
+function buildQuestionSnippet(
+  userMsg: ChatMessage | null,
+  replyMsg: ChatMessage | null,
+  locale: UiLocale = "ja",
+): string {
   if (userMsg) {
     const textSnippet = truncateSnippet(userMsg.text, 140);
     if (textSnippet) return textSnippet;
     if (userMsg.attachments.length > 0) {
       const labels = userMsg.attachments.map((a) => a.label).join(", ");
-      return truncateSnippet(`添付: ${labels}`, 140);
+      return truncateSnippet(t(locale, "questions.attachmentPrefix", { labels }), 140);
     }
   }
   if (replyMsg?.replyToSnippet) {
     const snippet = truncateSnippet(replyMsg.replyToSnippet, 140);
     if (snippet) return snippet;
   }
-  return "(質問)";
+  return t(locale, "questions.fallbackSnippet");
 }
 
 function buildDetailLine(params: {
@@ -184,8 +189,9 @@ function buildDetailLine(params: {
   replyPreview: string | null;
   hasReasoning: boolean;
   timeLabel: string;
+  locale: UiLocale;
 }): string {
-  const { status, latestTool, replyPreview, hasReasoning, timeLabel } = params;
+  const { status, latestTool, replyPreview, hasReasoning, timeLabel, locale } = params;
 
   if (status === "streaming") {
     if (latestTool?.isRunning) {
@@ -198,13 +204,13 @@ function buildDetailLine(params: {
       return latestTool.label;
     }
     if (hasReasoning) {
-      return "思考中…";
+      return t(locale, "questions.thinking");
     }
-    return "応答を準備中…";
+    return t(locale, "questions.preparing");
   }
 
   if (status === "pending") {
-    return "応答待機中…";
+    return t(locale, "questions.waiting");
   }
 
   if (replyPreview) {
@@ -216,10 +222,10 @@ function buildDetailLine(params: {
   }
 
   if (status === "error") {
-    return "エラーで終了しました";
+    return t(locale, "questions.endedWithError");
   }
 
-  return timeLabel || "回答完了";
+  return timeLabel || t(locale, "questions.answered");
 }
 
 function sortTier(item: QuestionItem): number {
@@ -236,6 +242,7 @@ function parseTimestampMs(iso: string): number {
 export function deriveQuestionItems(
   messages: readonly ChatMessage[],
   unreadReplyIds?: ReadonlySet<string>,
+  locale: UiLocale = "ja",
 ): QuestionItem[] {
   const assistantByReplyTo = new Map<string, ChatMessage>();
   for (const msg of messages) {
@@ -280,7 +287,7 @@ export function deriveQuestionItems(
       userMessageId: userMsg?.id ?? replyMsg?.replyToMessageId ?? null,
       replyMessageId: replyMsg?.id ?? null,
       targetMessageId: replyMsg?.id ?? userMsg!.id,
-      questionSnippet: buildQuestionSnippet(userMsg, replyMsg),
+      questionSnippet: buildQuestionSnippet(userMsg, replyMsg, locale),
       status,
       isUnread,
       provider: replyMsg?.provider,
@@ -293,6 +300,7 @@ export function deriveQuestionItems(
         replyPreview,
         hasReasoning: Boolean(replyMsg?.reasoningSummary?.trim()),
         timeLabel,
+        locale,
       }),
       createdAt,
       updatedAt,

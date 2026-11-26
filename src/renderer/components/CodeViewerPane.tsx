@@ -13,11 +13,13 @@ import {
 } from "lucide-react";
 import { formatByteSize } from "../lib/markdown-utils.js";
 import type { CodeViewerTab } from "../lib/right-pane-tabs.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 export type { CodeViewerTab };
 
 export interface CodeViewerPaneProps {
   activeTab: CodeViewerTab | null;
+  locale?: UiLocale;
   onRefreshActive: () => void;
   onRevealInFinder: (filePath: string) => void;
   onAttachFileToChat?: (filePath: string, fileName: string) => void;
@@ -25,6 +27,7 @@ export interface CodeViewerPaneProps {
 
 export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
   activeTab,
+  locale = "ja",
   onRefreshActive,
   onRevealInFinder,
   onAttachFileToChat,
@@ -73,8 +76,8 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
                 setCopiedPath(true);
                 setTimeout(() => setCopiedPath(false), 1500);
               }}
-              title={`パスをコピー: ${activeTab.filePath}`}
-              aria-label="パスをコピー"
+              title={t(locale, "common.copyPathWith", { path: activeTab.filePath })}
+              aria-label={t(locale, "common.copyPath")}
               className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded hover:bg-zinc-200/80 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
             >
               {copiedPath ? (
@@ -86,17 +89,18 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
             <button
               type="button"
               onClick={() => onRevealInFinder(activeTab.filePath)}
-              title="Finder で表示"
+              title={t(locale, "common.revealInFinder")}
               className="text-[10.5px] hover:text-indigo-500 hover:underline cursor-pointer shrink-0"
             >
-              Finder
+              {t(locale, "common.finder")}
             </button>
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
             {activeTab.document && (
               <span className="hidden sm:inline font-mono text-[10.5px] text-zinc-400">
-                {lines.length}行 · {formatByteSize(activeTab.document.sizeBytes)}
+                {t(locale, "markdown.linesCount", { count: lines.length })} ·{" "}
+                {formatByteSize(activeTab.document.sizeBytes)}
               </span>
             )}
             {formattedUpdatedTime && (
@@ -113,8 +117,8 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
                   setCopiedContent(true);
                   setTimeout(() => setCopiedContent(false), 1500);
                 }}
-                title="内容をコピー"
-                aria-label="内容をコピー"
+                title={t(locale, "code.copyContent")}
+                aria-label={t(locale, "code.copyContent")}
                 className="p-1 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
               >
                 {copiedContent ? (
@@ -127,8 +131,8 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
             <button
               type="button"
               onClick={() => setWrapLines((v) => !v)}
-              title={wrapLines ? "行の折り返し: ON" : "行の折り返し: OFF"}
-              aria-label="行の折り返しを切替"
+              title={wrapLines ? t(locale, "code.wrapOn") : t(locale, "code.wrapOff")}
+              aria-label={t(locale, "code.wrapAria")}
               aria-pressed={wrapLines}
               className={`p-1 rounded-md transition-colors cursor-pointer ${
                 wrapLines
@@ -141,8 +145,8 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
             <button
               type="button"
               onClick={onRefreshActive}
-              title="再読み込み"
-              aria-label="再読み込み"
+              title={t(locale, "common.reload")}
+              aria-label={t(locale, "common.reload")}
               className="p-1 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
             >
               <RotateCw className={`w-3.5 h-3.5 ${activeTab.isLoading ? "animate-spin" : ""}`} />
@@ -151,8 +155,8 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
               <button
                 type="button"
                 onClick={() => onAttachFileToChat(activeTab.filePath, activeTab.fileName)}
-                title="このファイルをチャットに添付"
-                aria-label="このファイルをチャットに添付"
+                title={t(locale, "markdown.attachFileTitle")}
+                aria-label={t(locale, "markdown.attachFileTitle")}
                 className="p-1 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
               >
                 <MessageSquarePlus className="w-3.5 h-3.5" />
@@ -176,12 +180,12 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
       <div className="flex-1 min-h-0 overflow-auto bg-white dark:bg-[#0f1115]">
         {!activeTab ? (
           <div className="h-full flex items-center justify-center p-6 text-[12px] text-zinc-400">
-            ファイルツリーからファイルを選択すると、ここに内容が表示されます。
+            {t(locale, "code.empty")}
           </div>
         ) : activeTab.isLoading && !activeTab.document ? (
           <div className="h-full flex items-center justify-center gap-2 text-[12.5px] text-zinc-400">
             <Loader2 className="w-4 h-4 text-sky-500 animate-spin" />
-            <span>ファイルを読み込み中...</span>
+            <span>{t(locale, "code.loading")}</span>
           </div>
         ) : activeTab.error && !activeTab.document ? (
           <div className="h-full flex flex-col items-center justify-center p-6 text-center space-y-3">
@@ -191,10 +195,10 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
             <div className="space-y-1 max-w-sm">
               <div className="text-[13.5px] font-semibold text-zinc-900 dark:text-zinc-100">
                 {activeTab.isBinary
-                  ? "バイナリファイルはプレビューできません"
+                  ? t(locale, "code.binaryTitle")
                   : activeTab.isTooLarge
-                    ? "ファイルサイズが上限を超えています"
-                    : "ファイルを読み込めませんでした"}
+                    ? t(locale, "code.tooLargeTitle")
+                    : t(locale, "code.readErrorTitle")}
               </div>
               <div className="text-[12px] text-zinc-500 dark:text-zinc-400">
                 {activeTab.error}
@@ -210,7 +214,7 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 transition-colors cursor-pointer"
               >
                 <FolderOpen className="w-3.5 h-3.5" />
-                <span>Finder で表示</span>
+                <span>{t(locale, "common.revealInFinder")}</span>
               </button>
               <button
                 type="button"
@@ -218,7 +222,7 @@ export const CodeViewerPane: React.FC<CodeViewerPaneProps> = ({
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
               >
                 <RotateCw className="w-3.5 h-3.5" />
-                <span>再読み込み</span>
+                <span>{t(locale, "common.reload")}</span>
               </button>
             </div>
           </div>

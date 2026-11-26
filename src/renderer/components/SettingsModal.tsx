@@ -13,6 +13,12 @@ import {
   Smartphone,
   X,
 } from "lucide-react";
+import {
+  getLocalizedLanguageOptionMeta,
+  resolveUiLocale,
+  t,
+  type UiLocale,
+} from "../../shared/i18n.js";
 import { DEFAULT_PREFERRED_LANGUAGE, LANGUAGE_OPTIONS } from "../../shared/language.js";
 import type {
   IntegrationMode,
@@ -23,7 +29,7 @@ import type {
 } from "../../shared/types.js";
 import {
   getIntegrationModeOption,
-  INTEGRATION_MODE_OPTIONS,
+  getIntegrationModeOptions,
 } from "../lib/integration-mode.js";
 import { UsagePanel } from "./UsagePanel.js";
 
@@ -34,6 +40,7 @@ export interface SettingsModalProps {
   autoLandOnComplete?: boolean;
   preferredLanguage?: PreferredLanguage;
   remoteAccess?: RemoteAccessStatus;
+  locale?: UiLocale;
   projects: Project[];
   initialTab?: SettingsModalTab;
   usageRecords?: UsageRecord[];
@@ -51,68 +58,74 @@ export interface SettingsModalProps {
 
 export interface LanguageSettingsSectionProps {
   preferredLanguage: PreferredLanguage;
+  locale?: UiLocale;
   onChangePreferredLanguage?: (language: PreferredLanguage) => void;
 }
 
 export const LanguageSettingsSection: React.FC<LanguageSettingsSectionProps> = ({
   preferredLanguage,
+  locale,
   onChangePreferredLanguage,
-}) => (
-  <section className="space-y-2.5">
-    <div>
-      <h3 className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
-        <Globe className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-        <span>言語設定 / Output Language</span>
-      </h3>
-      <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-        チャット返信、タスクのタイトル・要約、ワーカーの完了レポートの出力言語を指定します。
-      </p>
-    </div>
+}) => {
+  const activeLocale = locale ?? resolveUiLocale(preferredLanguage);
+  return (
+    <section className="space-y-2.5">
+      <div>
+        <h3 className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+          <Globe className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+          <span>{t(activeLocale, "settings.languageTitle")}</span>
+        </h3>
+        <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+          {t(activeLocale, "settings.languageDesc")}
+        </p>
+      </div>
 
-    <div className="space-y-2">
-      {LANGUAGE_OPTIONS.map((opt) => {
-        const active = preferredLanguage === opt.id;
-        return (
-          <button
-            key={opt.id}
-            type="button"
-            data-testid={`preferred-language-${opt.id}`}
-            aria-pressed={active}
-            onClick={() => onChangePreferredLanguage?.(opt.id)}
-            className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer ${
-              active
-                ? "bg-indigo-500/10 border-indigo-500/60 ring-1 ring-indigo-500/30"
-                : "bg-zinc-50/70 dark:bg-zinc-900/50 border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700"
-            }`}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <span
-                  className={`w-4 h-4 rounded-full flex items-center justify-center border ${
-                    active
-                      ? "bg-indigo-500 border-indigo-500 text-white"
-                      : "border-zinc-300 dark:border-zinc-600"
-                  }`}
-                >
-                  {active && <Check className="w-2.5 h-2.5" />}
-                </span>
-                <span className="text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
-                  {opt.label}
-                </span>
-                <code className="text-[10.5px] px-1.5 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
-                  {opt.id}
-                </code>
+      <div className="space-y-2">
+        {LANGUAGE_OPTIONS.map((opt) => {
+          const active = preferredLanguage === opt.id;
+          const meta = getLocalizedLanguageOptionMeta(opt.id, activeLocale);
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              data-testid={`preferred-language-${opt.id}`}
+              aria-pressed={active}
+              onClick={() => onChangePreferredLanguage?.(opt.id)}
+              className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer ${
+                active
+                  ? "bg-indigo-500/10 border-indigo-500/60 ring-1 ring-indigo-500/30"
+                  : "bg-zinc-50/70 dark:bg-zinc-900/50 border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`w-4 h-4 rounded-full flex items-center justify-center border ${
+                      active
+                        ? "bg-indigo-500 border-indigo-500 text-white"
+                        : "border-zinc-300 dark:border-zinc-600"
+                    }`}
+                  >
+                    {active && <Check className="w-2.5 h-2.5" />}
+                  </span>
+                  <span className="text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
+                    {meta.label}
+                  </span>
+                  <code className="text-[10.5px] px-1.5 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
+                    {opt.id}
+                  </code>
+                </div>
               </div>
-            </div>
-            <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-1.5 pl-6 leading-relaxed">
-              {opt.description}
-            </p>
-          </button>
-        );
-      })}
-    </div>
-  </section>
-);
+              <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-1.5 pl-6 leading-relaxed">
+                {meta.description}
+              </p>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+};
 
 export interface RemoteAccessSettingsSectionProps {
   remoteAccess: RemoteAccessStatus;
@@ -425,6 +438,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   autoLandOnComplete = true,
   preferredLanguage = DEFAULT_PREFERRED_LANGUAGE,
   remoteAccess,
+  locale,
   projects,
   initialTab = "general",
   usageRecords = [],
@@ -441,6 +455,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsModalTab>(initialTab);
   const [projectSearch, setProjectSearch] = useState("");
+  const activeLocale = locale ?? resolveUiLocale(preferredLanguage);
 
   useEffect(() => {
     setActiveTab(initialTab);
@@ -458,7 +473,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     );
   }, [projects, projectSearch]);
 
-  const globalOption = getIntegrationModeOption(defaultIntegrationMode);
+  const integrationOptions = useMemo(
+    () => getIntegrationModeOptions(activeLocale),
+    [activeLocale],
+  );
+  const globalOption = getIntegrationModeOption(defaultIntegrationMode, activeLocale);
 
   return (
     <div
@@ -477,13 +496,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <Settings className="w-4 h-4 text-indigo-500 shrink-0" />
           )}
           <h2 className="text-[15px] font-semibold">
-            {activeTab === "usage" ? "Usage / API利用料" : "Conductor 設定"}
+            {activeTab === "usage"
+              ? t(activeLocale, "settings.usageTabTitle")
+              : t(activeLocale, "settings.title")}
           </h2>
 
           <div className="flex-1 flex items-center justify-end gap-2">
             <div
               role="tablist"
-              aria-label="設定タブ"
+              aria-label={t(activeLocale, "settings.tabsAria")}
               className="inline-flex items-center p-0.5 rounded-lg bg-zinc-100 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800"
             >
               <button
@@ -499,7 +520,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 }`}
               >
                 <Settings className="w-3 h-3" />
-                <span>一般設定</span>
+                <span>{t(activeLocale, "settings.generalTab")}</span>
               </button>
               <button
                 type="button"
@@ -514,14 +535,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 }`}
               >
                 <BarChart3 className="w-3 h-3" />
-                <span>Usage / API利用料</span>
+                <span>{t(activeLocale, "settings.usageTabTitle")}</span>
               </button>
             </div>
 
             <button
               type="button"
               onClick={onClose}
-              aria-label="設定を閉じる"
+              aria-label={t(activeLocale, "settings.closeAria")}
               className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 cursor-pointer"
             >
               <X className="w-4 h-4" />
@@ -538,6 +559,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {/* Output Language Preference */}
               <LanguageSettingsSection
                 preferredLanguage={preferredLanguage}
+                locale={activeLocale}
                 onChangePreferredLanguage={onChangePreferredLanguage}
               />
 
@@ -556,15 +578,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <section className="space-y-2.5 border-t border-zinc-200 dark:border-zinc-800 pt-5">
             <div>
               <h3 className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100">
-                Git Worktree 統合モード（グローバル既定）
+                {t(activeLocale, "settings.integrationTitle")}
               </h3>
               <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-                ワーカーは各タスク専用の Git Worktree で並列実行されます。完了後の取り込み方式を選択してください。
+                {t(activeLocale, "settings.integrationDesc")}
               </p>
             </div>
 
             <div className="space-y-2">
-              {INTEGRATION_MODE_OPTIONS.map((opt) => {
+              {integrationOptions.map((opt) => {
                 const active = defaultIntegrationMode === opt.id;
                 return (
                   <button
@@ -621,7 +643,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="space-y-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100">
-                      ワーカー完了時に自動 Land（コンフリクト時は AI が自力解消）
+                      {t(activeLocale, "settings.autoLandTitle")}
                     </span>
                     <span
                       className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
@@ -634,7 +656,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </span>
                   </div>
                   <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                    feature-branch / direct モード時、タスク完了後に自動で取り込みを実行します。コンフリクトが発生した場合は最大2回までワーカーが自動で解消を試みます（per-task-pr モードは手動 Push/PR のまま維持）。
+                    {t(activeLocale, "settings.autoLandDesc")}
                   </p>
                 </div>
                 <span
@@ -658,12 +680,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h3 className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100">
-                  プロジェクトごとの個別設定
+                  {t(activeLocale, "settings.perProjectTitle")}
                 </h3>
                 <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-                  特定のプロジェクトだけ統合モードを上書きできます（未設定時はプロジェクト直下の{" "}
-                  <code className="font-mono text-[10.5px]">.conductor.json</code>{" "}
-                  またはグローバル既定を使用）。
+                  {t(activeLocale, "settings.perProjectDescBefore")}
+                  <code className="font-mono text-[10.5px]">.conductor.json</code>
+                  {t(activeLocale, "settings.perProjectDescAfter")}
                 </p>
               </div>
             </div>
@@ -675,7 +697,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   type="text"
                   value={projectSearch}
                   onChange={(e) => setProjectSearch(e.target.value)}
-                  placeholder="プロジェクトを絞り込む..."
+                  placeholder={t(activeLocale, "settings.filterProjectsPlaceholder")}
                   className="w-full pl-8 pr-3 py-1.5 rounded-lg text-[12px] bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 outline-none focus:border-indigo-500/60"
                 />
               </div>
@@ -683,7 +705,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {filteredProjects.length === 0 ? (
               <div className="rounded-xl border border-dashed border-zinc-200 dark:border-zinc-800 p-4 text-center text-[12px] text-zinc-400">
-                対象のプロジェクトがありません
+                {t(activeLocale, "settings.noProjects")}
               </div>
             ) : (
               <div className="space-y-1.5 max-h-64 overflow-y-auto pr-0.5">
@@ -714,7 +736,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                     <select
                       data-testid={`project-mode-${proj.id}`}
-                      aria-label={`${proj.name} の統合モード`}
+                      aria-label={t(activeLocale, "settings.projectModeAria", { name: proj.name })}
                       value={proj.integrationMode ?? ""}
                       onChange={(e) => {
                         const val = e.target.value;
@@ -725,8 +747,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       }}
                       className="text-[11.5px] rounded-lg px-2 py-1 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-800 dark:text-zinc-200 outline-none focus:border-indigo-500/60 shrink-0 cursor-pointer"
                     >
-                      <option value="">既定 ({globalOption.shortLabel})</option>
-                      {INTEGRATION_MODE_OPTIONS.map((opt) => (
+                      <option value="">
+                        {t(activeLocale, "settings.defaultModeOption", {
+                          mode: globalOption.shortLabel,
+                        })}
+                      </option>
+                      {integrationOptions.map((opt) => (
                         <option key={opt.id} value={opt.id}>
                           {opt.shortLabel}
                         </option>
@@ -748,7 +774,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             onClick={onClose}
             className="px-4 py-1.5 rounded-lg text-[12px] font-medium bg-indigo-500 text-white hover:bg-indigo-600 transition-colors cursor-pointer"
           >
-            閉じる
+            {t(activeLocale, "common.close")}
           </button>
         </div>
       </div>

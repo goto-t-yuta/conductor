@@ -1,6 +1,7 @@
 import React from "react";
 import { X } from "lucide-react";
 import type { ResolvedMentionChip } from "../../shared/mentions.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 export interface TaskCodePillProps {
   code: string;
@@ -36,12 +37,14 @@ export const ProjectNamePill: React.FC<ProjectNamePillProps> = ({
 
 export interface DraftMentionContextBarProps {
   chips: ResolvedMentionChip[];
+  locale?: UiLocale;
   onRemoveChip: (chip: ResolvedMentionChip) => void;
   hasAttachmentsAbove?: boolean;
 }
 
 export const DraftMentionContextBar: React.FC<DraftMentionContextBarProps> = ({
   chips,
+  locale = "ja",
   onRemoveChip,
   hasAttachmentsAbove = false,
 }) => {
@@ -50,7 +53,7 @@ export const DraftMentionContextBar: React.FC<DraftMentionContextBarProps> = ({
   return (
     <div
       role="list"
-      aria-label="選択中のメンション"
+      aria-label={t(locale, "mention.selectedAria")}
       data-testid="draft-mention-context-bar"
       className={`flex flex-wrap items-center gap-1.5 px-3 ${
         hasAttachmentsAbove ? "pt-1.5" : "pt-2.5"
@@ -83,8 +86,11 @@ export const DraftMentionContextBar: React.FC<DraftMentionContextBarProps> = ({
                 type="button"
                 data-testid={`draft-mention-remove-task-${chip.task.taskNumber}`}
                 onClick={() => onRemoveChip(chip)}
-                title={`${chip.taskCode} のメンションを削除`}
-                aria-label={`${chip.taskCode} ${chip.task.title} のメンションを削除`}
+                title={t(locale, "mention.removeTaskTitle", { code: chip.taskCode })}
+                aria-label={t(locale, "mention.removeTaskAria", {
+                  code: chip.taskCode,
+                  title: chip.task.title,
+                })}
                 className="p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-700/70 transition-colors cursor-pointer shrink-0"
               >
                 <X className="w-3 h-3" />
@@ -112,8 +118,8 @@ export const DraftMentionContextBar: React.FC<DraftMentionContextBarProps> = ({
               type="button"
               data-testid={`draft-mention-remove-project-${chip.project.id}`}
               onClick={() => onRemoveChip(chip)}
-              title={`@${chip.projectName} のメンションを削除`}
-              aria-label={`@${chip.projectName} のメンションを削除`}
+              title={t(locale, "mention.removeProjectTitle", { name: chip.projectName })}
+              aria-label={t(locale, "mention.removeProjectTitle", { name: chip.projectName })}
               className="p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-700/70 transition-colors cursor-pointer shrink-0"
             >
               <X className="w-3 h-3" />

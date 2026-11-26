@@ -1,10 +1,24 @@
 import type { AgentTask, AgentTaskStatus, TaskLandStatus } from "./types.js";
+import { t, type UiLocale } from "./i18n.js";
 
 export const RUNNING_TASK_DONE_BLOCKED_REASON =
   "実行中のタスクは直接完了にできません。先にワーカーを停止してください。";
 
 export const UNLANDED_TASK_DONE_BLOCKED_REASON =
   "未Landの変更が残っているため完了にできません。先に Land を実行（または Worktree を破棄）してください。";
+
+export function getLocalizedMarkTaskDoneBlockedReason(
+  task: MarkTaskDoneGuardInput,
+  locale: UiLocale = "ja",
+): string | null {
+  if (task.status === "running" || task.hasActiveWorker) {
+    return t(locale, "task.blockedRunning");
+  }
+  if (requiresLandBeforeDone(task)) {
+    return t(locale, "task.blockedUnlanded");
+  }
+  return null;
+}
 
 export type TaskLandGuardFields = Pick<
   AgentTask,

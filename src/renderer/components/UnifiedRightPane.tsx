@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import type { ProjectFileEntry } from "../../shared/types.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 import { isMarkdownPathOrUrl } from "../lib/markdown-utils.js";
 import type {
   ProjectScopeKey,
@@ -34,6 +35,7 @@ export interface UnifiedRightPaneProps {
   tabs: UnifiedRightPaneTab[];
   activeTab: UnifiedRightPaneTab | null;
   projectRecentMdFiles: string[];
+  locale?: UiLocale;
   // Browser props
   isPickingElement: boolean;
   hideNativeView: boolean;
@@ -92,6 +94,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
   tabs,
   activeTab,
   projectRecentMdFiles,
+  locale = "ja",
   isPickingElement,
   hideNativeView,
   onNavigateBrowser,
@@ -329,6 +332,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
           withTabs={switcherWithTabs}
           others={switcherOthers}
           isOpen={projectMenuOpen}
+          locale={locale}
           onOpenChange={setProjectMenuOpen}
           onSelectScope={onSelectProjectScope}
         />
@@ -337,8 +341,8 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
           type="button"
           data-testid="toggle-file-tree-btn"
           onClick={() => setShowFileTree((v) => !v)}
-          title="ファイルツリーを表示 / 非表示"
-          aria-label="ファイルツリーを表示 / 非表示"
+          title={t(locale, "rightPane.toggleFileTree")}
+          aria-label={t(locale, "rightPane.toggleFileTree")}
           aria-pressed={showFileTree}
           className={`no-drag p-1.5 rounded-lg transition-colors cursor-pointer shrink-0 ${
             showFileTree
@@ -354,7 +358,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
         {/* Unified Mixed Tabs Strip */}
         <div
           role="tablist"
-          aria-label={`${activeProjectItem.name} のタブ`}
+          aria-label={t(locale, "rightPane.tabsAria", { name: activeProjectItem.name })}
           className="flex-1 min-w-0 flex items-center gap-1 overflow-x-auto"
         >
           {tabs.map((tab) => {
@@ -378,15 +382,15 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
                 {tab.kind === "markdown" && tab.markdownTab.isDirty && (
                   <span
                     data-testid="markdown-tab-dirty-dot"
-                    title="未保存の変更があります"
-                    aria-label="未保存の変更があります"
+                    title={t(locale, "rightPane.unsavedChanges")}
+                    aria-label={t(locale, "rightPane.unsavedChanges")}
                     className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0"
                   />
                 )}
                 <span className="truncate flex-1">{tab.title}</span>
                 <button
                   type="button"
-                  aria-label={`${tab.title} を閉じる`}
+                  aria-label={t(locale, "rightPane.closeTabAria", { title: tab.title })}
                   onClick={(e) => {
                     e.stopPropagation();
                     onCloseTab(tab);
@@ -406,8 +410,8 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
             type="button"
             data-testid="new-browser-tab-btn"
             onClick={onNewBrowserTab}
-            title="新しいブラウザタブを開く"
-            aria-label="新しいブラウザタブを開く"
+            title={t(locale, "rightPane.newBrowserTabTitle")}
+            aria-label={t(locale, "rightPane.newBrowserTabTitle")}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -416,8 +420,8 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
             type="button"
             data-testid="open-markdown-tab-btn"
             onClick={onOpenMarkdownDialog}
-            title="Markdown ファイルを開く (⌘⌥O)"
-            aria-label="Markdown ファイルを開く"
+            title={t(locale, "rightPane.openMarkdownTitle")}
+            aria-label={t(locale, "rightPane.openMarkdownAria")}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
           >
             <FolderOpen className="w-3.5 h-3.5" />
@@ -427,8 +431,8 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
             type="button"
             data-testid="close-right-pane-btn"
             onClick={handleClosePanel}
-            title="右パネルを閉じる"
-            aria-label="右パネルを閉じる"
+            title={t(locale, "rightPane.closePanel")}
+            aria-label={t(locale, "rightPane.closePanel")}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
           >
             <PanelRightClose className="w-3.5 h-3.5" />
@@ -446,6 +450,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
                 projectPath={activeProjectItem.path}
                 projectColorHex={activeProjectItem.colorHex}
                 activeFilePath={activeFilePath}
+                locale={locale}
                 onOpenFile={(entry) => onOpenProjectFile?.(entry)}
                 onRevealInFinder={onRevealInFinder}
                 initialEntriesByDir={initialFileTreeEntries}
@@ -453,7 +458,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
             </div>
             <div
               onMouseDown={startFileTreeResize}
-              title="ドラッグしてファイルツリーの幅を調整"
+              title={t(locale, "rightPane.resizeFileTreeTitle")}
               className="w-1 bg-zinc-200/70 dark:bg-zinc-800/80 hover:bg-indigo-500/40 cursor-col-resize transition-colors shrink-0"
             />
           </>
@@ -480,7 +485,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
                     </div>
                   )}
                   <p className="text-[12px] text-zinc-500 dark:text-zinc-400 leading-relaxed pt-1">
-                    このプロジェクトで開いているタブはまだありません。ブラウザ・Markdown・画像・コードを1つのタブバーでまとめて管理できます。
+                    {t(locale, "rightPane.emptyDesc")}
                   </p>
                 </div>
 
@@ -492,7 +497,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[12px] font-medium bg-indigo-600 hover:bg-indigo-500 text-white shadow-xs transition-colors cursor-pointer"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>新しいブラウザタブ</span>
+                    <span>{t(locale, "rightPane.newBrowserTabBtn")}</span>
                   </button>
                   <button
                     type="button"
@@ -501,7 +506,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[12px] font-medium bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 text-zinc-800 dark:text-zinc-200 border border-zinc-200/80 dark:border-zinc-700/80 transition-colors cursor-pointer"
                   >
                     <FolderOpen className="w-3.5 h-3.5" />
-                    <span>Markdown ファイルを開く</span>
+                    <span>{t(locale, "rightPane.openMarkdownBtn")}</span>
                   </button>
                   {activeProjectItem.path && !showFileTree && (
                     <button
@@ -511,7 +516,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
                       className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[12px] font-medium bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 text-zinc-800 dark:text-zinc-200 border border-zinc-200/80 dark:border-zinc-700/80 transition-colors cursor-pointer"
                     >
                       <FolderTree className="w-3.5 h-3.5" />
-                      <span>ファイルツリーを開く</span>
+                      <span>{t(locale, "rightPane.openFileTreeBtn")}</span>
                     </button>
                   )}
                 </div>
@@ -519,7 +524,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
                 {projectRecentMdFiles.length > 0 && (
                   <div className="text-left pt-2 space-y-1.5">
                     <div className="text-[10.5px] font-semibold uppercase tracking-wider text-zinc-400 px-1">
-                      最近の Markdown ({activeProjectItem.name})
+                      {t(locale, "rightPane.recentMarkdownHeader", { name: activeProjectItem.name })}
                     </div>
                     <div className="space-y-1">
                       {projectRecentMdFiles.slice(0, 5).map((filePath) => {
@@ -546,7 +551,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
                                 e.stopPropagation();
                                 onRemoveRecentMd(filePath);
                               }}
-                              title="履歴から削除"
+                              title={t(locale, "rightPane.removeFromHistory")}
                               className="opacity-0 group-hover:opacity-100 p-1 rounded text-zinc-400 hover:text-rose-500 cursor-pointer"
                             >
                               <X className="w-3 h-3" />
@@ -564,6 +569,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
               activeTab={activeTab.browserTab}
               isPickingElement={isPickingElement}
               hideNativeView={effectiveHideNativeView}
+              locale={locale}
               layoutSyncKey={`${showFileTree}:${fileTreeWidth}`}
               onNavigate={onNavigateBrowser}
               onBack={onBrowserBack}
@@ -584,6 +590,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
               isWatching={mdIsWatching}
               justReloadedAt={mdJustReloadedAt}
               pendingAnchor={mdPendingAnchor}
+              locale={locale}
               onClearPendingAnchor={onClearMdPendingAnchor}
               onToggleAutoReload={onToggleMdAutoReload}
               onOpenDialog={onOpenMarkdownDialog}
@@ -604,6 +611,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
           ) : activeTab.kind === "code" ? (
             <CodeViewerPane
               activeTab={activeTab.codeTab}
+              locale={locale}
               onRefreshActive={() => onRefreshActiveCode?.()}
               onRevealInFinder={onRevealInFinder}
               onAttachFileToChat={onAttachCodeFileToChat}
@@ -611,6 +619,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
           ) : (
             <ImageViewerPane
               activeTab={activeTab.imageTab}
+              locale={locale}
               onCloseActiveTab={() => onCloseTab(activeTab)}
               onRetryLoadTab={onRetryImageTab}
               onImageLoadError={onImageLoadError}
@@ -627,7 +636,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
           <div className="flex flex-col items-center gap-2 px-5 py-4 rounded-xl bg-white/95 dark:bg-[#161a22]/95 shadow-lg border border-indigo-500/30">
             <Upload className="w-6 h-6 text-indigo-500" />
             <span className="text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
-              Markdown ファイルをドロップして開く
+              {t(locale, "rightPane.dropMarkdown")}
             </span>
             <span className="text-[11px] text-zinc-500">.md / .markdown / .mdx</span>
           </div>

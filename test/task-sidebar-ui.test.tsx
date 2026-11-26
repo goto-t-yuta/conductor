@@ -113,12 +113,18 @@ describe("TaskCard & TaskSidebar rendering and click isolation", () => {
 
     expect(html).toContain("Active review item");
     expect(html).toContain('data-testid="task-quick-done"');
-    expect(html).toContain("Completed");
+    expect(html).toContain("完了");
+    expect(html).toContain("質問");
     expect(html).toContain('aria-expanded="false"');
     expect(html).toMatch(/data-testid="completed-count-badge"[^>]*>2<\/span>/);
     // Completed cards and search input are hidden while collapsed
     expect(html).not.toContain("Shipped feature");
     expect(html).not.toContain("完了タスクを検索...");
+
+    const enHtml = renderToStaticMarkup(<TaskSidebar {...makeSidebarProps({ locale: "en" })} />);
+    expect(enHtml).toContain("Completed");
+    expect(enHtml).toContain("Questions");
+    expect(enHtml).toContain("Tasks");
   });
 
   it("renders search input and Reopen buttons when Completed section is expanded", () => {

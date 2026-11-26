@@ -42,6 +42,12 @@ import {
   isValidPreferredLanguage,
 } from "../shared/language.js";
 import {
+  getFriendlyToolLabel,
+  resolveUiLocale,
+  t,
+  type UiLocale,
+} from "../shared/i18n.js";
+import {
   MAX_CHAT_SESSIONS,
   MAX_MESSAGES_PER_SESSION,
   createEmptyChatSession,
@@ -331,49 +337,8 @@ function extractFirstLocalUrl(text: string): string | null {
   return match ? match[0] : null;
 }
 
-function friendlyToolLabel(name: string): string {
-  switch (name) {
-    case "list_projects":
-      return "プロジェクト一覧を確認";
-    case "register_project":
-      return "プロジェクトを登録";
-    case "search_projects":
-      return "プロジェクトを検索";
-    case "scan_directory_projects":
-      return "配下のプロジェクトを一括登録";
-    case "list_tasks":
-      return "タスク一覧を確認";
-    case "create_task":
-      return "タスクを作成";
-    case "update_task":
-      return "タスクを更新";
-    case "start_worker":
-      return "ワーカーを起動";
-    case "send_to_worker":
-      return "ワーカーへ追加指示";
-    case "stop_worker":
-      return "ワーカーを停止";
-    case "get_task_detail":
-      return "タスク詳細を取得";
-    case "browser_open":
-      return "ブラウザを開く";
-    case "browser_snapshot":
-      return "画面スナップショット取得";
-    case "browser_click":
-      return "ブラウザ要素をクリック";
-    case "browser_type":
-      return "ブラウザへ文字入力";
-    case "browser_press_key":
-      return "キー操作を送信";
-    case "browser_scroll":
-      return "ブラウザをスクロール";
-    case "browser_screenshot":
-      return "ブラウザ画面を撮影";
-    case "browser_console_errors":
-      return "コンソール/通信エラー確認";
-    default:
-      return name;
-  }
+function friendlyToolLabel(name: string, locale: UiLocale = "ja"): string {
+  return getFriendlyToolLabel(name, locale);
 }
 
 export class ConductorController {
@@ -1840,7 +1805,7 @@ export class ConductorController {
         this.upsertToolChip(
           args.assistantMessageId,
           ev.id,
-          friendlyToolLabel(cleanName),
+          friendlyToolLabel(cleanName, this.getUiLocale()),
           ev.detail ?? null,
           ev.completed,
           Boolean(ev.isError),
@@ -2367,7 +2332,7 @@ export class ConductorController {
         this.upsertToolChip(
           messageId,
           toolId,
-          friendlyToolLabel(cleanName ?? "tool"),
+          friendlyToolLabel(cleanName ?? "tool", this.getUiLocale()),
           parsed.detail ?? null,
           parsed.completed,
           parsed.isError,
@@ -2768,7 +2733,8 @@ export class ConductorController {
       const rawTool = asString(item.tool);
       const tool = rawTool ?? "tool";
       const server = asString(item.server) ?? "";
-      const label = server === "conductor" ? friendlyToolLabel(tool) : `${server}.${tool}`;
+      const label =
+        server === "conductor" ? friendlyToolLabel(tool, this.getUiLocale()) : `${server}.${tool}`;
       const toolName = rawTool
         ? server === "conductor"
           ? rawTool
@@ -3305,6 +3271,10 @@ export class ConductorController {
     });
   }
 
+  private getUiLocale(): UiLocale {
+    return resolveUiLocale(this.preferredLanguage);
+  }
+
   private formatTaskEventHeader(task: AgentTask): string {
     const providerLabel =
       task.provider === "agy" ? " · AGY" : task.provider === "claude" ? " · Claude" : "";
@@ -3377,15 +3347,20 @@ export class ConductorController {
     });
 
     if (updatedTask) {
+      const locale = this.getUiLocale();
       const filesLine =
         updatedTask.conflictFiles && updatedTask.conflictFiles.length > 0
-          ? `\n対象ファイル: ${updatedTask.conflictFiles.join(", ")}`
+          ? `\n${t(locale, "inspector.conflictFiles", { files: updatedTask.conflictFiles.join(", ") })}`
           : "";
       const targetLine = updatedTask.conflictTargetBranch
-        ? `（対象ブランチ: ${updatedTask.conflictTargetBranch}）`
+        ? locale === "en"
+          ? ` (target branch: ${updatedTask.conflictTargetBranch})`
+          : `（対象ブランチ: ${updatedTask.conflictTargetBranch}）`
         : "";
       const body = [
-        `⚠️ コンフリクトの自動解消を完了できませんでした${targetLine}。Worktree は保持されているため、Task Inspector から手動確認または「AIでコンフリクト解消」を再実行してください。`,
+        locale === "en"
+          ? `⚠️ Automatic conflict resolution could not be completed${targetLine}. The worktree has been kept — review manually or click "Resolve Conflict with AI" in Task Inspector.`
+          : `⚠️ コンフリクトの自動解消を完了できませんでした${targetLine}。Worktree は保持されているため、Task Inspector から手動確認または「AIでコンフリクト解消」を再実行してください。`,
         reason,
       ]
         .filter(Boolean)
@@ -3393,8 +3368,8 @@ export class ConductorController {
       this.appendTaskEventMessage(
         updatedTask,
         options?.exhausted
-          ? "コンフリクト未解消（自動再試行上限・手動確認が必要）"
-          : "コンフリクト自動解消に失敗（手動確認が必要）",
+          ? t(locale, "taskEvent.conflictLimitReached")
+          : t(locale, "taskEvent.conflictResolveFailed"),
         body,
       );
     }
@@ -3675,19 +3650,20 @@ export class ConductorController {
     if (!latestTask) return;
 
     if (lockedOutcome.skippedNonLocalMode) {
+      const locale = this.getUiLocale();
       let finishedTask: AgentTask | undefined;
-      this.updateTask(taskId, (t) => {
-        t.status = "needs_review";
-        if (t.landStatus === "landing") t.landStatus = "unlanded";
-        t.currentStep = "完了・確認待ち";
-        t.updatedAt = new Date().toISOString();
-        finishedTask = t;
+      this.updateTask(taskId, (tTask) => {
+        tTask.status = "needs_review";
+        if (tTask.landStatus === "landing") tTask.landStatus = "unlanded";
+        tTask.currentStep = t(locale, "taskStep.completedReview");
+        tTask.updatedAt = new Date().toISOString();
+        finishedTask = tTask;
       });
       if (finishedTask) {
         this.appendTaskEventMessage(
           finishedTask,
-          "完了（確認待ち）",
-          options.completionExcerpt || "(出力なし)",
+          t(locale, "taskEvent.completedReview"),
+          options.completionExcerpt || t(locale, "taskEvent.noOutput"),
         );
       }
       this.persist();
@@ -3697,53 +3673,58 @@ export class ConductorController {
 
     const { result } = lockedOutcome;
     const now = new Date().toISOString();
+    const locale = this.getUiLocale();
 
     if (result.action === "landed" || result.action === "noop") {
       let updatedTask: AgentTask | undefined;
       const resolvedAfterConflict =
         options.wasConflictResolveTurn || (latestTask.autoResolveConflictAttempts ?? 0) > 0;
-      this.updateTask(taskId, (t) => {
-        t.status = "needs_review";
-        t.landStatus = "landed";
-        t.landedBranch = result.targetBranch ?? null;
-        t.landedCommit = result.commitHash ?? null;
-        t.worktreePath = null;
-        t.worktreeBranch = null;
-        t.landError = null;
-        t.conflictFiles = undefined;
-        t.conflictParentHead = null;
-        t.conflictTargetBranch = null;
-        t.autoResolveConflictAttempts = undefined;
-        t.currentStep =
+      this.updateTask(taskId, (tTask) => {
+        tTask.status = "needs_review";
+        tTask.landStatus = "landed";
+        tTask.landedBranch = result.targetBranch ?? null;
+        tTask.landedCommit = result.commitHash ?? null;
+        tTask.worktreePath = null;
+        tTask.worktreeBranch = null;
+        tTask.landError = null;
+        tTask.conflictFiles = undefined;
+        tTask.conflictParentHead = null;
+        tTask.conflictTargetBranch = null;
+        tTask.autoResolveConflictAttempts = undefined;
+        tTask.currentStep =
           result.action === "noop"
-            ? "完了・確認待ち (変更なし)"
+            ? t(locale, "taskStep.completedNoChanges")
             : result.targetBranch
-              ? `完了・確認待ち (Landed → ${result.targetBranch})`
-              : "完了・確認待ち (Landed)";
-        t.activities.push({
+              ? t(locale, "taskStep.completedLandedBranch", { branch: result.targetBranch })
+              : t(locale, "taskStep.completedLanded");
+        tTask.activities.push({
           id: crypto.randomUUID(),
           kind: "system",
           title:
             result.action === "noop"
-              ? "自動 Land (変更なし)"
-              : `自動 Land 完了 → ${result.targetBranch ?? "branch"}`,
+              ? locale === "en"
+                ? "Auto-land (no changes)"
+                : "自動 Land (変更なし)"
+              : locale === "en"
+                ? `Auto-land completed → ${result.targetBranch ?? "branch"}`
+                : `自動 Land 完了 → ${result.targetBranch ?? "branch"}`,
           detail: result.message,
           timestamp: now,
         });
-        t.updatedAt = now;
-        updatedTask = t;
+        tTask.updatedAt = now;
+        updatedTask = tTask;
       });
 
       if (updatedTask) {
-        const targetLabel = result.targetBranch ?? "(変更なし)";
+        const targetLabel = result.targetBranch ?? t(locale, "taskEvent.noChangesLabel");
         const landSummaryLine =
           result.action === "noop"
-            ? `✅ 自動 Land 完了: ${targetLabel}（差分なし・Worktree クリーンアップ済み）`
+            ? t(locale, "taskEvent.autoLandNoop", { target: targetLabel })
             : resolvedAfterConflict
-              ? `✅ 自動 Land 完了: ${targetLabel}（コンフリクト自力解消済み）`
-              : `✅ 自動 Land 完了: ${targetLabel}`;
-        const body = `${landSummaryLine}\n${options.completionExcerpt || "(出力なし)"}`;
-        this.appendTaskEventMessage(updatedTask, "完了（確認待ち）", body);
+              ? t(locale, "taskEvent.autoLandResolved", { target: targetLabel })
+              : t(locale, "taskEvent.autoLandSuccess", { target: targetLabel });
+        const body = `${landSummaryLine}\n${options.completionExcerpt || t(locale, "taskEvent.noOutput")}`;
+        this.appendTaskEventMessage(updatedTask, t(locale, "taskEvent.completedReview"), body);
       }
       this.persist();
       this.broadcastSnapshot();
@@ -3791,26 +3772,30 @@ export class ConductorController {
 
     // Non-conflict error (e.g., parent repo has uncommitted changes): NEVER run AI conflict resolution
     let updatedTask: AgentTask | undefined;
-    this.updateTask(taskId, (t) => {
-      t.status = "needs_review";
-      t.landStatus = "error";
-      t.landError = result.message;
-      t.conflictFiles = undefined;
-      t.currentStep = "完了・自動 Land エラー";
-      t.activities.push({
+    this.updateTask(taskId, (tTask) => {
+      tTask.status = "needs_review";
+      tTask.landStatus = "error";
+      tTask.landError = result.message;
+      tTask.conflictFiles = undefined;
+      tTask.currentStep = t(locale, "taskStep.autoLandError");
+      tTask.activities.push({
         id: crypto.randomUUID(),
         kind: "error",
-        title: "自動 Land エラー",
+        title: locale === "en" ? "Auto-land error" : "自動 Land エラー",
         detail: result.message,
         timestamp: now,
       });
-      t.updatedAt = now;
-      updatedTask = t;
+      tTask.updatedAt = now;
+      updatedTask = tTask;
     });
 
     if (updatedTask) {
-      const body = `⚠️ 自動 Land を実行できませんでした: ${result.message}\n${options.completionExcerpt || "(出力なし)"}`;
-      this.appendTaskEventMessage(updatedTask, "完了（確認待ち・未Land）", body);
+      const body = `${t(locale, "taskEvent.autoLandFailed", { message: result.message })}\n${options.completionExcerpt || t(locale, "taskEvent.noOutput")}`;
+      this.appendTaskEventMessage(
+        updatedTask,
+        t(locale, "taskEvent.completedReviewUnlanded"),
+        body,
+      );
     }
     this.persist();
     this.broadcastSnapshot();
@@ -4007,26 +3992,29 @@ export class ConductorController {
             );
             break;
           }
+          const locale = this.getUiLocale();
           let updatedTask: AgentTask | undefined;
-          this.updateTask(taskId, (t) => {
-            t.activeTurnId = null;
-            t.autoResumeOnStartup = false;
-            t.updatedAt = new Date().toISOString();
+          this.updateTask(taskId, (tTask) => {
+            tTask.activeTurnId = null;
+            tTask.autoResumeOnStartup = false;
+            tTask.updatedAt = new Date().toISOString();
             if (turnStatus === "failed") {
-              t.status = "failed";
-              t.currentStep = "エラーで終了";
+              tTask.status = "failed";
+              tTask.currentStep = t(locale, "taskStep.failed");
             } else {
-              t.status = "needs_review";
-              t.currentStep = "中断されました";
+              tTask.status = "needs_review";
+              tTask.currentStep = t(locale, "taskStep.interrupted");
             }
-            updatedTask = t;
+            updatedTask = tTask;
           });
           if (updatedTask) {
             const excerpt = updatedTask.latestOutput.trim().slice(0, 420);
             this.appendTaskEventMessage(
               updatedTask,
-              updatedTask.status === "failed" ? "失敗" : "完了（確認待ち）",
-              excerpt || "(出力なし)",
+              updatedTask.status === "failed"
+                ? t(locale, "taskEvent.failed")
+                : t(locale, "taskEvent.completedReview"),
+              excerpt || t(locale, "taskEvent.noOutput"),
             );
           }
           this.persist();
@@ -4039,15 +4027,16 @@ export class ConductorController {
           this.isTaskEligibleForAutoLand(task);
 
         if (shouldAutoLand) {
+          const locale = this.getUiLocale();
           let excerpt = "";
-          this.updateTask(taskId, (t) => {
-            t.activeTurnId = null;
-            t.autoResumeOnStartup = false;
-            t.status = "running";
-            t.landStatus = "landing";
-            t.currentStep = "自動 Land を実行中...";
-            t.updatedAt = new Date().toISOString();
-            excerpt = t.latestOutput.trim().slice(0, 420);
+          this.updateTask(taskId, (tTask) => {
+            tTask.activeTurnId = null;
+            tTask.autoResumeOnStartup = false;
+            tTask.status = "running";
+            tTask.landStatus = "landing";
+            tTask.currentStep = t(locale, "taskStep.autoLanding");
+            tTask.updatedAt = new Date().toISOString();
+            excerpt = tTask.latestOutput.trim().slice(0, 420);
           });
           this.persist();
           this.broadcastSnapshot();
@@ -4058,19 +4047,24 @@ export class ConductorController {
           break;
         }
 
+        const locale = this.getUiLocale();
         let updatedTask: AgentTask | undefined;
-        this.updateTask(taskId, (t) => {
-          t.activeTurnId = null;
-          t.autoResumeOnStartup = false;
-          t.updatedAt = new Date().toISOString();
-          t.status = "needs_review";
-          t.currentStep = "完了・確認待ち";
-          updatedTask = t;
+        this.updateTask(taskId, (tTask) => {
+          tTask.activeTurnId = null;
+          tTask.autoResumeOnStartup = false;
+          tTask.updatedAt = new Date().toISOString();
+          tTask.status = "needs_review";
+          tTask.currentStep = t(locale, "taskStep.completedReview");
+          updatedTask = tTask;
         });
 
         if (updatedTask) {
           const excerpt = updatedTask.latestOutput.trim().slice(0, 420);
-          this.appendTaskEventMessage(updatedTask, "完了（確認待ち）", excerpt || "(出力なし)");
+          this.appendTaskEventMessage(
+            updatedTask,
+            t(locale, "taskEvent.completedReview"),
+            excerpt || t(locale, "taskEvent.noOutput"),
+          );
         }
         this.persist();
         this.broadcastSnapshot();
@@ -4938,12 +4932,13 @@ export class ConductorController {
       failedTask = t;
     });
     if (failedTask) {
+      const locale = this.getUiLocale();
       this.appendMessagesToActiveChat([
         {
           id: crypto.randomUUID(),
           role: "taskEvent",
           provider: failedTask.provider,
-          text: `**[${formatTaskCode(failedTask.taskNumber)} · ${failedTask.projectName}] ${failedTask.title}** — 自動再開に失敗しました\n${reason}`,
+          text: `**[${formatTaskCode(failedTask.taskNumber)} · ${failedTask.projectName}] ${failedTask.title}** — ${t(locale, "taskEvent.autoResumeFailed")}\n${reason}`,
           attachments: [],
           toolChips: [],
           relatedTaskId: failedTask.id,
@@ -5048,14 +5043,17 @@ export class ConductorController {
             ? `再起動後に自動再開 (${label} セッション継続)`
             : `再起動後に自動再開 (${label} 新規セッション)`,
         });
+        const locale = this.getUiLocale();
         this.appendMessagesToActiveChat([
           {
             id: crypto.randomUUID(),
             role: "taskEvent",
             provider: chosenProvider,
-            text: `**[${formatTaskCode(task.taskNumber)} · ${task.projectName} · ${label}] ${task.title}** — 再起動後に自動再開しました（${
-              hasSavedSession ? "セッション継続" : "新規セッションで再実行"
-            }）`,
+            text: `**[${formatTaskCode(task.taskNumber)} · ${task.projectName} · ${label}] ${task.title}** — ${
+              hasSavedSession
+                ? t(locale, "taskEvent.autoResumedSession")
+                : t(locale, "taskEvent.autoResumedNew")
+            }`,
             attachments: [],
             toolChips: [],
             relatedTaskId: task.id,
@@ -5146,14 +5144,17 @@ export class ConductorController {
         });
         t.updatedAt = now;
       });
+      const locale = this.getUiLocale();
       this.appendMessagesToActiveChat([
         {
           id: crypto.randomUUID(),
           role: "taskEvent",
           provider: "codex",
-          text: `**[${formatTaskCode(task.taskNumber)} · ${task.projectName} · Codex] ${task.title}** — 再起動後に自動再開しました（${
-            usedSessionResume ? "セッション継続" : "新規セッションで再実行"
-          }）`,
+          text: `**[${formatTaskCode(task.taskNumber)} · ${task.projectName} · Codex] ${task.title}** — ${
+            usedSessionResume
+              ? t(locale, "taskEvent.autoResumedSession")
+              : t(locale, "taskEvent.autoResumedNew")
+          }`,
           attachments: [],
           toolChips: [],
           relatedTaskId: task.id,
@@ -5587,16 +5588,17 @@ export class ConductorController {
             return;
           }
 
+          const locale = this.getUiLocale();
           let finishedTask: AgentTask | undefined;
-          this.updateTask(args.taskId, (t) => {
+          this.updateTask(args.taskId, (tTask) => {
             if (outcome.interrupted) {
-              t.status = "needs_review";
-              t.currentStep = "中断されました";
+              tTask.status = "needs_review";
+              tTask.currentStep = t(locale, "taskStep.interrupted");
             } else {
-              t.status = "failed";
-              t.currentStep = "エラーで終了";
+              tTask.status = "failed";
+              tTask.currentStep = t(locale, "taskStep.failed");
               if (outcome.errorMessage) {
-                t.activities.push({
+                tTask.activities.push({
                   id: crypto.randomUUID(),
                   kind: "error",
                   title: `${label} error`,
@@ -5605,8 +5607,8 @@ export class ConductorController {
                 });
               }
             }
-            t.updatedAt = new Date().toISOString();
-            finishedTask = t;
+            tTask.updatedAt = new Date().toISOString();
+            finishedTask = tTask;
           });
 
           if (finishedTask) {
@@ -5615,8 +5617,10 @@ export class ConductorController {
               .slice(0, 420);
             this.appendTaskEventMessage(
               finishedTask,
-              finishedTask.status === "failed" ? "失敗" : "完了（確認待ち）",
-              excerpt || "(出力なし)",
+              finishedTask.status === "failed"
+                ? t(locale, "taskEvent.failed")
+                : t(locale, "taskEvent.completedReview"),
+              excerpt || t(locale, "taskEvent.noOutput"),
             );
           }
           this.persist();
@@ -5630,14 +5634,15 @@ export class ConductorController {
           this.isTaskEligibleForAutoLand(preparedTask!);
 
         if (shouldAutoLand && preparedTask) {
+          const locale = this.getUiLocale();
           const excerpt = (preparedTask.latestOutput || outcome.finalText || "")
             .trim()
             .slice(0, 420);
-          this.updateTask(args.taskId, (t) => {
-            t.status = "running";
-            t.landStatus = "landing";
-            t.currentStep = "自動 Land を実行中...";
-            t.updatedAt = new Date().toISOString();
+          this.updateTask(args.taskId, (tTask) => {
+            tTask.status = "running";
+            tTask.landStatus = "landing";
+            tTask.currentStep = t(locale, "taskStep.autoLanding");
+            tTask.updatedAt = new Date().toISOString();
           });
           this.persist();
           this.broadcastSnapshot();
@@ -5648,19 +5653,24 @@ export class ConductorController {
           return;
         }
 
+        const locale = this.getUiLocale();
         let finishedTask: AgentTask | undefined;
-        this.updateTask(args.taskId, (t) => {
-          t.status = "needs_review";
-          t.currentStep = "完了・確認待ち";
-          t.updatedAt = new Date().toISOString();
-          finishedTask = t;
+        this.updateTask(args.taskId, (tTask) => {
+          tTask.status = "needs_review";
+          tTask.currentStep = t(locale, "taskStep.completedReview");
+          tTask.updatedAt = new Date().toISOString();
+          finishedTask = tTask;
         });
 
         if (finishedTask) {
           const excerpt = (finishedTask.latestOutput || outcome.errorMessage || "")
             .trim()
             .slice(0, 420);
-          this.appendTaskEventMessage(finishedTask, "完了（確認待ち）", excerpt || "(出力なし)");
+          this.appendTaskEventMessage(
+            finishedTask,
+            t(locale, "taskEvent.completedReview"),
+            excerpt || t(locale, "taskEvent.noOutput"),
+          );
         }
         this.persist();
         this.broadcastSnapshot();

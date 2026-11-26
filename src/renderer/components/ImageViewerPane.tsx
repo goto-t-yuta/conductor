@@ -27,11 +27,13 @@ import {
   type ImageViewerTab,
   type ImageZoomMode,
 } from "../lib/image-viewer.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 export interface ImageViewerPaneProps {
   activeTab: ImageViewerTab | null;
+  locale?: UiLocale;
   onCloseActiveTab: () => void;
   onRetryLoadTab: (tabId: string) => void;
   onImageLoadError: (tabId: string) => void;
@@ -49,6 +51,7 @@ interface DragPanState {
 
 export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
   activeTab,
+  locale = "ja",
   onCloseActiveTab,
   onRetryLoadTab,
   onImageLoadError,
@@ -418,7 +421,7 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
               type="button"
               onClick={handleFit}
               disabled={!activeTab?.src}
-              title="ペインに合わせる (0)"
+              title={t(locale, "image.fitTitle")}
               className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
                 zoomMode === "fit"
                   ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
@@ -432,7 +435,7 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
               type="button"
               onClick={handleActualSize}
               disabled={!activeTab?.src}
-              title="原寸大 100% で表示 (1)"
+              title={t(locale, "image.actualSizeTitle")}
               className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
                 isActualSizeActive
                   ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
@@ -448,8 +451,8 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
             type="button"
             onClick={handleZoomOut}
             disabled={!activeTab?.src || !canZoomOut}
-            title="縮小 (-)"
-            aria-label="縮小"
+            title={t(locale, "image.zoomOutTitle")}
+            aria-label={t(locale, "image.zoomOutAria")}
             className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-35 disabled:cursor-not-allowed transition-colors cursor-pointer"
           >
             <ZoomOut className="w-3.5 h-3.5" />
@@ -463,8 +466,8 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
             type="button"
             onClick={handleZoomIn}
             disabled={!activeTab?.src || !canZoomIn}
-            title="拡大 (+)"
-            aria-label="拡大"
+            title={t(locale, "image.zoomInTitle")}
+            aria-label={t(locale, "image.zoomInAria")}
             className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-35 disabled:cursor-not-allowed transition-colors cursor-pointer"
           >
             <ZoomIn className="w-3.5 h-3.5" />
@@ -476,13 +479,13 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
           <div
             className="inline-flex items-center p-0.5 rounded-md bg-zinc-200/70 dark:bg-zinc-800"
             role="group"
-            aria-label="背景スタイル"
+            aria-label={t(locale, "image.bgGroupAria")}
           >
             {(
               [
-                { id: "checker", label: "透過" },
-                { id: "dark", label: "暗" },
-                { id: "light", label: "明" },
+                { id: "checker", label: t(locale, "image.bgChecker") },
+                { id: "dark", label: t(locale, "image.bgDark") },
+                { id: "light", label: t(locale, "image.bgLight") },
               ] as const
             ).map((opt) => (
               <button
@@ -503,8 +506,8 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
           <button
             type="button"
             onClick={onCloseActiveTab}
-            title="この画像タブを閉じる"
-            aria-label="この画像タブを閉じる"
+            title={t(locale, "image.closeTabTitle")}
+            aria-label={t(locale, "image.closeTabTitle")}
             className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
           >
             <X className="w-3.5 h-3.5" />
@@ -533,8 +536,8 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
                     setCopiedPath(true);
                     setTimeout(() => setCopiedPath(false), 1500);
                   }}
-                  title={`パスをコピー: ${activeTab.imagePath}`}
-                  aria-label="画像パスをコピー"
+                  title={t(locale, "common.copyPathWith", { path: activeTab.imagePath })}
+                  aria-label={t(locale, "image.copyPathAria")}
                   className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded hover:bg-zinc-200/80 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
                 >
                   {copiedPath ? (
@@ -546,10 +549,10 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
                 <button
                   type="button"
                   onClick={() => onRevealInFinder(activeTab.imagePath!)}
-                  title="Finder で表示"
+                  title={t(locale, "common.revealInFinder")}
                   className="text-[10.5px] hover:text-indigo-500 hover:underline cursor-pointer shrink-0"
                 >
-                  Finder
+                  {t(locale, "common.finder")}
                 </button>
               </>
             )}
@@ -557,11 +560,11 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
               <button
                 type="button"
                 onClick={() => onOpenUrl(activeTab.sourceUrl!)}
-                title={`元ページをブラウザで開く: ${activeTab.sourceUrl}`}
+                title={t(locale, "image.sourcePageTitle", { url: activeTab.sourceUrl })}
                 className="inline-flex items-center gap-0.5 text-[10.5px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer shrink-0"
               >
                 <ExternalLink className="w-3 h-3" />
-                <span>元ページ</span>
+                <span>{t(locale, "image.sourcePageBtn")}</span>
               </button>
             )}
           </div>
@@ -588,14 +591,14 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
                 Image Viewer
               </h2>
               <p className="text-[12px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                チャットに貼り付けた画像や添付サムネイルをクリックすると、この右ペインで拡大表示できます。
+                {t(locale, "image.emptyDesc")}
               </p>
             </div>
           </div>
         ) : activeTab.isLoading ? (
           <div className="flex-1 flex items-center justify-center gap-2 text-[12.5px] text-zinc-500 dark:text-zinc-400 bg-white/80 dark:bg-[#0f1115]/80">
             <Loader2 className="w-4 h-4 text-indigo-500 animate-spin" />
-            <span>画像を読み込み中...</span>
+            <span>{t(locale, "image.loading")}</span>
           </div>
         ) : activeTab.error || !activeTab.src ? (
           <div className="flex-1 flex flex-col items-center justify-center p-6 text-center bg-white dark:bg-[#0f1115] space-y-3">
@@ -604,10 +607,10 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
             </div>
             <div className="space-y-1 max-w-sm">
               <div className="text-[13.5px] font-semibold text-zinc-900 dark:text-zinc-100">
-                画像を表示できませんでした
+                {t(locale, "image.errorHeading")}
               </div>
               <div className="text-[12px] text-rose-600 dark:text-rose-400">
-                {activeTab.error ?? "画像データが見つかりません。"}
+                {activeTab.error ?? t(locale, "image.missingData")}
               </div>
               {activeTab.imagePath && (
                 <div className="text-[11px] font-mono text-zinc-400 break-all pt-1">
@@ -622,7 +625,7 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
               >
                 <RotateCw className="w-3.5 h-3.5" />
-                <span>再読み込み</span>
+                <span>{t(locale, "common.reload")}</span>
               </button>
             )}
           </div>
@@ -663,8 +666,8 @@ export const ImageViewerPane: React.FC<ImageViewerPaneProps> = ({
                 onError={() => onImageLoadError(activeTab.id)}
                 title={
                   zoomMode === "fit"
-                    ? "ダブルクリックで原寸大 (100%) に切替 / ピンチでズーム"
-                    : "ダブルクリックでペインに合わせる (Fit) / スクロール・ドラッグで移動"
+                    ? t(locale, "image.dblClickActualSizeTitle")
+                    : t(locale, "image.dblClickFitTitle")
                 }
                 style={
                   zoomMode === "custom"

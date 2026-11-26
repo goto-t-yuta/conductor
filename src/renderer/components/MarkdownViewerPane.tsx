@@ -29,6 +29,7 @@ import {
   slugifyHeading,
 } from "../lib/markdown-utils.js";
 import type { MarkdownViewerTab } from "../lib/right-pane-tabs.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 import { MarkdownView, type MarkdownOpenedImage } from "./MarkdownView.js";
 
 export type { MarkdownViewerTab };
@@ -40,6 +41,7 @@ export interface MarkdownViewerPaneProps {
   isWatching: boolean;
   justReloadedAt: number | null;
   pendingAnchor: string | null;
+  locale?: UiLocale;
   onClearPendingAnchor: () => void;
   onToggleAutoReload: () => void;
   onOpenDialog: () => void;
@@ -68,6 +70,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
   isWatching,
   justReloadedAt,
   pendingAnchor,
+  locale = "ja",
   onClearPendingAnchor,
   onToggleAutoReload,
   onOpenDialog,
@@ -239,7 +242,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
         <button
           type="button"
           onClick={onOpenDialog}
-          title="ファイルを選択して開く (⌘⌥O)"
+          title={t(locale, "markdown.openFileTitle")}
           className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
         >
           <FolderOpen className="w-3.5 h-3.5" />
@@ -256,7 +259,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
             type="text"
             value={pathInput}
             onChange={(e) => setPathInput(e.target.value)}
-            placeholder="/path/to/README.md や file:// URL を入力..."
+            placeholder={t(locale, "markdown.pathPlaceholder")}
             className="w-full px-2.5 py-1 rounded-lg text-[12px] font-mono bg-white dark:bg-[#0f1115] border border-zinc-200 dark:border-zinc-800 focus:border-indigo-500/60 outline-none select-text"
           />
         </form>
@@ -267,7 +270,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
             type="button"
             data-testid="markdown-mode-rendered-btn"
             onClick={() => setViewMode("rendered")}
-            title="Rendered プレビュー"
+            title={t(locale, "markdown.renderedTitle")}
             className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
               viewMode === "rendered"
                 ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
@@ -280,7 +283,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
             type="button"
             data-testid="markdown-mode-raw-btn"
             onClick={() => setViewMode("raw")}
-            title="Code / Source 編集モード"
+            title={t(locale, "markdown.rawTitle")}
             className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
               viewMode === "raw"
                 ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
@@ -296,7 +299,11 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
           type="button"
           onClick={() => setShowToc((v) => !v)}
           disabled={!activeTab?.document || headings.length === 0}
-          title={headings.length > 0 ? `見出しアウトライン (${headings.length})` : "見出しがありません"}
+          title={
+            headings.length > 0
+              ? t(locale, "markdown.tocTitle", { count: headings.length })
+              : t(locale, "markdown.noHeadingsTitle")
+          }
           className={`inline-flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
             showToc && headings.length > 0
               ? "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400"
@@ -311,7 +318,11 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
         <button
           type="button"
           onClick={onToggleAutoReload}
-          title={autoReload ? "ライブ自動更新: ON（クリックで一時停止）" : "ライブ自動更新: OFF（クリックで再開）"}
+          title={
+            autoReload
+              ? t(locale, "markdown.autoReloadOnTitle")
+              : t(locale, "markdown.autoReloadOffTitle")
+          }
           className={`p-1.5 rounded-md transition-colors cursor-pointer ${
             autoReload
               ? isWatching
@@ -328,7 +339,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
           type="button"
           onClick={handleManualRefresh}
           disabled={!activeTab}
-          title={isDirty ? "ディスクの変更を確認" : "手動で再読み込み"}
+          title={isDirty ? t(locale, "markdown.checkDiskTitle") : t(locale, "markdown.manualReloadTitle")}
           className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-35 cursor-pointer"
         >
           <RotateCw className={`w-3.5 h-3.5 ${activeTab?.isLoading ? "animate-spin" : ""}`} />
@@ -339,7 +350,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
           <button
             type="button"
             onClick={() => onAttachFileToChat(activeTab.filePath, activeTab.fileName)}
-            title="このファイルをチャットに添付"
+            title={t(locale, "markdown.attachFileTitle")}
             className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
           >
             <MessageSquarePlus className="w-3.5 h-3.5" />
@@ -354,7 +365,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
             {isDirty && (
               <span
                 data-testid="markdown-dirty-indicator"
-                title="未保存の変更があります"
+                title={t(locale, "rightPane.unsavedChanges")}
                 className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400 font-medium shrink-0"
               >
                 <span aria-hidden="true">●</span>
@@ -365,7 +376,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
             </span>
             {isDirty && (
               <span className="px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 text-[10px] font-medium shrink-0">
-                未保存
+                {t(locale, "markdown.unsavedBadge")}
               </span>
             )}
             <button
@@ -375,7 +386,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                 setCopiedPath(true);
                 setTimeout(() => setCopiedPath(false), 1500);
               }}
-              title="パスをコピー"
+              title={t(locale, "common.copyPath")}
               className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded hover:bg-zinc-200/80 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
             >
               {copiedPath ? (
@@ -387,10 +398,10 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
             <button
               type="button"
               onClick={() => onRevealInFinder(activeTab.filePath)}
-              title="Finder で表示"
+              title={t(locale, "common.revealInFinder")}
               className="text-[10.5px] hover:text-indigo-500 hover:underline cursor-pointer shrink-0"
             >
-              Finder
+              {t(locale, "common.finder")}
             </button>
           </div>
 
@@ -403,11 +414,11 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                     data-testid="markdown-discard-btn"
                     onClick={() => void onDiscardActive()}
                     disabled={isSaving}
-                    title="未保存の変更を破棄してディスクから再読み込み"
+                    title={t(locale, "markdown.discardTitle")}
                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-300/80 dark:hover:bg-zinc-700 disabled:opacity-40 transition-colors cursor-pointer"
                   >
                     <RotateCcw className="w-3 h-3" />
-                    <span>変更を破棄</span>
+                    <span>{t(locale, "markdown.discardBtn")}</span>
                   </button>
                 )}
                 {onSaveActive && (
@@ -416,7 +427,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                     data-testid="markdown-save-btn"
                     onClick={() => void onSaveActive()}
                     disabled={!canSave}
-                    title="保存 (⌘S)"
+                    title={t(locale, "markdown.saveTitle")}
                     className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-medium transition-colors cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
                       canSave
                         ? "bg-indigo-600 hover:bg-indigo-500 text-white shadow-xs"
@@ -424,7 +435,9 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                     }`}
                   >
                     <Save className="w-3 h-3" />
-                    <span>{isSaving ? "保存中..." : "保存"}</span>
+                    <span>
+                      {isSaving ? t(locale, "markdown.savingBtn") : t(locale, "markdown.saveBtn")}
+                    </span>
                   </button>
                 )}
               </div>
@@ -433,7 +446,8 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
             {activeTab.document && (
               <>
                 <span className="hidden sm:inline">
-                  {stats.lines}行 · {formatByteSize(effectiveByteSize)}
+                  {t(locale, "markdown.linesCount", { count: stats.lines })} ·{" "}
+                  {formatByteSize(effectiveByteSize)}
                 </span>
                 {formattedUpdatedTime && (
                   <span className="inline-flex items-center gap-1">
@@ -450,11 +464,11 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium"
               >
                 <Check className="w-2.5 h-2.5" />
-                保存しました
+                {t(locale, "markdown.savedFeedback")}
               </span>
             ) : showReloadPulse ? (
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium">
-                更新済み
+                {t(locale, "markdown.reloadedFeedback")}
               </span>
             ) : autoReload && isWatching ? (
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium">
@@ -479,8 +493,10 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                   Local Markdown Viewer
                 </h2>
                 <p className="text-[12px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                  ローカルの <code className="font-mono">.md</code> /{" "}
-                  <code className="font-mono">.markdown</code> ファイルをリアルタイム自動更新・見出しアウトライン・ソース編集付きで扱えます。
+                  {t(locale, "markdown.emptyDescBefore")}
+                  <code className="font-mono">.md</code> /{" "}
+                  <code className="font-mono">.markdown</code>
+                  {t(locale, "markdown.emptyDescAfter")}
                 </p>
               </div>
 
@@ -498,7 +514,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
               {recentFiles.length > 0 && (
                 <div className="text-left pt-2 space-y-1.5">
                   <div className="text-[10.5px] font-semibold uppercase tracking-wider text-zinc-400 px-1">
-                    最近開いたファイル
+                    {t(locale, "markdown.recentFilesHeader")}
                   </div>
                   <div className="space-y-1">
                     {recentFiles.slice(0, 6).map((filePath) => {
@@ -525,7 +541,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                               e.stopPropagation();
                               onRemoveRecent(filePath);
                             }}
-                            title="履歴から削除"
+                            title={t(locale, "rightPane.removeFromHistory")}
                             className="opacity-0 group-hover:opacity-100 p-1 rounded text-zinc-400 hover:text-rose-500 cursor-pointer"
                           >
                             <X className="w-3 h-3" />
@@ -587,8 +603,8 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                   <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
                   <span className="flex-1 min-w-0">
                     {activeTab.externalChange.kind === "deleted"
-                      ? "ディスク上のファイルが外部で削除されました。現在の未保存の編集は保持されています（保存で再作成できます）。"
-                      : "ディスク上のファイルが外部で更新されました。未保存の編集内容を守るため自動上書きを保留しています。"}
+                      ? t(locale, "markdown.externalDeleted")
+                      : t(locale, "markdown.externalChanged")}
                   </span>
                   {activeTab.externalChange.kind === "changed" && onReloadExternalChange && (
                     <button
@@ -597,15 +613,15 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                       onClick={() => void onReloadExternalChange()}
                       className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 font-medium cursor-pointer shrink-0 transition-colors"
                     >
-                      再読み込み
+                      {t(locale, "common.reload")}
                     </button>
                   )}
                   {onDismissExternalChange && (
                     <button
                       type="button"
                       onClick={onDismissExternalChange}
-                      title="通知を閉じる"
-                      aria-label="通知を閉じる"
+                      title={t(locale, "markdown.dismissBanner")}
+                      aria-label={t(locale, "markdown.dismissBanner")}
                       className="p-0.5 rounded hover:bg-amber-500/20 cursor-pointer shrink-0"
                     >
                       <X className="w-3 h-3" />
@@ -628,7 +644,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                       onClick={() => void onSaveActive()}
                       className="px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 font-medium cursor-pointer shrink-0"
                     >
-                      再保存
+                      {t(locale, "markdown.retrySave")}
                     </button>
                   )}
                 </div>
@@ -644,7 +660,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                     onClick={onRefreshActive}
                     className="px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 font-medium cursor-pointer shrink-0"
                   >
-                    再試行
+                    {t(locale, "common.retry")}
                   </button>
                 </div>
               )}
@@ -655,6 +671,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                     <article className="max-w-[760px] mx-auto px-6 py-6">
                       <MarkdownView
                         content={content}
+                        locale={locale}
                         variant="document"
                         baseFilePath={activeTab.filePath}
                         headingIdPrefix={HEADING_ID_PREFIX}
@@ -675,7 +692,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                             Markdown Source ({stats.lines} lines · {stats.words} words)
                           </span>
                           <span className="hidden md:inline text-[10px] text-zinc-400">
-                            ⌘S で保存 · Tab インデント
+                            {t(locale, "markdown.editorHint")}
                           </span>
                         </div>
                         <button
@@ -698,7 +715,9 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                       <textarea
                         ref={textareaRef}
                         data-testid="markdown-source-editor"
-                        aria-label={`${activeTab.fileName} の Markdown ソースエディタ`}
+                        aria-label={t(locale, "markdown.editorAria", {
+                          fileName: activeTab.fileName,
+                        })}
                         value={content}
                         onChange={(e) => onDraftChange?.(activeTab.filePath, e.target.value)}
                         onKeyDown={handleTextareaKeyDown}
@@ -712,7 +731,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
                 )
               ) : activeTab.isLoading ? (
                 <div className="flex-1 flex items-center justify-center text-[12.5px] text-zinc-400">
-                  読み込み中...
+                  {t(locale, "common.loading")}
                 </div>
               ) : null}
             </div>

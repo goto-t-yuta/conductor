@@ -12,6 +12,7 @@ import type {
   RightPaneMode,
 } from "../shared/types.js";
 import { classifyProjectFile, formatFileTreeIpcError } from "../shared/file-tree.js";
+import { resolveUiLocale, t } from "../shared/i18n.js";
 import {
   addExplicitMentionTarget,
   removeExplicitMentionTarget,
@@ -271,9 +272,16 @@ export const App: React.FC = () => {
     [handleMarkMessagesRead],
   );
 
+  const uiLocale = useMemo(
+    () => resolveUiLocale(snapshot?.preferredLanguage),
+    [snapshot?.preferredLanguage],
+  );
+  const uiLocaleRef = useRef(uiLocale);
+  uiLocaleRef.current = uiLocale;
+
   const questions = useMemo(
-    () => deriveQuestionItems(snapshot?.messages ?? [], unreadReplyIds),
-    [snapshot?.messages, unreadReplyIds],
+    () => deriveQuestionItems(snapshot?.messages ?? [], unreadReplyIds, uiLocale),
+    [snapshot?.messages, unreadReplyIds, uiLocale],
   );
 
   useEffect(() => {
@@ -572,7 +580,7 @@ export const App: React.FC = () => {
             const copy = [...prev];
             copy[existingIdx] = {
               ...copy[existingIdx],
-              error: result.error ?? "ファイルを読み込めませんでした。",
+              error: result.error ?? t(uiLocaleRef.current, "markdown.readFailed"),
               isLoading: false,
             };
             return copy;
@@ -583,7 +591,7 @@ export const App: React.FC = () => {
               filePath: targetPath,
               fileName: baseName,
               document: null,
-              error: result.error ?? "ファイルを読み込めませんでした。",
+              error: result.error ?? t(uiLocaleRef.current, "markdown.readFailed"),
               isLoading: false,
               lastReloadedAt: now,
             },
@@ -684,7 +692,7 @@ export const App: React.FC = () => {
     } catch (err) {
       const savedAt = Date.now();
       const message =
-        err instanceof Error ? err.message : "ファイルの保存に失敗しました。";
+        err instanceof Error ? err.message : t(uiLocaleRef.current, "markdown.saveFailed");
       setMdTabs((prev) =>
         prev.map((t) =>
           t.filePath === targetPath
@@ -787,14 +795,14 @@ export const App: React.FC = () => {
         );
       } else if (event.kind === "error") {
         setMdTabs((prev) =>
-          prev.map((t) =>
-            t.filePath === event.filePath
+          prev.map((tab) =>
+            tab.filePath === event.filePath
               ? {
-                  ...t,
-                  error: event.error ?? "ファイルの再読み込みに失敗しました。",
+                  ...tab,
+                  error: event.error ?? t(uiLocaleRef.current, "markdown.reloadFailed"),
                   isLoading: false,
                 }
-              : t,
+              : tab,
           ),
         );
       }
@@ -1435,7 +1443,7 @@ export const App: React.FC = () => {
   if (!snapshot) {
     return (
       <div className="h-full w-full flex items-center justify-center text-[13px] text-zinc-400">
-        Conductor を起動しています...
+        {t(uiLocale, "app.starting")}
       </div>
     );
   }
@@ -1610,6 +1618,7 @@ export const App: React.FC = () => {
               tasks={snapshot.tasks}
               questions={questions}
               defaultIntegrationMode={snapshot.defaultIntegrationMode}
+              locale={uiLocale}
               selectedProjectId={selectedProjectId}
               selectedTaskId={selectedTaskId}
               onSelectProjectFilter={setSelectedProjectId}
@@ -1645,6 +1654,7 @@ export const App: React.FC = () => {
       <div className="flex-1 min-w-[360px] h-full">
         <UnifiedChat
           snapshot={snapshot}
+          locale={uiLocale}
           composerText={composerText}
           attachments={attachments}
           selectedMentions={selectedMentions}
@@ -1725,6 +1735,7 @@ export const App: React.FC = () => {
               tabs={activeProjectTabs}
               activeTab={activeUnifiedTab}
               projectRecentMdFiles={projectRecentMdFiles}
+              locale={uiLocale}
               isPickingElement={snapshot.isPickingElement}
               hideNativeView={Boolean(selectedTask || settingsModalTab !== null)}
               onNavigateBrowser={(url, newTab) => void handleNavigateActiveBrowser(url, newTab)}
@@ -1785,6 +1796,7 @@ export const App: React.FC = () => {
           project={selectedTaskProject}
           projectColorHex={selectedTaskColor}
           defaultIntegrationMode={snapshot.defaultIntegrationMode}
+          locale={uiLocale}
           onClose={() => setSelectedTaskId(null)}
           onUpdateStatus={(st) => handleUpdateTaskStatus(selectedTask.id, st)}
           onOpenPreviewUrl={(url) => void handleOpenUrlInBrowser(url, { task: selectedTask })}
@@ -1814,6 +1826,7 @@ export const App: React.FC = () => {
           autoLandOnComplete={snapshot.autoLandOnComplete}
           preferredLanguage={snapshot.preferredLanguage}
           remoteAccess={snapshot.remoteAccess}
+          locale={uiLocale}
           projects={snapshot.projects}
           initialTab={settingsModalTab}
           usageRecords={snapshot.usageRecords ?? []}

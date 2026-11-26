@@ -5,6 +5,7 @@ import {
   renderMermaidDiagram,
   type MermaidThemeMode,
 } from "../lib/mermaid-renderer.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 function detectDarkTheme(): boolean {
   if (typeof window === "undefined" || typeof document === "undefined") {
@@ -56,9 +57,10 @@ function useMermaidTheme(): MermaidThemeMode {
 
 export interface MermaidBlockProps {
   code: string;
+  locale?: UiLocale;
 }
 
-export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
+export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code, locale = "ja" }) => {
   const theme = useMermaidTheme();
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -125,7 +127,7 @@ export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
             <button
               type="button"
               onClick={() => setViewMode("diagram")}
-              title="Mermaid 図を表示"
+              title={t(locale, "mermaid.diagramTitle")}
               className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px] font-medium transition-colors cursor-pointer ${
                 viewMode === "diagram"
                   ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
@@ -138,7 +140,7 @@ export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
             <button
               type="button"
               onClick={() => setViewMode("code")}
-              title="Mermaid ソースを表示"
+              title={t(locale, "mermaid.codeTitle")}
               className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px] font-medium transition-colors cursor-pointer ${
                 viewMode === "code"
                   ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
@@ -175,7 +177,7 @@ export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
           <div className="flex items-start gap-2 px-3 py-2 text-[11.5px] bg-amber-500/10 text-amber-700 dark:text-amber-300">
             <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1 space-y-0.5">
-              <div className="font-medium">Mermaid 図のレンダリングに失敗しました</div>
+              <div className="font-medium">{t(locale, "mermaid.renderFailed")}</div>
               <div className="font-mono text-[11px] opacity-90 whitespace-pre-wrap break-words">
                 {error}
               </div>
@@ -197,7 +199,7 @@ export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
           className="flex items-center justify-center gap-2 p-4 text-[12px] text-zinc-500 dark:text-zinc-400 bg-white dark:bg-[#10131a]"
         >
           {isRendering && <Loader2 className="w-3.5 h-3.5 text-indigo-500 animate-spin" />}
-          <span>Mermaid 図をレンダリング中...</span>
+          <span>{t(locale, "mermaid.rendering")}</span>
         </div>
       )}
     </div>

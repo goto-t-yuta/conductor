@@ -19,6 +19,7 @@ import {
   uniqueSlug,
 } from "../lib/markdown-utils.js";
 import { isMermaidLanguage } from "../lib/mermaid-renderer.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 import { MermaidBlock } from "./MermaidBlock.js";
 
 export interface MarkdownOpenedImage {
@@ -35,6 +36,7 @@ export interface MarkdownInlineMentionConfig {
 
 interface MarkdownViewProps {
   content: string;
+  locale?: UiLocale;
   onOpenUrl: (url: string) => void;
   onOpenMarkdownFile?: (target: string, baseFilePath?: string) => void;
   onOpenImage?: (image: MarkdownOpenedImage) => void;
@@ -86,6 +88,7 @@ interface MarkdownImageProps {
   imageReloadVersion: number;
   imageCache: MarkdownImageCache;
   loadLocalImage?: LocalMarkdownImageLoader;
+  locale: UiLocale;
 }
 
 const MarkdownImage: React.FC<MarkdownImageProps> = ({
@@ -101,6 +104,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
   imageReloadVersion,
   imageCache,
   loadLocalImage,
+  locale,
 }) => {
   const classified = useMemo(
     () => classifyMarkdownImageSrc(src, baseFilePath),
@@ -164,7 +168,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
           setLocalState({
             key: requestKey,
             status: "error",
-            error: res.error ?? "画像を読み込めませんでした。",
+            error: res.error ?? `${t(locale, "markdown.imageLoadFailed")}。`,
             filePath: res.filePath || classified.resolvedPath || classified.target,
           });
         }
@@ -173,7 +177,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [classified, imageCache, loadLocalImage, requestKey, activeRetryNonce]);
+  }, [classified, imageCache, loadLocalImage, requestKey, activeRetryNonce, locale]);
 
   const handleOpen = (resolvedSrc: string, filePath?: string) => (e: React.MouseEvent<HTMLImageElement>) => {
     if (!onOpenImage || e.currentTarget.closest("a")) return;
@@ -198,7 +202,8 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
         >
           <ImageOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
           <span className="truncate">
-            {alt ? `${alt} — ` : ""}画像を読み込めませんでした ({classified.src})
+            {alt ? `${alt} — ` : ""}
+            {t(locale, "markdown.imageLoadFailed")} ({classified.src})
           </span>
         </span>
       );
@@ -208,7 +213,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
       <img
         src={classified.src}
         alt={alt ?? ""}
-        title={title ?? (onOpenImage ? "クリックで Image Viewer で拡大表示" : undefined)}
+        title={title ?? (onOpenImage ? t(locale, "markdown.imageZoomTitle") : undefined)}
         width={width}
         height={height}
         style={style}
@@ -256,7 +261,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
       <img
         src={activeState.dataUrl}
         alt={alt ?? ""}
-        title={title ?? (onOpenImage ? "クリックで Image Viewer で拡大表示" : activeState.filePath)}
+        title={title ?? (onOpenImage ? t(locale, "markdown.imageZoomTitle") : activeState.filePath)}
         width={width}
         height={height}
         style={style}
@@ -266,7 +271,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
           setLocalState({
             key: requestKey,
             status: "error",
-            error: "画像データの表示に失敗しました。",
+            error: t(locale, "markdown.imageRenderFailed"),
             filePath: activeState.filePath,
           })
         }
@@ -304,7 +309,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-300/70 dark:hover:bg-zinc-700 text-[10.5px] font-medium cursor-pointer shrink-0"
         >
           <RotateCw className="w-2.5 h-2.5" />
-          <span>再試行</span>
+          <span>{t(locale, "common.retry")}</span>
         </button>
       </span>
     );
@@ -317,7 +322,9 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
       className="inline-flex items-center gap-1.5 max-w-full my-1 px-2.5 py-1.5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-100/70 dark:bg-zinc-900/60 text-[11.5px] text-zinc-500 dark:text-zinc-400 align-middle"
     >
       <ImageIcon className="w-3.5 h-3.5 text-zinc-400 animate-pulse shrink-0" />
-      <span className="truncate">{alt || classified.target} を読み込み中...</span>
+      <span className="truncate">
+        {t(locale, "markdown.imageLoading", { name: alt || classified.target })}
+      </span>
     </span>
   );
 };
@@ -488,6 +495,7 @@ function CodeBlock({
 
 export const MarkdownView: React.FC<MarkdownViewProps> = ({
   content,
+  locale = "ja",
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImage,
@@ -550,9 +558,10 @@ export const MarkdownView: React.FC<MarkdownViewProps> = ({
         imageReloadVersion={imageReloadVersion}
         imageCache={imageCache}
         loadLocalImage={loadLocalImage}
+        locale={locale}
       />
     ),
-    [baseFilePath, onOpenImage, imageReloadVersion, imageCache, loadLocalImage],
+    [baseFilePath, onOpenImage, imageReloadVersion, imageCache, loadLocalImage, locale],
   );
 
   const renderSource = useCallback(
@@ -657,7 +666,7 @@ export const MarkdownView: React.FC<MarkdownViewProps> = ({
             return (
               <a
                 href={href}
-                title={isLocalMd ? "Markdown Viewer で開く" : undefined}
+                title={isLocalMd ? t(locale, "markdown.openInViewerTitle") : undefined}
                 onClick={(e) => {
                   if (classified.kind === "web") {
                     e.preventDefault();
@@ -724,7 +733,7 @@ export const MarkdownView: React.FC<MarkdownViewProps> = ({
             const code = extractNodeText(firstChild.props?.children).replace(/\n$/, "");
 
             if (isMermaidLanguage(language)) {
-              return <MermaidBlock code={code} />;
+              return <MermaidBlock code={code} locale={locale} />;
             }
 
             return <CodeBlock language={language} code={code} isUserBubble={isUserBubble} />;
