@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { Check, Copy, FileText, Image as ImageIcon, ImageOff, RotateCw } from "lucide-react";
+import type { AgentTask, Project } from "../../shared/types.js";
 import {
   defaultMarkdownImageCache,
   type LocalMarkdownImageLoader,
@@ -12,10 +13,13 @@ import {
 import {
   classifyLinkHref,
   classifyMarkdownImageSrc,
+  createRehypeHighlightMentions,
+  remarkSingleLineBreaks,
   transformMarkdownUrl,
   uniqueSlug,
 } from "../lib/markdown-utils.js";
 import { isMermaidLanguage } from "../lib/mermaid-renderer.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 import { MermaidBlock } from "./MermaidBlock.js";
 
 export interface MarkdownOpenedImage {
@@ -24,13 +28,22 @@ export interface MarkdownOpenedImage {
   filePath?: string;
 }
 
+export interface MarkdownInlineMentionConfig {
+  projects: Project[];
+  tasks: AgentTask[];
+  onOpenTask: (taskId: string) => void;
+}
+
 interface MarkdownViewProps {
   content: string;
+  locale?: UiLocale;
   onOpenUrl: (url: string) => void;
   onOpenMarkdownFile?: (target: string, baseFilePath?: string) => void;
   onOpenImage?: (image: MarkdownOpenedImage) => void;
   baseFilePath?: string;
-  variant?: "chat" | "document";
+  variant?: "chat" | "user" | "document";
+  preserveSingleLineBreaks?: boolean;
+  mentionContext?: MarkdownInlineMentionConfig;
   headingIdPrefix?: string;
   onScrollToHeading?: (id: string) => void;
   imageReloadVersion?: number;
@@ -75,9 +88,10 @@ interface MarkdownImageProps {
   imageReloadVersion: number;
   imageCache: MarkdownImageCache;
   loadLocalImage?: LocalMarkdownImageLoader;
+  locale: UiLocale;
 }
 
-const MarkdownImage: React.FC<MarkdownImageProps> = ({
+const MarkdownImage: React.FC<MarkdownImageProps> = React.memo(({
   src,
   alt,
   title,
@@ -90,6 +104,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
   imageReloadVersion,
   imageCache,
   loadLocalImage,
+  locale,
 }) => {
   const classified = useMemo(
     () => classifyMarkdownImageSrc(src, baseFilePath),
@@ -153,7 +168,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
           setLocalState({
             key: requestKey,
             status: "error",
-            error: res.error ?? "画像を読み込めませんでした。",
+            error: res.error ?? `${t(locale, "markdown.imageLoadFailed")}。`,
             filePath: res.filePath || classified.resolvedPath || classified.target,
           });
         }
@@ -162,7 +177,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [classified, imageCache, loadLocalImage, requestKey, activeRetryNonce]);
+  }, [classified, imageCache, loadLocalImage, requestKey, activeRetryNonce, locale]);
 
   const handleOpen = (resolvedSrc: string, filePath?: string) => (e: React.MouseEvent<HTMLImageElement>) => {
     if (!onOpenImage || e.currentTarget.closest("a")) return;
@@ -187,7 +202,8 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
         >
           <ImageOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
           <span className="truncate">
-            {alt ? `${alt} — ` : ""}画像を読み込めませんでした ({classified.src})
+            {alt ? `${alt} — ` : ""}
+            {t(locale, "markdown.imageLoadFailed")} ({classified.src})
           </span>
         </span>
       );
@@ -197,7 +213,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
       <img
         src={classified.src}
         alt={alt ?? ""}
-        title={title ?? (onOpenImage ? "クリックで Image Viewer で拡大表示" : undefined)}
+        title={title ?? (onOpenImage ? t(locale, "markdown.imageZoomTitle") : undefined)}
         width={width}
         height={height}
         style={style}
@@ -245,7 +261,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
       <img
         src={activeState.dataUrl}
         alt={alt ?? ""}
-        title={title ?? (onOpenImage ? "クリックで Image Viewer で拡大表示" : activeState.filePath)}
+        title={title ?? (onOpenImage ? t(locale, "markdown.imageZoomTitle") : activeState.filePath)}
         width={width}
         height={height}
         style={style}
@@ -255,7 +271,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
           setLocalState({
             key: requestKey,
             status: "error",
-            error: "画像データの表示に失敗しました。",
+            error: t(locale, "markdown.imageRenderFailed"),
             filePath: activeState.filePath,
           })
         }
@@ -293,7 +309,7 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-300/70 dark:hover:bg-zinc-700 text-[10.5px] font-medium cursor-pointer shrink-0"
         >
           <RotateCw className="w-2.5 h-2.5" />
-          <span>再試行</span>
+          <span>{t(locale, "common.retry")}</span>
         </button>
       </span>
     );
@@ -306,10 +322,12 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({
       className="inline-flex items-center gap-1.5 max-w-full my-1 px-2.5 py-1.5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-100/70 dark:bg-zinc-900/60 text-[11.5px] text-zinc-500 dark:text-zinc-400 align-middle"
     >
       <ImageIcon className="w-3.5 h-3.5 text-zinc-400 animate-pulse shrink-0" />
-      <span className="truncate">{alt || classified.target} を読み込み中...</span>
+      <span className="truncate">
+        {t(locale, "markdown.imageLoading", { name: alt || classified.target })}
+      </span>
     </span>
   );
-};
+});
 
 interface MarkdownPictureSourceProps extends React.SourceHTMLAttributes<HTMLSourceElement> {
   baseFilePath?: string;
@@ -322,7 +340,7 @@ interface MarkdownPictureSourceProps extends React.SourceHTMLAttributes<HTMLSour
  * Resolves local <source srcset="..."> entries inside GitHub-style <picture> blocks.
  * Returns null while unresolved so the fallback <img> inside <picture> renders cleanly.
  */
-const MarkdownPictureSource: React.FC<MarkdownPictureSourceProps> = ({
+const MarkdownPictureSource: React.FC<MarkdownPictureSourceProps> = React.memo(({
   srcSet,
   baseFilePath,
   imageReloadVersion,
@@ -399,7 +417,7 @@ const MarkdownPictureSource: React.FC<MarkdownPictureSourceProps> = ({
 
   const finalSrcSet = parsed.descriptor ? `${resolvedUrl} ${parsed.descriptor}` : resolvedUrl;
   return <source {...rest} srcSet={finalSrcSet} />;
-};
+});
 
 function extractNodeText(node: React.ReactNode): string {
   if (typeof node === "string" || typeof node === "number") {
@@ -414,17 +432,45 @@ function extractNodeText(node: React.ReactNode): string {
   return "";
 }
 
-function CodeBlock({ language, code }: { language: string; code: string }) {
+const CodeBlock = React.memo(function CodeBlock({
+  language,
+  code,
+  isUserBubble = false,
+}: {
+  language: string;
+  code: string;
+  isUserBubble?: boolean;
+}) {
   const [copied, setCopied] = useState(false);
   const lineCount = code.length === 0 ? 0 : code.split("\n").length;
 
   return (
-    <div className="my-2.5 overflow-hidden rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50 dark:bg-[#14171f]">
-      <div className="flex items-center justify-between px-3 py-1.5 text-[11px] text-zinc-500 dark:text-zinc-400 bg-zinc-100/80 dark:bg-zinc-900/80 border-b border-zinc-200/70 dark:border-zinc-800">
+    <div
+      className={`${
+        isUserBubble
+          ? "my-2 border-indigo-500/20 dark:border-indigo-400/25 bg-white/85 dark:bg-[#121520]/90 text-zinc-900 dark:text-zinc-100"
+          : "my-2.5 border-zinc-200/80 dark:border-zinc-800 bg-zinc-50 dark:bg-[#14171f]"
+      } overflow-hidden rounded-lg border`}
+    >
+      <div
+        className={`flex items-center justify-between px-3 py-1.5 text-[11px] border-b ${
+          isUserBubble
+            ? "text-zinc-600 dark:text-zinc-300 bg-indigo-500/[0.07] dark:bg-indigo-950/60 border-indigo-500/15 dark:border-indigo-400/20"
+            : "text-zinc-500 dark:text-zinc-400 bg-zinc-100/80 dark:bg-zinc-900/80 border-zinc-200/70 dark:border-zinc-800"
+        }`}
+      >
         <div className="flex items-center gap-2">
           <span className="font-mono font-medium">{language || "code"}</span>
           {lineCount > 1 && (
-            <span className="text-[10px] text-zinc-400 dark:text-zinc-500">{lineCount} lines</span>
+            <span
+              className={`text-[10px] ${
+                isUserBubble
+                  ? "text-zinc-500 dark:text-zinc-400"
+                  : "text-zinc-400 dark:text-zinc-500"
+              }`}
+            >
+              {lineCount} lines
+            </span>
           )}
         </div>
         <button
@@ -445,30 +491,42 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
       </pre>
     </div>
   );
-}
+});
 
-export const MarkdownView: React.FC<MarkdownViewProps> = ({
+export const MarkdownView: React.FC<MarkdownViewProps> = React.memo(({
   content,
+  locale = "ja",
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImage,
   baseFilePath,
   variant = "chat",
+  preserveSingleLineBreaks,
+  mentionContext,
   headingIdPrefix = "",
   onScrollToHeading,
   imageReloadVersion = 0,
   imageCache = defaultMarkdownImageCache,
   loadLocalImage,
 }) => {
-  const slugCounts = new Map<string, number>();
+  const isUserBubble = variant === "user";
+  const enableSingleLineBreaks = preserveSingleLineBreaks ?? isUserBubble;
+  const slugCountsRef = useRef<Map<string, number>>(new Map());
+  slugCountsRef.current = new Map();
 
-  const makeHeading = (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") => {
-    return ({ children }: { children?: React.ReactNode }) => {
-      const slug = uniqueSlug(extractNodeText(children), slugCounts);
-      const id = headingIdPrefix ? `${headingIdPrefix}${slug}` : undefined;
-      return <Tag id={id}>{children}</Tag>;
-    };
-  };
+  const remarkPlugins = useMemo(
+    () => (enableSingleLineBreaks ? [remarkGfm, remarkSingleLineBreaks] : [remarkGfm]),
+    [enableSingleLineBreaks],
+  );
+
+  const rehypePlugins = useMemo(() => {
+    const plugins: NonNullable<React.ComponentProps<typeof ReactMarkdown>["rehypePlugins"]> =
+      isUserBubble ? [] : [rehypeRaw, [rehypeSanitize, CONDUCTOR_SANITIZE_SCHEMA]];
+    if (mentionContext) {
+      plugins.push(createRehypeHighlightMentions(mentionContext.projects, mentionContext.tasks));
+    }
+    return plugins;
+  }, [isUserBubble, mentionContext]);
 
   const renderImage = useCallback(
     ({
@@ -493,9 +551,10 @@ export const MarkdownView: React.FC<MarkdownViewProps> = ({
         imageReloadVersion={imageReloadVersion}
         imageCache={imageCache}
         loadLocalImage={loadLocalImage}
+        locale={locale}
       />
     ),
-    [baseFilePath, onOpenImage, imageReloadVersion, imageCache, loadLocalImage],
+    [baseFilePath, onOpenImage, imageReloadVersion, imageCache, loadLocalImage, locale],
   );
 
   const renderSource = useCallback(
@@ -514,98 +573,193 @@ export const MarkdownView: React.FC<MarkdownViewProps> = ({
     [baseFilePath, imageReloadVersion, imageCache, loadLocalImage],
   );
 
+  const markdownComponents = useMemo<
+    NonNullable<React.ComponentProps<typeof ReactMarkdown>["components"]>
+  >(() => {
+    const makeHeading = (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") => {
+      return ({ children }: { children?: React.ReactNode }) => {
+        const slug = uniqueSlug(extractNodeText(children), slugCountsRef.current);
+        const id = headingIdPrefix ? `${headingIdPrefix}${slug}` : undefined;
+        return <Tag id={id}>{children}</Tag>;
+      };
+    };
+
+    return {
+      h1: makeHeading("h1"),
+      h2: makeHeading("h2"),
+      h3: makeHeading("h3"),
+      h4: makeHeading("h4"),
+      h5: makeHeading("h5"),
+      h6: makeHeading("h6"),
+      img: renderImage,
+      source: renderSource,
+      span(props) {
+        const rawProps = props as React.HTMLAttributes<HTMLSpanElement> & {
+          node?: unknown;
+          "data-conductor-mention-kind"?: string;
+          "data-conductor-task-id"?: string;
+          "data-conductor-project-color"?: string;
+          "data-conductor-mention-title"?: string;
+        };
+        const mentionKind = rawProps["data-conductor-mention-kind"];
+        if (mentionKind === "task" && mentionContext) {
+          const taskId = rawProps["data-conductor-task-id"] ?? "";
+          const title = rawProps["data-conductor-mention-title"];
+          return (
+            <button
+              type="button"
+              onClick={() => mentionContext.onOpenTask(taskId)}
+              title={title}
+              className="inline-flex items-center px-1.5 py-0.2 mx-0.2 rounded-md font-mono text-[12.5px] font-semibold bg-indigo-500/20 text-indigo-700 dark:text-indigo-200 hover:bg-indigo-500/30 transition-colors cursor-pointer align-baseline"
+            >
+              {props.children}
+            </button>
+          );
+        }
+        if (mentionKind === "project") {
+          const colorHex = rawProps["data-conductor-project-color"];
+          const title = rawProps["data-conductor-mention-title"];
+          return (
+            <span
+              title={title}
+              className="inline-flex items-center px-1.5 py-0.2 mx-0.2 rounded-md font-medium text-[13px] align-baseline"
+              style={
+                colorHex
+                  ? {
+                      backgroundColor: `${colorHex}24`,
+                      color: colorHex,
+                    }
+                  : undefined
+              }
+            >
+              {props.children}
+            </span>
+          );
+        }
+        if (mentionKind === "unresolved") {
+          return (
+            <span className="inline-flex items-center px-1.5 py-0.2 mx-0.2 rounded-md font-mono text-[12.5px] bg-zinc-500/15 text-zinc-700 dark:text-zinc-300 align-baseline">
+              {props.children}
+            </span>
+          );
+        }
+        const { node: _node, ...rest } = rawProps;
+        return <span {...rest} />;
+      },
+      a({ href, children }) {
+        const classified = classifyLinkHref(href, baseFilePath);
+        const isLocalMd = classified.kind === "markdown" && Boolean(onOpenMarkdownFile);
+
+        return (
+          <a
+            href={href}
+            title={isLocalMd ? t(locale, "markdown.openInViewerTitle") : undefined}
+            onClick={(e) => {
+              if (classified.kind === "web") {
+                e.preventDefault();
+                onOpenUrl(classified.url);
+              } else if (classified.kind === "markdown" && onOpenMarkdownFile) {
+                e.preventDefault();
+                onOpenMarkdownFile(classified.target, classified.baseFilePath);
+              } else if (classified.kind === "anchor") {
+                e.preventDefault();
+                if (onScrollToHeading) {
+                  onScrollToHeading(classified.id);
+                } else if (headingIdPrefix) {
+                  const el = document.getElementById(`${headingIdPrefix}${classified.id}`);
+                  el?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+              }
+            }}
+          >
+            {isLocalMd && (
+              <FileText
+                className={`inline-block w-3.5 h-3.5 mr-1 -mt-0.5 align-middle ${
+                  isUserBubble ? "text-current" : "text-indigo-500"
+                }`}
+              />
+            )}
+            {children}
+          </a>
+        );
+      },
+      table({ children }) {
+        return (
+          <div className="conductor-md-table-wrap">
+            <table>{children}</table>
+          </div>
+        );
+      },
+      pre({ children }) {
+        const childArray = React.Children.toArray(children);
+        const firstChild =
+          childArray.length === 1 && React.isValidElement<{
+            className?: string;
+            children?: React.ReactNode;
+          }>(childArray[0])
+            ? childArray[0]
+            : null;
+
+        if (!firstChild || firstChild.type !== "code") {
+          return (
+            <pre
+              className={`${
+                isUserBubble
+                  ? "my-2 border-indigo-500/20 dark:border-indigo-400/25 bg-white/85 dark:bg-[#121520]/90 text-zinc-900 dark:text-zinc-100"
+                  : "my-2.5 border-zinc-200/80 dark:border-zinc-800 bg-zinc-50 dark:bg-[#14171f]"
+              } overflow-x-auto p-3 rounded-lg border text-[12.5px] leading-relaxed font-mono select-text`}
+            >
+              {children}
+            </pre>
+          );
+        }
+
+        const className = firstChild.props?.className ?? "";
+        const match = /language-([^\s]+)/.exec(className);
+        const language = match?.[1] ?? "";
+        const code = extractNodeText(firstChild.props?.children).replace(/\n$/, "");
+
+        if (isMermaidLanguage(language)) {
+          return <MermaidBlock code={code} locale={locale} />;
+        }
+
+        return <CodeBlock language={language} code={code} isUserBubble={isUserBubble} />;
+      },
+    };
+  }, [
+    headingIdPrefix,
+    renderImage,
+    renderSource,
+    mentionContext,
+    baseFilePath,
+    onOpenMarkdownFile,
+    locale,
+    onOpenUrl,
+    onScrollToHeading,
+    isUserBubble,
+  ]);
+
+  const variantClass =
+    variant === "document"
+      ? "conductor-markdown-doc"
+      : variant === "user"
+        ? "conductor-markdown-user"
+        : "";
+
   return (
     <div
-      className={`conductor-markdown ${
-        variant === "document" ? "conductor-markdown-doc" : ""
-      } select-text text-zinc-800 dark:text-zinc-100`}
+      className={`conductor-markdown ${variantClass} select-text ${
+        isUserBubble ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-800 dark:text-zinc-100"
+      }`}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, CONDUCTOR_SANITIZE_SCHEMA]]}
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={rehypePlugins}
         urlTransform={conductorUrlTransform}
-        components={{
-          h1: makeHeading("h1"),
-          h2: makeHeading("h2"),
-          h3: makeHeading("h3"),
-          h4: makeHeading("h4"),
-          h5: makeHeading("h5"),
-          h6: makeHeading("h6"),
-          img: renderImage,
-          source: renderSource,
-          a({ href, children }) {
-            const classified = classifyLinkHref(href, baseFilePath);
-            const isLocalMd = classified.kind === "markdown" && Boolean(onOpenMarkdownFile);
-
-            return (
-              <a
-                href={href}
-                title={isLocalMd ? "Markdown Viewer で開く" : undefined}
-                onClick={(e) => {
-                  if (classified.kind === "web") {
-                    e.preventDefault();
-                    onOpenUrl(classified.url);
-                  } else if (classified.kind === "markdown" && onOpenMarkdownFile) {
-                    e.preventDefault();
-                    onOpenMarkdownFile(classified.target, classified.baseFilePath);
-                  } else if (classified.kind === "anchor") {
-                    e.preventDefault();
-                    if (onScrollToHeading) {
-                      onScrollToHeading(classified.id);
-                    } else if (headingIdPrefix) {
-                      const el = document.getElementById(`${headingIdPrefix}${classified.id}`);
-                      el?.scrollIntoView({ behavior: "smooth", block: "start" });
-                    }
-                  }
-                }}
-              >
-                {isLocalMd && (
-                  <FileText className="inline-block w-3.5 h-3.5 mr-1 -mt-0.5 text-indigo-500 align-middle" />
-                )}
-                {children}
-              </a>
-            );
-          },
-          table({ children }) {
-            return (
-              <div className="conductor-md-table-wrap">
-                <table>{children}</table>
-              </div>
-            );
-          },
-          pre({ children }) {
-            const childArray = React.Children.toArray(children);
-            const firstChild =
-              childArray.length === 1 && React.isValidElement<{
-                className?: string;
-                children?: React.ReactNode;
-              }>(childArray[0])
-                ? childArray[0]
-                : null;
-
-            if (!firstChild || firstChild.type !== "code") {
-              return (
-                <pre className="my-2.5 overflow-x-auto p-3 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50 dark:bg-[#14171f] text-[12.5px] leading-relaxed font-mono select-text">
-                  {children}
-                </pre>
-              );
-            }
-
-            const className = firstChild.props?.className ?? "";
-            const match = /language-([^\s]+)/.exec(className);
-            const language = match?.[1] ?? "";
-            const code = extractNodeText(firstChild.props?.children).replace(/\n$/, "");
-
-            if (isMermaidLanguage(language)) {
-              return <MermaidBlock code={code} />;
-            }
-
-            return <CodeBlock language={language} code={code} />;
-          },
-        }}
+        components={markdownComponents}
       >
         {content}
       </ReactMarkdown>
     </div>
   );
-};
+});

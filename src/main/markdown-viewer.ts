@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { MarkdownDocument, MarkdownReadResult, MarkdownWatchEvent } from "../shared/types.js";
+import type {
+  MarkdownDocument,
+  MarkdownReadResult,
+  MarkdownWatchEvent,
+  MarkdownWriteResult,
+} from "../shared/types.js";
 
 export const ALLOWED_MARKDOWN_EXTENSIONS = new Set([
   ".md",
@@ -159,6 +164,133 @@ export function readLocalMarkdownFile(
   }
 }
 
+export function writeLocalMarkdownFile(
+  input: string,
+  content: string,
+  baseFilePath?: string,
+): MarkdownWriteResult {
+  if (typeof content !== "string") {
+    return {
+      ok: false,
+      filePath: input,
+      error: "書き込み内容が不正です。",
+    };
+  }
+
+  const contentBytes = Buffer.byteLength(content, "utf8");
+  if (contentBytes > MAX_MARKDOWN_FILE_BYTES) {
+    const mb = (contentBytes / (1024 * 1024)).toFixed(1);
+    return {
+      ok: false,
+      filePath: input,
+      error: `ファイルサイズが大きすぎます (${mb} MB / 上限 5 MB)。`,
+    };
+  }
+
+  const resolved = resolveLocalMarkdownPath(input, baseFilePath);
+  if (!resolved.ok) {
+    return { ok: false, filePath: input, error: resolved.error };
+  }
+
+  const targetPath = resolved.filePath;
+  let writeTarget = targetPath;
+
+  try {
+    const lstat = fs.lstatSync(targetPath);
+    if (lstat.isSymbolicLink()) {
+      let realPath: string;
+      try {
+        realPath = fs.realpathSync(targetPath);
+      } catch {
+        return {
+          ok: false,
+          filePath: targetPath,
+          error: "リンク先が見つからないため書き込みを拒否しました。",
+        };
+      }
+      if (!isAllowedMarkdownExtension(realPath)) {
+        return {
+          ok: false,
+          filePath: targetPath,
+          error: "リンク先が Markdown ファイルではないため書き込みを拒否しました。",
+        };
+      }
+      const targetStat = fs.statSync(realPath);
+      if (!targetStat.isFile()) {
+        return {
+          ok: false,
+          filePath: targetPath,
+          error: "指定されたパスは通常のファイルではありません。",
+        };
+      }
+      writeTarget = realPath;
+    } else if (!lstat.isFile()) {
+      return {
+        ok: false,
+        filePath: targetPath,
+        error: "指定されたパスは通常のファイルではありません。",
+      };
+    } else {
+      const realPath = fs.realpathSync(targetPath);
+      if (!isAllowedMarkdownExtension(realPath)) {
+        return {
+          ok: false,
+          filePath: targetPath,
+          error: "リンク先が Markdown ファイルではないため書き込みを拒否しました。",
+        };
+      }
+      writeTarget = realPath;
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") {
+      const parentDir = path.dirname(targetPath);
+      try {
+        const parentStat = fs.statSync(parentDir);
+        if (!parentStat.isDirectory()) {
+          return {
+            ok: false,
+            filePath: targetPath,
+            error: "親ディレクトリが見つかりません。",
+          };
+        }
+      } catch {
+        return {
+          ok: false,
+          filePath: targetPath,
+          error: "親ディレクトリが見つかりません。",
+        };
+      }
+      writeTarget = targetPath;
+    } else {
+      return {
+        ok: false,
+        filePath: targetPath,
+        error: `ファイルにアクセスできません: ${(err as Error).message}`,
+      };
+    }
+  }
+
+  try {
+    fs.writeFileSync(writeTarget, content, "utf8");
+    const stat = fs.statSync(writeTarget);
+    const document: MarkdownDocument = {
+      filePath: targetPath,
+      fileName: path.basename(targetPath),
+      content,
+      mtimeMs: stat.mtimeMs,
+      sizeBytes: stat.size,
+    };
+    return { ok: true, filePath: targetPath, document };
+  } catch (err) {
+    return {
+      ok: false,
+      filePath: targetPath,
+      error: `ファイルの保存に失敗しました: ${(err as Error).message}`,
+    };
+  }
+}
+
 export class MarkdownFileWatcher {
   private readonly onEvent: (event: MarkdownWatchEvent) => void;
   private readonly debounceMs: number;
@@ -176,6 +308,13 @@ export class MarkdownFileWatcher {
 
   public getWatchedFilePath(): string | null {
     return this.watchedFilePath;
+  }
+
+  public recordKnownDocument(doc: MarkdownDocument): void {
+    if (this.watchedFilePath !== doc.filePath) return;
+    this.lastMtimeMs = doc.mtimeMs;
+    this.lastSizeBytes = doc.sizeBytes;
+    this.lastContent = doc.content;
   }
 
   public watch(filePathOrUrl: string): { ok: boolean; filePath?: string; error?: string } {

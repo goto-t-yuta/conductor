@@ -5,6 +5,7 @@ import {
   renderMermaidDiagram,
   type MermaidThemeMode,
 } from "../lib/mermaid-renderer.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 function detectDarkTheme(): boolean {
   if (typeof window === "undefined" || typeof document === "undefined") {
@@ -19,6 +20,67 @@ function detectDarkTheme(): boolean {
   return false;
 }
 
+const mermaidThemeListeners = new Set<() => void>();
+let sharedDarkTheme: boolean | null = null;
+let detachSharedThemeWatchers: (() => void) | null = null;
+
+function readSharedDarkTheme(): boolean {
+  if (sharedDarkTheme === null) {
+    sharedDarkTheme = detectDarkTheme();
+  }
+  return sharedDarkTheme;
+}
+
+function subscribeMermaidTheme(listener: () => void): () => void {
+  mermaidThemeListeners.add(listener);
+
+  if (
+    mermaidThemeListeners.size === 1 &&
+    typeof window !== "undefined" &&
+    typeof document !== "undefined"
+  ) {
+    const notifyIfChanged = () => {
+      const next = detectDarkTheme();
+      if (next !== sharedDarkTheme) {
+        sharedDarkTheme = next;
+        for (const fn of mermaidThemeListeners) {
+          fn();
+        }
+      }
+    };
+
+    sharedDarkTheme = detectDarkTheme();
+    const mql =
+      typeof window.matchMedia === "function"
+        ? window.matchMedia("(prefers-color-scheme: dark)")
+        : null;
+    mql?.addEventListener?.("change", notifyIfChanged);
+
+    const observer =
+      typeof MutationObserver !== "undefined"
+        ? new MutationObserver(notifyIfChanged)
+        : null;
+    observer?.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+
+    detachSharedThemeWatchers = () => {
+      mql?.removeEventListener?.("change", notifyIfChanged);
+      observer?.disconnect();
+      detachSharedThemeWatchers = null;
+      sharedDarkTheme = null;
+    };
+  }
+
+  return () => {
+    mermaidThemeListeners.delete(listener);
+    if (mermaidThemeListeners.size === 0 && detachSharedThemeWatchers) {
+      detachSharedThemeWatchers();
+    }
+  };
+}
+
 function useMermaidTheme(): MermaidThemeMode {
   const [isDark, setIsDark] = useState<boolean>(() => detectDarkTheme());
 
@@ -26,29 +88,10 @@ function useMermaidTheme(): MermaidThemeMode {
     if (typeof window === "undefined" || typeof document === "undefined") {
       return;
     }
-
-    const update = () => setIsDark(detectDarkTheme());
-    update();
-
-    const mql =
-      typeof window.matchMedia === "function"
-        ? window.matchMedia("(prefers-color-scheme: dark)")
-        : null;
-    mql?.addEventListener?.("change", update);
-
-    const observer =
-      typeof MutationObserver !== "undefined"
-        ? new MutationObserver(update)
-        : null;
-    observer?.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class"],
-    });
-
-    return () => {
-      mql?.removeEventListener?.("change", update);
-      observer?.disconnect();
-    };
+    const sync = () => setIsDark(readSharedDarkTheme());
+    const unsub = subscribeMermaidTheme(sync);
+    sync();
+    return unsub;
   }, []);
 
   return isDark ? "dark" : "light";
@@ -56,9 +99,10 @@ function useMermaidTheme(): MermaidThemeMode {
 
 export interface MermaidBlockProps {
   code: string;
+  locale?: UiLocale;
 }
 
-export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
+export const MermaidBlock: React.FC<MermaidBlockProps> = React.memo(({ code, locale = "ja" }) => {
   const theme = useMermaidTheme();
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -125,7 +169,7 @@ export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
             <button
               type="button"
               onClick={() => setViewMode("diagram")}
-              title="Mermaid 図を表示"
+              title={t(locale, "mermaid.diagramTitle")}
               className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px] font-medium transition-colors cursor-pointer ${
                 viewMode === "diagram"
                   ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
@@ -138,7 +182,7 @@ export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
             <button
               type="button"
               onClick={() => setViewMode("code")}
-              title="Mermaid ソースを表示"
+              title={t(locale, "mermaid.codeTitle")}
               className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px] font-medium transition-colors cursor-pointer ${
                 viewMode === "code"
                   ? "bg-white dark:bg-[#1d222d] text-zinc-900 dark:text-zinc-100 shadow-xs"
@@ -175,7 +219,7 @@ export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
           <div className="flex items-start gap-2 px-3 py-2 text-[11.5px] bg-amber-500/10 text-amber-700 dark:text-amber-300">
             <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1 space-y-0.5">
-              <div className="font-medium">Mermaid 図のレンダリングに失敗しました</div>
+              <div className="font-medium">{t(locale, "mermaid.renderFailed")}</div>
               <div className="font-mono text-[11px] opacity-90 whitespace-pre-wrap break-words">
                 {error}
               </div>
@@ -197,9 +241,9 @@ export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
           className="flex items-center justify-center gap-2 p-4 text-[12px] text-zinc-500 dark:text-zinc-400 bg-white dark:bg-[#10131a]"
         >
           {isRendering && <Loader2 className="w-3.5 h-3.5 text-indigo-500 animate-spin" />}
-          <span>Mermaid 図をレンダリング中...</span>
+          <span>{t(locale, "mermaid.rendering")}</span>
         </div>
       )}
     </div>
   );
-};
+});

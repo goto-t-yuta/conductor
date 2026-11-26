@@ -18,11 +18,22 @@ import type {
   PreferredLanguage,
   Project,
   ProviderStatus,
+  RemoteAccessStatus,
   SendMessagePayload,
   TaskStatusUpdateResult,
   TaskWorktreeStatus,
+  TokenUsage,
+  UsageRecord,
+  UsageSource,
 } from "../shared/types.js";
 import { PROJECT_PALETTE } from "../shared/types.js";
+import {
+  appendUsageRecord,
+  createUsageRecord,
+  normalizeRawTokenUsage,
+  normalizeUsageRecords,
+  type NormalizedRawUsage,
+} from "../shared/usage.js";
 import {
   DEFAULT_PREFERRED_LANGUAGE,
   buildOrchestratorLanguageInstruction,
@@ -30,6 +41,13 @@ import {
   buildWorkerLanguageInstruction,
   isValidPreferredLanguage,
 } from "../shared/language.js";
+import { DEFAULT_VOICE_READBACK_ENABLED } from "../shared/voice.js";
+import {
+  getFriendlyToolLabel,
+  resolveUiLocale,
+  t,
+  type UiLocale,
+} from "../shared/i18n.js";
 import {
   MAX_CHAT_SESSIONS,
   MAX_MESSAGES_PER_SESSION,
@@ -69,9 +87,15 @@ import {
   strongestAgyModel,
   writeAgyOrchestratorMcpPlugin,
   writeClaudeMcpConfig,
+  type CliTurnUsage,
   type RunningCliTurn,
 } from "./cli-agent-runner.js";
-import { CodexAppServerClient, type CodexNotification } from "./codex-client.js";
+import {
+  CodexAppServerClient,
+  extractCodexTokenUsage,
+  type CodexExtractedTokenUsage,
+  type CodexNotification,
+} from "./codex-client.js";
 import {
   createTaskWorktree,
   getGitHeadCommit,
@@ -88,6 +112,13 @@ import {
   type MCPToolResult,
 } from "./local-mcp-server.js";
 import { mergeDiscoveredProjects, scanLocalProjectSeeds } from "./project-discovery.js";
+import {
+  DEFAULT_REMOTE_ACCESS_PORT,
+  RemoteBridgeServer,
+  generateRemoteAccessToken,
+  normalizeRemoteAccessPort,
+  type TailscaleNetworkInfo,
+} from "./remote-server.js";
 import {
   canonicalDirectory,
   getGitBranch,
@@ -116,6 +147,8 @@ interface ResponderLane {
   threadId: string;
   activeTurnId: string | null;
   activeAssistantMessageId: string | null;
+  activeModel?: string | null;
+  pendingUsage?: TokenUsage | null;
 }
 
 interface AgyResponderLane {
@@ -128,6 +161,7 @@ interface AgyResponderLane {
   hasStreamedText: boolean;
   syncPromise: Promise<void> | null;
   pendingTools: Map<string, string>;
+  pendingUsage?: NormalizedRawUsage | null;
 }
 
 interface InFlightMcpToolCall {
@@ -304,49 +338,8 @@ function extractFirstLocalUrl(text: string): string | null {
   return match ? match[0] : null;
 }
 
-function friendlyToolLabel(name: string): string {
-  switch (name) {
-    case "list_projects":
-      return "プロジェクト一覧を確認";
-    case "register_project":
-      return "プロジェクトを登録";
-    case "search_projects":
-      return "プロジェクトを検索";
-    case "scan_directory_projects":
-      return "配下のプロジェクトを一括登録";
-    case "list_tasks":
-      return "タスク一覧を確認";
-    case "create_task":
-      return "タスクを作成";
-    case "update_task":
-      return "タスクを更新";
-    case "start_worker":
-      return "ワーカーを起動";
-    case "send_to_worker":
-      return "ワーカーへ追加指示";
-    case "stop_worker":
-      return "ワーカーを停止";
-    case "get_task_detail":
-      return "タスク詳細を取得";
-    case "browser_open":
-      return "ブラウザを開く";
-    case "browser_snapshot":
-      return "画面スナップショット取得";
-    case "browser_click":
-      return "ブラウザ要素をクリック";
-    case "browser_type":
-      return "ブラウザへ文字入力";
-    case "browser_press_key":
-      return "キー操作を送信";
-    case "browser_scroll":
-      return "ブラウザをスクロール";
-    case "browser_screenshot":
-      return "ブラウザ画面を撮影";
-    case "browser_console_errors":
-      return "コンソール/通信エラー確認";
-    default:
-      return name;
-  }
+function friendlyToolLabel(name: string, locale: UiLocale = "ja"): string {
+  return getFriendlyToolLabel(name, locale);
 }
 
 export class ConductorController {
@@ -382,11 +375,20 @@ export class ConductorController {
   private defaultIntegrationMode: IntegrationMode = "feature-branch";
   private autoLandOnComplete = true;
   private preferredLanguage: PreferredLanguage = DEFAULT_PREFERRED_LANGUAGE;
+  private voiceReadbackEnabled: boolean = DEFAULT_VOICE_READBACK_ENABLED;
+  private remoteAccessEnabled = false;
+  private remoteAccessPort = DEFAULT_REMOTE_ACCESS_PORT;
+  private remoteAccessToken = generateRemoteAccessToken();
+  private usageRecords: UsageRecord[] = [];
+  private readonly codexThreadLastTotalUsage = new Map<string, NormalizedRawUsage>();
+  private readonly codexWorkerPendingUsage = new Map<string, TokenUsage>();
   private lastErrorBanner: string | null = null;
   private readonly repoLandLocks = new Map<string, Promise<unknown>>();
   private readonly activeConflictResolveTaskIds = new Set<string>();
 
   private mcpServer: LocalMCPServer | null = null;
+  private remoteServer: RemoteBridgeServer | null = null;
+  private readonly detectRemoteNetwork?: () => TailscaleNetworkInfo;
   private claudeMcpConfigPath: string | null = null;
   private agyMcpConfig: AgyAcpMcpServerConfig | null = null;
   private readonly orchestratorClient = new CodexAppServerClient("orchestrator");
@@ -410,6 +412,7 @@ export class ConductorController {
   private readonly agyBrainBaseDir: string;
   private readonly maxIdleLanes = 2;
   private snapshotTimer: NodeJS.Timeout | null = null;
+  private lastPersistedBrowserKey: string | null = null;
 
   constructor(options: {
     store: StateStore;
@@ -422,6 +425,7 @@ export class ConductorController {
       runClaudeTurn?: typeof runClaudeTurn;
     };
     agyBrainBaseDir?: string;
+    detectRemoteNetwork?: () => TailscaleNetworkInfo;
   }) {
     this.store = options.store;
     this.browser = options.browser;
@@ -434,8 +438,15 @@ export class ConductorController {
     };
     this.agyBrainBaseDir =
       options.agyBrainBaseDir ?? path.join(os.homedir(), ".gemini", "antigravity-cli", "brain");
+    this.detectRemoteNetwork = options.detectRemoteNetwork;
 
     this.loadPersisted();
+    this.remoteServer = new RemoteBridgeServer(this, {
+      port: this.remoteAccessPort,
+      token: this.remoteAccessToken,
+      detectNetwork: this.detectRemoteNetwork,
+      onClientsChanged: () => this.scheduleBroadcast(),
+    });
 
     this.orchestratorClient.onNotification((n) => this.handleOrchestratorNotification(n));
     this.orchestratorClient.onDisconnect((reason) => {
@@ -490,13 +501,38 @@ export class ConductorController {
       defaultIntegrationMode: this.defaultIntegrationMode,
       autoLandOnComplete: this.autoLandOnComplete,
       preferredLanguage: this.preferredLanguage,
+      voiceReadbackEnabled: this.voiceReadbackEnabled,
+      remoteAccessEnabled: this.remoteAccessEnabled,
+      remoteAccessPort: this.remoteAccessPort,
+      remoteAccessToken: this.remoteAccessToken,
+      remoteAccess: this.getRemoteAccessStatus(),
+      usageRecords: this.usageRecords,
       lastErrorBanner: this.lastErrorBanner,
     };
   }
 
-  public notifyBrowserChanged(): void {
-    this.persist();
-    this.broadcastSnapshot();
+  public notifyBrowserChanged(options?: { persist?: boolean }): void {
+    const shouldPersist = options?.persist !== false;
+    if (shouldPersist) {
+      const nextBrowserKey = this.computePersistedBrowserKey();
+      if (nextBrowserKey !== this.lastPersistedBrowserKey) {
+        this.persist();
+      }
+      this.broadcastSnapshot();
+      return;
+    }
+    // Coalesce transient browser metadata updates (isLoading, console/network errors, picker state)
+    // so rapid CDP / navigation events never storm IPC or disk writes.
+    this.scheduleBroadcast();
+  }
+
+  private computePersistedBrowserKey(): string {
+    const activeId = this.browser.getActiveTabId() ?? "";
+    const tabs = this.browser
+      .getTabs()
+      .map((t) => `${t.id}\0${t.title}\0${t.url}\0${t.projectId ?? ""}`)
+      .join("\n");
+    return `${activeId}\n${tabs}`;
   }
 
   public async start(): Promise<void> {
@@ -561,6 +597,12 @@ export class ConductorController {
       this.isConnected = readyLabels.length > 0;
       this.connectionStatus =
         readyLabels.length > 0 ? `${readyLabels.join(" / ")} 利用可能` : "利用可能なCLIなし";
+      if (this.remoteAccessEnabled && this.remoteServer && !this.remoteServer.isRunning()) {
+        await this.remoteServer.start({
+          port: this.remoteAccessPort,
+          token: this.remoteAccessToken,
+        });
+      }
       this.persist();
       this.broadcastSnapshot();
 
@@ -865,6 +907,9 @@ export class ConductorController {
     this.agyOrchestratorClient.stop();
     this.orchestratorClient.stop();
     this.workerClient.stop();
+    if (this.remoteServer) {
+      await this.remoteServer.stop();
+    }
     if (this.mcpServer) {
       await this.mcpServer.stop();
     }
@@ -967,6 +1012,206 @@ export class ConductorController {
     this.persist();
     this.broadcastSnapshot();
     this.refreshIdleOrchestratorLanes();
+  }
+
+  public setVoiceReadbackEnabled(enabled: boolean): void {
+    const next = Boolean(enabled);
+    if (this.voiceReadbackEnabled === next) return;
+    this.voiceReadbackEnabled = next;
+    this.persist();
+    this.broadcastSnapshot();
+  }
+
+  public clearUsageRecords(): void {
+    if (this.usageRecords.length === 0) return;
+    this.usageRecords = [];
+    this.persist();
+    this.broadcastSnapshot();
+  }
+
+  public getRemoteAccessStatus(): RemoteAccessStatus {
+    if (this.remoteServer) {
+      return this.remoteServer.getStatus(this.remoteAccessEnabled);
+    }
+    return {
+      enabled: this.remoteAccessEnabled,
+      running: false,
+      port: this.remoteAccessPort,
+      token: this.remoteAccessToken,
+      bindHost: null,
+      tailscaleIp: null,
+      magicDnsName: null,
+      lanIp: null,
+      url: null,
+      magicDnsUrl: null,
+      connectUri: null,
+      connectedClients: 0,
+      error: null,
+    };
+  }
+
+  public async setRemoteAccessEnabled(enabled: boolean): Promise<RemoteAccessStatus> {
+    const next = Boolean(enabled);
+    this.remoteAccessEnabled = next;
+    if (this.remoteServer) {
+      if (next) {
+        await this.remoteServer.start({
+          port: this.remoteAccessPort,
+          token: this.remoteAccessToken,
+        });
+      } else {
+        await this.remoteServer.stop();
+      }
+    }
+    this.persist();
+    this.broadcastSnapshot();
+    return this.getRemoteAccessStatus();
+  }
+
+  public async setRemoteAccessPort(port: number): Promise<RemoteAccessStatus> {
+    const normalized = normalizeRemoteAccessPort(port, this.remoteAccessPort);
+    this.remoteAccessPort = normalized;
+    if (this.remoteServer) {
+      if (this.remoteAccessEnabled) {
+        await this.remoteServer.start({
+          port: this.remoteAccessPort,
+          token: this.remoteAccessToken,
+        });
+      } else {
+        // Recreate stopped server instance config with updated port
+        await this.remoteServer.stop();
+        this.remoteServer = new RemoteBridgeServer(this, {
+          port: this.remoteAccessPort,
+          token: this.remoteAccessToken,
+          detectNetwork: this.detectRemoteNetwork,
+          onClientsChanged: () => this.scheduleBroadcast(),
+        });
+      }
+    }
+    this.persist();
+    this.broadcastSnapshot();
+    return this.getRemoteAccessStatus();
+  }
+
+  public regenerateRemoteAccessToken(): RemoteAccessStatus {
+    this.remoteAccessToken = generateRemoteAccessToken();
+    this.remoteServer?.setToken(this.remoteAccessToken);
+    this.persist();
+    this.broadcastSnapshot();
+    return this.getRemoteAccessStatus();
+  }
+
+  public refreshRemoteAccessStatus(): RemoteAccessStatus {
+    this.remoteServer?.refreshNetwork();
+    this.broadcastSnapshot();
+    return this.getRemoteAccessStatus();
+  }
+
+  private recordTurnUsage(input: {
+    source: UsageSource;
+    provider: AgentProvider;
+    model?: string | null;
+    projectName?: string | null;
+    taskId?: string | null;
+    tokens: TokenUsage;
+    exactCostUsd?: number | null;
+  }): void {
+    const rec = createUsageRecord(input);
+    if (!rec) return;
+    this.usageRecords = appendUsageRecord(this.usageRecords, rec);
+    this.persist();
+    this.broadcastSnapshot();
+  }
+
+  private inferChatProjectName(assistantMessageId: string | null): string | null {
+    if (!assistantMessageId) return null;
+    const msg = this.messages.find((m) => m.id === assistantMessageId);
+    if (!msg) return null;
+    const names = new Set<string>();
+    for (const ref of msg.inferredMentions ?? []) {
+      if (ref.projectName) names.add(ref.projectName);
+    }
+    if (names.size === 0 && msg.replyToMessageId) {
+      const userMsg = this.messages.find((m) => m.id === msg.replyToMessageId);
+      for (const ref of userMsg?.mentions ?? []) {
+        if (ref.projectName) names.add(ref.projectName);
+      }
+    }
+    if (names.size === 1) {
+      return [...names][0];
+    }
+    return null;
+  }
+
+  private accumulateCodexUsage(
+    threadId: string,
+    currentPending: TokenUsage | null | undefined,
+    extracted: CodexExtractedTokenUsage,
+  ): TokenUsage | null {
+    let delta: TokenUsage | null = null;
+
+    if (extracted.total) {
+      const prevTotal = this.codexThreadLastTotalUsage.get(threadId);
+      if (prevTotal) {
+        delta = {
+          inputTokens: Math.max(0, extracted.total.inputTokens - prevTotal.inputTokens),
+          cachedInputTokens: Math.max(
+            0,
+            extracted.total.cachedInputTokens - prevTotal.cachedInputTokens,
+          ),
+          cacheCreationInputTokens: Math.max(
+            0,
+            extracted.total.cacheCreationInputTokens - prevTotal.cacheCreationInputTokens,
+          ),
+          outputTokens: Math.max(0, extracted.total.outputTokens - prevTotal.outputTokens),
+          reasoningTokens: Math.max(
+            0,
+            extracted.total.reasoningTokens - prevTotal.reasoningTokens,
+          ),
+        };
+      } else {
+        delta = extracted.last ?? extracted.total;
+      }
+      this.codexThreadLastTotalUsage.set(threadId, extracted.total);
+      if (this.codexThreadLastTotalUsage.size > 200) {
+        const oldestKey = this.codexThreadLastTotalUsage.keys().next().value;
+        if (oldestKey) this.codexThreadLastTotalUsage.delete(oldestKey);
+      }
+    } else if (extracted.last) {
+      delta = extracted.last;
+    } else if (extracted.direct && !currentPending) {
+      delta = extracted.direct;
+    }
+
+    if (!delta) return currentPending ?? null;
+
+    const deltaTotal =
+      delta.inputTokens +
+      delta.cachedInputTokens +
+      (delta.cacheCreationInputTokens ?? 0) +
+      delta.outputTokens;
+    if (deltaTotal === 0) return currentPending ?? null;
+
+    if (!currentPending) {
+      return {
+        inputTokens: delta.inputTokens,
+        cachedInputTokens: delta.cachedInputTokens,
+        ...(delta.cacheCreationInputTokens ? { cacheCreationInputTokens: delta.cacheCreationInputTokens } : {}),
+        outputTokens: delta.outputTokens,
+        ...(delta.reasoningTokens ? { reasoningTokens: delta.reasoningTokens } : {}),
+      };
+    }
+
+    const cacheCreate =
+      (currentPending.cacheCreationInputTokens ?? 0) + (delta.cacheCreationInputTokens ?? 0);
+    const reasoning = (currentPending.reasoningTokens ?? 0) + (delta.reasoningTokens ?? 0);
+    return {
+      inputTokens: currentPending.inputTokens + delta.inputTokens,
+      cachedInputTokens: currentPending.cachedInputTokens + delta.cachedInputTokens,
+      ...(cacheCreate > 0 ? { cacheCreationInputTokens: cacheCreate } : {}),
+      outputTokens: currentPending.outputTokens + delta.outputTokens,
+      ...(reasoning > 0 ? { reasoningTokens: reasoning } : {}),
+    };
   }
 
   private refreshIdleOrchestratorLanes(): void {
@@ -1479,16 +1724,25 @@ export class ConductorController {
       });
 
       const promptPayload = buildPromptForTurn(needsRebind);
+      const selectedModel = this.chatModel;
+      const laneBeforeStart = this.responderLanes.find((l) => l.threadId === threadId);
+      if (laneBeforeStart) {
+        laneBeforeStart.activeModel = selectedModel;
+        laneBeforeStart.pendingUsage = null;
+      }
       const turnId = await this.orchestratorClient.startTurn({
         threadId,
         text: promptPayload,
         imagePaths,
-        model: this.chatModel,
+        model: selectedModel,
         effort: this.chatEffort,
       });
 
       const lane = this.responderLanes.find((l) => l.threadId === threadId);
-      if (lane) lane.activeTurnId = turnId;
+      if (lane) {
+        lane.activeTurnId = turnId;
+        lane.activeModel = selectedModel;
+      }
       this.updateMessage(args.assistantMessageId, (m) => {
         m.responderTurnId = turnId;
       });
@@ -1582,7 +1836,7 @@ export class ConductorController {
         this.upsertToolChip(
           args.assistantMessageId,
           ev.id,
-          friendlyToolLabel(cleanName),
+          friendlyToolLabel(cleanName, this.getUiLocale()),
           ev.detail ?? null,
           ev.completed,
           Boolean(ev.isError),
@@ -1595,6 +1849,7 @@ export class ConductorController {
         finalText: string;
         errorMessage?: string;
         interrupted?: boolean;
+        usage?: CliTurnUsage;
       }) => {
         this.activeCliResponders.delete(args.assistantMessageId);
         // If --resume failed before streaming anything, fall back cleanly with re-bound context
@@ -1610,6 +1865,16 @@ export class ConductorController {
         this.cleanupClaudeTurnMcpConfig(args.assistantMessageId);
         if (outcome.ok) {
           this.rebindContextNeeded.delete(rebindKey);
+        }
+        if (outcome.usage) {
+          this.recordTurnUsage({
+            source: "chat",
+            provider: "claude",
+            model: outcome.usage.model ?? this.chatModel ?? "claude",
+            projectName: this.inferChatProjectName(args.assistantMessageId),
+            tokens: outcome.usage,
+            exactCostUsd: outcome.usage.costUsd,
+          });
         }
         if (!outcome.ok && outcome.errorMessage && !outcome.interrupted) {
           this.updateMessage(args.assistantMessageId, (m) => {
@@ -2002,11 +2267,29 @@ export class ConductorController {
         this.broadcastSnapshot();
 
         const promptPayload = args.buildPrompt(needsRebind);
+        lane.pendingUsage = null;
         const result = await this.agyOrchestratorClient.prompt({
           sessionId: lane.sessionId,
           text: promptPayload,
           imagePaths: args.imagePaths,
         });
+
+        const agyUsage =
+          result.normalizedUsage ??
+          (result.usage ? normalizeRawTokenUsage(result.usage, "agy") : null) ??
+          lane.pendingUsage ??
+          null;
+        lane.pendingUsage = null;
+        if (agyUsage) {
+          this.recordTurnUsage({
+            source: "chat",
+            provider: "agy",
+            model: agyUsage.model ?? lane.currentModel ?? args.model ?? this.chatModel ?? "agy",
+            projectName: this.inferChatProjectName(args.assistantMessageId),
+            tokens: agyUsage,
+            exactCostUsd: agyUsage.costUsd,
+          });
+        }
 
         if (lane.cancelled) {
           void this.agyOrchestratorClient.closeSession(lane.sessionId);
@@ -2080,7 +2363,7 @@ export class ConductorController {
         this.upsertToolChip(
           messageId,
           toolId,
-          friendlyToolLabel(cleanName ?? "tool"),
+          friendlyToolLabel(cleanName ?? "tool", this.getUiLocale()),
           parsed.detail ?? null,
           parsed.completed,
           parsed.isError,
@@ -2092,6 +2375,10 @@ export class ConductorController {
         this.broadcastSnapshot();
         break;
       }
+
+      case "usageUpdate":
+        lane.pendingUsage = parsed.usage;
+        break;
 
       default:
         break;
@@ -2210,6 +2497,7 @@ export class ConductorController {
     const msgId = lane.activeAssistantMessageId;
     lane.activeAssistantMessageId = null;
     lane.activeTurnId = null;
+    lane.pendingUsage = null;
     if (msgId) {
       this.finishAssistantMessage(msgId, fallbackText);
     }
@@ -2402,10 +2690,45 @@ export class ConductorController {
         break;
       }
 
-      case "turn/completed":
+      case "thread/tokenUsage/updated":
+      case "token_count":
+      case "codex/event/token_count": {
+        const extracted = extractCodexTokenUsage(notification);
+        if (extracted) {
+          const lane = this.responderLanes[laneIdx];
+          lane.pendingUsage = this.accumulateCodexUsage(
+            notification.threadId,
+            lane.pendingUsage,
+            extracted,
+          );
+        }
+        break;
+      }
+
+      case "turn/completed": {
+        const lane = this.responderLanes[laneIdx];
+        const completedUsage = extractCodexTokenUsage(notification);
+        if (completedUsage) {
+          lane.pendingUsage = this.accumulateCodexUsage(
+            notification.threadId,
+            lane.pendingUsage,
+            completedUsage,
+          );
+        }
+        if (lane.pendingUsage) {
+          this.recordTurnUsage({
+            source: "chat",
+            provider: "codex",
+            model: lane.activeModel ?? this.chatModel ?? "codex",
+            projectName: this.inferChatProjectName(messageId),
+            tokens: lane.pendingUsage,
+          });
+          lane.pendingUsage = null;
+        }
         this.releaseLane(laneIdx);
         void this.prewarmIdleLane();
         break;
+      }
 
       case "error": {
         if (notification.params.willRetry === true) return;
@@ -2441,7 +2764,8 @@ export class ConductorController {
       const rawTool = asString(item.tool);
       const tool = rawTool ?? "tool";
       const server = asString(item.server) ?? "";
-      const label = server === "conductor" ? friendlyToolLabel(tool) : `${server}.${tool}`;
+      const label =
+        server === "conductor" ? friendlyToolLabel(tool, this.getUiLocale()) : `${server}.${tool}`;
       const toolName = rawTool
         ? server === "conductor"
           ? rawTool
@@ -2978,6 +3302,10 @@ export class ConductorController {
     });
   }
 
+  private getUiLocale(): UiLocale {
+    return resolveUiLocale(this.preferredLanguage);
+  }
+
   private formatTaskEventHeader(task: AgentTask): string {
     const providerLabel =
       task.provider === "agy" ? " · AGY" : task.provider === "claude" ? " · Claude" : "";
@@ -3050,15 +3378,20 @@ export class ConductorController {
     });
 
     if (updatedTask) {
+      const locale = this.getUiLocale();
       const filesLine =
         updatedTask.conflictFiles && updatedTask.conflictFiles.length > 0
-          ? `\n対象ファイル: ${updatedTask.conflictFiles.join(", ")}`
+          ? `\n${t(locale, "inspector.conflictFiles", { files: updatedTask.conflictFiles.join(", ") })}`
           : "";
       const targetLine = updatedTask.conflictTargetBranch
-        ? `（対象ブランチ: ${updatedTask.conflictTargetBranch}）`
+        ? locale === "en"
+          ? ` (target branch: ${updatedTask.conflictTargetBranch})`
+          : `（対象ブランチ: ${updatedTask.conflictTargetBranch}）`
         : "";
       const body = [
-        `⚠️ コンフリクトの自動解消を完了できませんでした${targetLine}。Worktree は保持されているため、Task Inspector から手動確認または「AIでコンフリクト解消」を再実行してください。`,
+        locale === "en"
+          ? `⚠️ Automatic conflict resolution could not be completed${targetLine}. The worktree has been kept — review manually or click "Resolve Conflict with AI" in Task Inspector.`
+          : `⚠️ コンフリクトの自動解消を完了できませんでした${targetLine}。Worktree は保持されているため、Task Inspector から手動確認または「AIでコンフリクト解消」を再実行してください。`,
         reason,
       ]
         .filter(Boolean)
@@ -3066,8 +3399,8 @@ export class ConductorController {
       this.appendTaskEventMessage(
         updatedTask,
         options?.exhausted
-          ? "コンフリクト未解消（自動再試行上限・手動確認が必要）"
-          : "コンフリクト自動解消に失敗（手動確認が必要）",
+          ? t(locale, "taskEvent.conflictLimitReached")
+          : t(locale, "taskEvent.conflictResolveFailed"),
         body,
       );
     }
@@ -3348,19 +3681,20 @@ export class ConductorController {
     if (!latestTask) return;
 
     if (lockedOutcome.skippedNonLocalMode) {
+      const locale = this.getUiLocale();
       let finishedTask: AgentTask | undefined;
-      this.updateTask(taskId, (t) => {
-        t.status = "needs_review";
-        if (t.landStatus === "landing") t.landStatus = "unlanded";
-        t.currentStep = "完了・確認待ち";
-        t.updatedAt = new Date().toISOString();
-        finishedTask = t;
+      this.updateTask(taskId, (tTask) => {
+        tTask.status = "needs_review";
+        if (tTask.landStatus === "landing") tTask.landStatus = "unlanded";
+        tTask.currentStep = t(locale, "taskStep.completedReview");
+        tTask.updatedAt = new Date().toISOString();
+        finishedTask = tTask;
       });
       if (finishedTask) {
         this.appendTaskEventMessage(
           finishedTask,
-          "完了（確認待ち）",
-          options.completionExcerpt || "(出力なし)",
+          t(locale, "taskEvent.completedReview"),
+          options.completionExcerpt || t(locale, "taskEvent.noOutput"),
         );
       }
       this.persist();
@@ -3370,53 +3704,58 @@ export class ConductorController {
 
     const { result } = lockedOutcome;
     const now = new Date().toISOString();
+    const locale = this.getUiLocale();
 
     if (result.action === "landed" || result.action === "noop") {
       let updatedTask: AgentTask | undefined;
       const resolvedAfterConflict =
         options.wasConflictResolveTurn || (latestTask.autoResolveConflictAttempts ?? 0) > 0;
-      this.updateTask(taskId, (t) => {
-        t.status = "needs_review";
-        t.landStatus = "landed";
-        t.landedBranch = result.targetBranch ?? null;
-        t.landedCommit = result.commitHash ?? null;
-        t.worktreePath = null;
-        t.worktreeBranch = null;
-        t.landError = null;
-        t.conflictFiles = undefined;
-        t.conflictParentHead = null;
-        t.conflictTargetBranch = null;
-        t.autoResolveConflictAttempts = undefined;
-        t.currentStep =
+      this.updateTask(taskId, (tTask) => {
+        tTask.status = "needs_review";
+        tTask.landStatus = "landed";
+        tTask.landedBranch = result.targetBranch ?? null;
+        tTask.landedCommit = result.commitHash ?? null;
+        tTask.worktreePath = null;
+        tTask.worktreeBranch = null;
+        tTask.landError = null;
+        tTask.conflictFiles = undefined;
+        tTask.conflictParentHead = null;
+        tTask.conflictTargetBranch = null;
+        tTask.autoResolveConflictAttempts = undefined;
+        tTask.currentStep =
           result.action === "noop"
-            ? "完了・確認待ち (変更なし)"
+            ? t(locale, "taskStep.completedNoChanges")
             : result.targetBranch
-              ? `完了・確認待ち (Landed → ${result.targetBranch})`
-              : "完了・確認待ち (Landed)";
-        t.activities.push({
+              ? t(locale, "taskStep.completedLandedBranch", { branch: result.targetBranch })
+              : t(locale, "taskStep.completedLanded");
+        tTask.activities.push({
           id: crypto.randomUUID(),
           kind: "system",
           title:
             result.action === "noop"
-              ? "自動 Land (変更なし)"
-              : `自動 Land 完了 → ${result.targetBranch ?? "branch"}`,
+              ? locale === "en"
+                ? "Auto-land (no changes)"
+                : "自動 Land (変更なし)"
+              : locale === "en"
+                ? `Auto-land completed → ${result.targetBranch ?? "branch"}`
+                : `自動 Land 完了 → ${result.targetBranch ?? "branch"}`,
           detail: result.message,
           timestamp: now,
         });
-        t.updatedAt = now;
-        updatedTask = t;
+        tTask.updatedAt = now;
+        updatedTask = tTask;
       });
 
       if (updatedTask) {
-        const targetLabel = result.targetBranch ?? "(変更なし)";
+        const targetLabel = result.targetBranch ?? t(locale, "taskEvent.noChangesLabel");
         const landSummaryLine =
           result.action === "noop"
-            ? `✅ 自動 Land 完了: ${targetLabel}（差分なし・Worktree クリーンアップ済み）`
+            ? t(locale, "taskEvent.autoLandNoop", { target: targetLabel })
             : resolvedAfterConflict
-              ? `✅ 自動 Land 完了: ${targetLabel}（コンフリクト自力解消済み）`
-              : `✅ 自動 Land 完了: ${targetLabel}`;
-        const body = `${landSummaryLine}\n${options.completionExcerpt || "(出力なし)"}`;
-        this.appendTaskEventMessage(updatedTask, "完了（確認待ち）", body);
+              ? t(locale, "taskEvent.autoLandResolved", { target: targetLabel })
+              : t(locale, "taskEvent.autoLandSuccess", { target: targetLabel });
+        const body = `${landSummaryLine}\n${options.completionExcerpt || t(locale, "taskEvent.noOutput")}`;
+        this.appendTaskEventMessage(updatedTask, t(locale, "taskEvent.completedReview"), body);
       }
       this.persist();
       this.broadcastSnapshot();
@@ -3464,26 +3803,30 @@ export class ConductorController {
 
     // Non-conflict error (e.g., parent repo has uncommitted changes): NEVER run AI conflict resolution
     let updatedTask: AgentTask | undefined;
-    this.updateTask(taskId, (t) => {
-      t.status = "needs_review";
-      t.landStatus = "error";
-      t.landError = result.message;
-      t.conflictFiles = undefined;
-      t.currentStep = "完了・自動 Land エラー";
-      t.activities.push({
+    this.updateTask(taskId, (tTask) => {
+      tTask.status = "needs_review";
+      tTask.landStatus = "error";
+      tTask.landError = result.message;
+      tTask.conflictFiles = undefined;
+      tTask.currentStep = t(locale, "taskStep.autoLandError");
+      tTask.activities.push({
         id: crypto.randomUUID(),
         kind: "error",
-        title: "自動 Land エラー",
+        title: locale === "en" ? "Auto-land error" : "自動 Land エラー",
         detail: result.message,
         timestamp: now,
       });
-      t.updatedAt = now;
-      updatedTask = t;
+      tTask.updatedAt = now;
+      updatedTask = tTask;
     });
 
     if (updatedTask) {
-      const body = `⚠️ 自動 Land を実行できませんでした: ${result.message}\n${options.completionExcerpt || "(出力なし)"}`;
-      this.appendTaskEventMessage(updatedTask, "完了（確認待ち・未Land）", body);
+      const body = `${t(locale, "taskEvent.autoLandFailed", { message: result.message })}\n${options.completionExcerpt || t(locale, "taskEvent.noOutput")}`;
+      this.appendTaskEventMessage(
+        updatedTask,
+        t(locale, "taskEvent.completedReviewUnlanded"),
+        body,
+      );
     }
     this.persist();
     this.broadcastSnapshot();
@@ -3543,6 +3886,7 @@ export class ConductorController {
 
     switch (notification.method) {
       case "turn/started":
+        this.codexWorkerPendingUsage.delete(taskId);
         this.updateTask(taskId, (t) => {
           t.status = "running";
           t.activeTurnId = notification.turnId;
@@ -3628,9 +3972,42 @@ export class ConductorController {
         break;
       }
 
+      case "thread/tokenUsage/updated":
+      case "token_count":
+      case "codex/event/token_count": {
+        const extracted = extractCodexTokenUsage(notification);
+        if (extracted) {
+          const nextPending = this.accumulateCodexUsage(
+            notification.threadId,
+            this.codexWorkerPendingUsage.get(taskId),
+            extracted,
+          );
+          if (nextPending) {
+            this.codexWorkerPendingUsage.set(taskId, nextPending);
+          }
+        }
+        break;
+      }
+
       case "turn/completed": {
         if (notification.turnId && task.activeTurnId && notification.turnId !== task.activeTurnId) {
           return;
+        }
+        const completedUsage = extractCodexTokenUsage(notification);
+        let turnUsage = this.codexWorkerPendingUsage.get(taskId) ?? null;
+        if (completedUsage) {
+          turnUsage = this.accumulateCodexUsage(notification.threadId, turnUsage, completedUsage);
+        }
+        this.codexWorkerPendingUsage.delete(taskId);
+        if (turnUsage) {
+          this.recordTurnUsage({
+            source: "worker",
+            provider: "codex",
+            model: task.workerModel ?? this.workerModel ?? "codex",
+            projectName: task.projectName,
+            taskId: task.id,
+            tokens: turnUsage,
+          });
         }
         const turnStatus = asString(asRecord(notification.params.turn)?.status) ?? "completed";
         const wasConflictResolveTurn = this.activeConflictResolveTaskIds.has(taskId);
@@ -3646,26 +4023,29 @@ export class ConductorController {
             );
             break;
           }
+          const locale = this.getUiLocale();
           let updatedTask: AgentTask | undefined;
-          this.updateTask(taskId, (t) => {
-            t.activeTurnId = null;
-            t.autoResumeOnStartup = false;
-            t.updatedAt = new Date().toISOString();
+          this.updateTask(taskId, (tTask) => {
+            tTask.activeTurnId = null;
+            tTask.autoResumeOnStartup = false;
+            tTask.updatedAt = new Date().toISOString();
             if (turnStatus === "failed") {
-              t.status = "failed";
-              t.currentStep = "エラーで終了";
+              tTask.status = "failed";
+              tTask.currentStep = t(locale, "taskStep.failed");
             } else {
-              t.status = "needs_review";
-              t.currentStep = "中断されました";
+              tTask.status = "needs_review";
+              tTask.currentStep = t(locale, "taskStep.interrupted");
             }
-            updatedTask = t;
+            updatedTask = tTask;
           });
           if (updatedTask) {
             const excerpt = updatedTask.latestOutput.trim().slice(0, 420);
             this.appendTaskEventMessage(
               updatedTask,
-              updatedTask.status === "failed" ? "失敗" : "完了（確認待ち）",
-              excerpt || "(出力なし)",
+              updatedTask.status === "failed"
+                ? t(locale, "taskEvent.failed")
+                : t(locale, "taskEvent.completedReview"),
+              excerpt || t(locale, "taskEvent.noOutput"),
             );
           }
           this.persist();
@@ -3678,15 +4058,16 @@ export class ConductorController {
           this.isTaskEligibleForAutoLand(task);
 
         if (shouldAutoLand) {
+          const locale = this.getUiLocale();
           let excerpt = "";
-          this.updateTask(taskId, (t) => {
-            t.activeTurnId = null;
-            t.autoResumeOnStartup = false;
-            t.status = "running";
-            t.landStatus = "landing";
-            t.currentStep = "自動 Land を実行中...";
-            t.updatedAt = new Date().toISOString();
-            excerpt = t.latestOutput.trim().slice(0, 420);
+          this.updateTask(taskId, (tTask) => {
+            tTask.activeTurnId = null;
+            tTask.autoResumeOnStartup = false;
+            tTask.status = "running";
+            tTask.landStatus = "landing";
+            tTask.currentStep = t(locale, "taskStep.autoLanding");
+            tTask.updatedAt = new Date().toISOString();
+            excerpt = tTask.latestOutput.trim().slice(0, 420);
           });
           this.persist();
           this.broadcastSnapshot();
@@ -3697,19 +4078,24 @@ export class ConductorController {
           break;
         }
 
+        const locale = this.getUiLocale();
         let updatedTask: AgentTask | undefined;
-        this.updateTask(taskId, (t) => {
-          t.activeTurnId = null;
-          t.autoResumeOnStartup = false;
-          t.updatedAt = new Date().toISOString();
-          t.status = "needs_review";
-          t.currentStep = "完了・確認待ち";
-          updatedTask = t;
+        this.updateTask(taskId, (tTask) => {
+          tTask.activeTurnId = null;
+          tTask.autoResumeOnStartup = false;
+          tTask.updatedAt = new Date().toISOString();
+          tTask.status = "needs_review";
+          tTask.currentStep = t(locale, "taskStep.completedReview");
+          updatedTask = tTask;
         });
 
         if (updatedTask) {
           const excerpt = updatedTask.latestOutput.trim().slice(0, 420);
-          this.appendTaskEventMessage(updatedTask, "完了（確認待ち）", excerpt || "(出力なし)");
+          this.appendTaskEventMessage(
+            updatedTask,
+            t(locale, "taskEvent.completedReview"),
+            excerpt || t(locale, "taskEvent.noOutput"),
+          );
         }
         this.persist();
         this.broadcastSnapshot();
@@ -4577,12 +4963,13 @@ export class ConductorController {
       failedTask = t;
     });
     if (failedTask) {
+      const locale = this.getUiLocale();
       this.appendMessagesToActiveChat([
         {
           id: crypto.randomUUID(),
           role: "taskEvent",
           provider: failedTask.provider,
-          text: `**[${formatTaskCode(failedTask.taskNumber)} · ${failedTask.projectName}] ${failedTask.title}** — 自動再開に失敗しました\n${reason}`,
+          text: `**[${formatTaskCode(failedTask.taskNumber)} · ${failedTask.projectName}] ${failedTask.title}** — ${t(locale, "taskEvent.autoResumeFailed")}\n${reason}`,
           attachments: [],
           toolChips: [],
           relatedTaskId: failedTask.id,
@@ -4687,14 +5074,17 @@ export class ConductorController {
             ? `再起動後に自動再開 (${label} セッション継続)`
             : `再起動後に自動再開 (${label} 新規セッション)`,
         });
+        const locale = this.getUiLocale();
         this.appendMessagesToActiveChat([
           {
             id: crypto.randomUUID(),
             role: "taskEvent",
             provider: chosenProvider,
-            text: `**[${formatTaskCode(task.taskNumber)} · ${task.projectName} · ${label}] ${task.title}** — 再起動後に自動再開しました（${
-              hasSavedSession ? "セッション継続" : "新規セッションで再実行"
-            }）`,
+            text: `**[${formatTaskCode(task.taskNumber)} · ${task.projectName} · ${label}] ${task.title}** — ${
+              hasSavedSession
+                ? t(locale, "taskEvent.autoResumedSession")
+                : t(locale, "taskEvent.autoResumedNew")
+            }`,
             attachments: [],
             toolChips: [],
             relatedTaskId: task.id,
@@ -4785,14 +5175,17 @@ export class ConductorController {
         });
         t.updatedAt = now;
       });
+      const locale = this.getUiLocale();
       this.appendMessagesToActiveChat([
         {
           id: crypto.randomUUID(),
           role: "taskEvent",
           provider: "codex",
-          text: `**[${formatTaskCode(task.taskNumber)} · ${task.projectName} · Codex] ${task.title}** — 再起動後に自動再開しました（${
-            usedSessionResume ? "セッション継続" : "新規セッションで再実行"
-          }）`,
+          text: `**[${formatTaskCode(task.taskNumber)} · ${task.projectName} · Codex] ${task.title}** — ${
+            usedSessionResume
+              ? t(locale, "taskEvent.autoResumedSession")
+              : t(locale, "taskEvent.autoResumedNew")
+          }`,
           attachments: [],
           toolChips: [],
           relatedTaskId: task.id,
@@ -5141,6 +5534,7 @@ export class ConductorController {
         finalText: string;
         errorMessage?: string;
         interrupted?: boolean;
+        usage?: CliTurnUsage;
       }) => {
         if (!this.isCurrentCliWorkerGeneration(args.taskId, generation)) {
           return;
@@ -5184,6 +5578,18 @@ export class ConductorController {
           return;
         }
 
+        if (outcome.usage) {
+          this.recordTurnUsage({
+            source: "worker",
+            provider: args.provider,
+            model: outcome.usage.model ?? args.model ?? args.provider,
+            projectName: args.project.name,
+            taskId: args.taskId,
+            tokens: outcome.usage,
+            exactCostUsd: outcome.usage.costUsd,
+          });
+        }
+
         const wasConflictResolveTurn = this.activeConflictResolveTaskIds.has(args.taskId);
         this.activeConflictResolveTaskIds.delete(args.taskId);
 
@@ -5213,16 +5619,17 @@ export class ConductorController {
             return;
           }
 
+          const locale = this.getUiLocale();
           let finishedTask: AgentTask | undefined;
-          this.updateTask(args.taskId, (t) => {
+          this.updateTask(args.taskId, (tTask) => {
             if (outcome.interrupted) {
-              t.status = "needs_review";
-              t.currentStep = "中断されました";
+              tTask.status = "needs_review";
+              tTask.currentStep = t(locale, "taskStep.interrupted");
             } else {
-              t.status = "failed";
-              t.currentStep = "エラーで終了";
+              tTask.status = "failed";
+              tTask.currentStep = t(locale, "taskStep.failed");
               if (outcome.errorMessage) {
-                t.activities.push({
+                tTask.activities.push({
                   id: crypto.randomUUID(),
                   kind: "error",
                   title: `${label} error`,
@@ -5231,8 +5638,8 @@ export class ConductorController {
                 });
               }
             }
-            t.updatedAt = new Date().toISOString();
-            finishedTask = t;
+            tTask.updatedAt = new Date().toISOString();
+            finishedTask = tTask;
           });
 
           if (finishedTask) {
@@ -5241,8 +5648,10 @@ export class ConductorController {
               .slice(0, 420);
             this.appendTaskEventMessage(
               finishedTask,
-              finishedTask.status === "failed" ? "失敗" : "完了（確認待ち）",
-              excerpt || "(出力なし)",
+              finishedTask.status === "failed"
+                ? t(locale, "taskEvent.failed")
+                : t(locale, "taskEvent.completedReview"),
+              excerpt || t(locale, "taskEvent.noOutput"),
             );
           }
           this.persist();
@@ -5256,14 +5665,15 @@ export class ConductorController {
           this.isTaskEligibleForAutoLand(preparedTask!);
 
         if (shouldAutoLand && preparedTask) {
+          const locale = this.getUiLocale();
           const excerpt = (preparedTask.latestOutput || outcome.finalText || "")
             .trim()
             .slice(0, 420);
-          this.updateTask(args.taskId, (t) => {
-            t.status = "running";
-            t.landStatus = "landing";
-            t.currentStep = "自動 Land を実行中...";
-            t.updatedAt = new Date().toISOString();
+          this.updateTask(args.taskId, (tTask) => {
+            tTask.status = "running";
+            tTask.landStatus = "landing";
+            tTask.currentStep = t(locale, "taskStep.autoLanding");
+            tTask.updatedAt = new Date().toISOString();
           });
           this.persist();
           this.broadcastSnapshot();
@@ -5274,19 +5684,24 @@ export class ConductorController {
           return;
         }
 
+        const locale = this.getUiLocale();
         let finishedTask: AgentTask | undefined;
-        this.updateTask(args.taskId, (t) => {
-          t.status = "needs_review";
-          t.currentStep = "完了・確認待ち";
-          t.updatedAt = new Date().toISOString();
-          finishedTask = t;
+        this.updateTask(args.taskId, (tTask) => {
+          tTask.status = "needs_review";
+          tTask.currentStep = t(locale, "taskStep.completedReview");
+          tTask.updatedAt = new Date().toISOString();
+          finishedTask = tTask;
         });
 
         if (finishedTask) {
           const excerpt = (finishedTask.latestOutput || outcome.errorMessage || "")
             .trim()
             .slice(0, 420);
-          this.appendTaskEventMessage(finishedTask, "完了（確認待ち）", excerpt || "(出力なし)");
+          this.appendTaskEventMessage(
+            finishedTask,
+            t(locale, "taskEvent.completedReview"),
+            excerpt || t(locale, "taskEvent.noOutput"),
+          );
         }
         this.persist();
         this.broadcastSnapshot();
@@ -5359,6 +5774,18 @@ export class ConductorController {
     this.preferredLanguage = isValidPreferredLanguage(saved.preferredLanguage)
       ? saved.preferredLanguage
       : DEFAULT_PREFERRED_LANGUAGE;
+    this.voiceReadbackEnabled =
+      typeof saved.voiceReadbackEnabled === "boolean"
+        ? saved.voiceReadbackEnabled
+        : DEFAULT_VOICE_READBACK_ENABLED;
+    this.remoteAccessEnabled =
+      typeof saved.remoteAccessEnabled === "boolean" ? saved.remoteAccessEnabled : false;
+    this.remoteAccessPort = normalizeRemoteAccessPort(saved.remoteAccessPort);
+    this.remoteAccessToken =
+      typeof saved.remoteAccessToken === "string" && saved.remoteAccessToken.trim().length >= 16
+        ? saved.remoteAccessToken.trim()
+        : generateRemoteAccessToken();
+    this.usageRecords = normalizeUsageRecords(saved.usageRecords);
     this.browser.restore(saved.browserTabs, saved.activeBrowserTabId);
     if (normalized.changed || normalizedChats.changed || resumePrep.changed) {
       this.persist();
@@ -5367,6 +5794,7 @@ export class ConductorController {
 
   private persist(): void {
     this.syncActiveChatSession(false);
+    this.lastPersistedBrowserKey = this.computePersistedBrowserKey();
     this.store.save({
       projects: this.projects,
       scanRoots: this.scanRoots,
@@ -5393,6 +5821,11 @@ export class ConductorController {
       defaultIntegrationMode: this.defaultIntegrationMode,
       autoLandOnComplete: this.autoLandOnComplete,
       preferredLanguage: this.preferredLanguage,
+      voiceReadbackEnabled: this.voiceReadbackEnabled,
+      remoteAccessEnabled: this.remoteAccessEnabled,
+      remoteAccessPort: this.remoteAccessPort,
+      remoteAccessToken: this.remoteAccessToken,
+      usageRecords: this.usageRecords,
     });
   }
 
@@ -5401,7 +5834,7 @@ export class ConductorController {
     this.snapshotTimer = setTimeout(() => {
       this.snapshotTimer = null;
       this.broadcastSnapshot();
-    }, 32);
+    }, 50);
   }
 
   private broadcastSnapshot(): void {
@@ -5409,6 +5842,8 @@ export class ConductorController {
       clearTimeout(this.snapshotTimer);
       this.snapshotTimer = null;
     }
-    this.emitSnapshot(this.getSnapshot());
+    const snapshot = this.getSnapshot();
+    this.emitSnapshot(snapshot);
+    this.remoteServer?.publishSnapshot(snapshot);
   }
 }

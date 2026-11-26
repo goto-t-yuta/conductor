@@ -20,12 +20,14 @@ import {
   formatFileTreeIpcError,
   type ProjectFileEntry,
 } from "../../shared/file-tree.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 export interface ProjectFileTreeProps {
   projectName: string;
   projectPath: string | null;
   projectColorHex: string;
   activeFilePath: string | null;
+  locale?: UiLocale;
   onOpenFile: (entry: ProjectFileEntry) => void;
   onRevealInFinder?: (filePath: string) => void;
   /** Optional preloaded directory map (primarily for deterministic SSR/unit tests) */
@@ -37,6 +39,7 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
   projectPath,
   projectColorHex,
   activeFilePath,
+  locale = "ja",
   onOpenFile,
   onRevealInFinder,
   initialEntriesByDir,
@@ -86,7 +89,7 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
             });
           }
         } else {
-          const msg = res.error ?? "ディレクトリを読み込めませんでした。";
+          const msg = res.error ?? t(locale, "fileTree.loadDirError");
           if (dirPath === rootDir) {
             setRootError(msg);
           } else {
@@ -95,7 +98,7 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
         }
       } catch (err) {
         if (projectPathRef.current !== rootDir) return;
-        const msg = formatFileTreeIpcError(err, "ディレクトリを読み込めませんでした。");
+        const msg = formatFileTreeIpcError(err, t(locale, "fileTree.loadDirError"));
         if (dirPath === rootDir) {
           setRootError(msg);
         } else {
@@ -110,7 +113,7 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
         });
       }
     },
-    [],
+    [locale],
   );
 
   // Reset & reload tree root whenever the active right-pane project changes
@@ -211,7 +214,7 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
             className="flex items-center gap-1.5 py-1 text-[11px] text-zinc-400"
           >
             <Loader2 className="w-3 h-3 animate-spin" />
-            <span>読み込み中...</span>
+            <span>{t(locale, "common.loading")}</span>
           </div>
         );
       }
@@ -223,8 +226,8 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
         return (
           <div className="px-3 py-6 text-center text-[11px] text-zinc-400">
             {isFiltering
-              ? "一致するファイルがありません"
-              : "表示できるファイルがありません"}
+              ? t(locale, "fileTree.noMatches")
+              : t(locale, "fileTree.noFiles")}
           </div>
         );
       }
@@ -233,7 +236,7 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
           style={{ paddingLeft: `${16 + depth * 12}px` }}
           className="py-0.5 text-[10.5px] text-zinc-400 italic"
         >
-          (空)
+          {t(locale, "fileTree.emptyDir")}
         </div>
       );
     }
@@ -305,7 +308,7 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
   return (
     <aside
       data-testid="project-file-tree"
-      aria-label="プロジェクトファイルツリー"
+      aria-label={t(locale, "fileTree.aria")}
       className="h-full flex flex-col bg-zinc-50/90 dark:bg-[#11141a] select-none overflow-hidden"
     >
       {/* Sidebar Header */}
@@ -328,8 +331,8 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
             <button
               type="button"
               onClick={() => onRevealInFinder(projectPath)}
-              title="Finder でフォルダを開く"
-              aria-label="Finder でフォルダを開く"
+              title={t(locale, "fileTree.revealFolder")}
+              aria-label={t(locale, "fileTree.revealFolder")}
               className="p-1 rounded text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
             >
               <FolderOpen className="w-3 h-3" />
@@ -340,8 +343,8 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
               type="button"
               data-testid="file-tree-refresh-btn"
               onClick={() => void handleRefresh()}
-              title="ファイルツリーを更新"
-              aria-label="ファイルツリーを更新"
+              title={t(locale, "fileTree.refresh")}
+              aria-label={t(locale, "fileTree.refresh")}
               className="p-1 rounded text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
             >
               <RotateCw
@@ -363,10 +366,10 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
           </div>
           <div className="space-y-1">
             <div className="text-[11.5px] font-medium text-zinc-700 dark:text-zinc-200">
-              プロジェクトを選択してください
+              {t(locale, "fileTree.selectProjectTitle")}
             </div>
             <p className="text-[10.5px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-              現在は General スコープです。上部のプロジェクト切替からプロジェクトを選ぶと、配下のファイルツリーを閲覧できます。
+              {t(locale, "fileTree.selectProjectDesc")}
             </p>
           </div>
         </div>
@@ -381,14 +384,14 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
                 data-testid="file-tree-search-input"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="ファイル名で絞り込み..."
+                placeholder={t(locale, "fileTree.filterPlaceholder")}
                 className="w-full pl-6 pr-6 py-1 rounded-md text-[11px] bg-white dark:bg-[#0f1115] border border-zinc-200/80 dark:border-zinc-800 focus:border-indigo-500/60 outline-none select-text"
               />
               {searchQuery && (
                 <button
                   type="button"
                   onClick={() => setSearchQuery("")}
-                  aria-label="絞り込みをクリア"
+                  aria-label={t(locale, "fileTree.clearFilterAria")}
                   className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
                 >
                   <X className="w-2.5 h-2.5" />
@@ -408,7 +411,7 @@ export const ProjectFileTree: React.FC<ProjectFileTreeProps> = ({
                   onClick={() => void handleRefresh()}
                   className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-zinc-200/80 dark:bg-zinc-800 hover:bg-zinc-300/80 dark:hover:bg-zinc-700 cursor-pointer"
                 >
-                  再試行
+                  {t(locale, "common.retry")}
                 </button>
               </div>
             ) : (

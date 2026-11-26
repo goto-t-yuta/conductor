@@ -9,12 +9,14 @@ import {
   Trash2,
 } from "lucide-react";
 import type { AgentProvider, ChatSessionSummary } from "../../shared/types.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 export interface ChatSessionControlsProps {
   sessions: ChatSessionSummary[];
   activeSessionId: string;
   activeMessageCount: number;
   activeResponderCount: number;
+  locale?: UiLocale;
   newChatConfirmTrigger?: number;
   defaultHistoryOpen?: boolean;
   defaultConfirmNewChatOpen?: boolean;
@@ -23,18 +25,22 @@ export interface ChatSessionControlsProps {
   onDeleteSession: (sessionId: string) => void;
 }
 
-export function formatRelativeSessionTime(iso: string, nowMs = Date.now()): string {
+export function formatRelativeSessionTime(
+  iso: string,
+  nowMs = Date.now(),
+  locale: UiLocale = "ja",
+): string {
   const ts = Date.parse(iso);
   if (!Number.isFinite(ts)) return "";
   const diffSec = Math.max(0, Math.floor((nowMs - ts) / 1000));
-  if (diffSec < 45) return "たった今";
+  if (diffSec < 45) return t(locale, "history.timeJustNow");
   const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}分前`;
+  if (diffMin < 60) return t(locale, "history.timeMinutesAgo", { count: diffMin });
   const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}時間前`;
+  if (diffHr < 24) return t(locale, "history.timeHoursAgo", { count: diffHr });
   const diffDays = Math.floor(diffHr / 24);
-  if (diffDays === 1) return "昨日";
-  if (diffDays < 7) return `${diffDays}日前`;
+  if (diffDays === 1) return t(locale, "history.timeYesterday");
+  if (diffDays < 7) return t(locale, "history.timeDaysAgo", { count: diffDays });
   const d = new Date(ts);
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
@@ -57,6 +63,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
   activeSessionId,
   activeMessageCount,
   activeResponderCount,
+  locale = "ja",
   newChatConfirmTrigger = 0,
   defaultHistoryOpen = false,
   defaultConfirmNewChatOpen = false,
@@ -163,7 +170,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
             setPendingDeleteId(null);
             setHistoryOpen((v) => !v);
           }}
-          title="チャット履歴 — 過去のチャットをワンクリックで復元"
+          title={t(locale, "history.buttonTitle")}
           className={`inline-flex items-center gap-1 px-1.5 py-1 rounded-md text-[11.5px] transition-colors cursor-pointer ${
             historyOpen
               ? "text-indigo-500 bg-indigo-500/10"
@@ -198,7 +205,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
                 <div className="flex items-center gap-1.5">
                   <History className="w-3.5 h-3.5 text-indigo-500" />
                   <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">
-                    チャット履歴
+                    {t(locale, "history.title")}
                   </span>
                   <span className="text-[11px] text-zinc-400">
                     ({savedSessionCount})
@@ -211,7 +218,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
                   className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 transition-colors cursor-pointer"
                 >
                   <Plus className="w-3 h-3" />
-                  新規チャット
+                  {t(locale, "history.newChat")}
                 </button>
               </div>
 
@@ -223,7 +230,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="履歴を検索..."
+                      placeholder={t(locale, "history.searchPlaceholder")}
                       className="w-full pl-7 pr-2.5 py-1 rounded-lg text-[11.5px] bg-zinc-100 dark:bg-zinc-800/80 text-zinc-800 dark:text-zinc-100 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
                     />
                   </div>
@@ -233,7 +240,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
               <div className="max-h-[340px] overflow-y-auto divide-y divide-zinc-100 dark:divide-zinc-800/70">
                 {filteredSessions.length === 0 ? (
                   <div className="px-4 py-6 text-center text-[12px] text-zinc-400">
-                    一致するチャット履歴がありません
+                    {t(locale, "history.noMatches")}
                   </div>
                 ) : (
                   filteredSessions.map((session) => {
@@ -285,7 +292,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
                                 data-testid="chat-history-active-badge"
                                 className="shrink-0 px-1.5 py-0.5 rounded text-[9.5px] font-semibold bg-indigo-500/15 text-indigo-600 dark:text-indigo-300"
                               >
-                                表示中
+                                {t(locale, "history.activeBadge")}
                               </span>
                             )}
                           </div>
@@ -296,14 +303,14 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
                             </p>
                           ) : (
                             <p className="text-[11px] text-zinc-400 italic mt-0.5">
-                              メッセージなし
+                              {t(locale, "history.noMessages")}
                             </p>
                           )}
 
                           <div className="flex items-center gap-2 mt-1 text-[10.5px] text-zinc-400">
-                            <span>{formatRelativeSessionTime(session.updatedAt)}</span>
+                            <span>{formatRelativeSessionTime(session.updatedAt, Date.now(), locale)}</span>
                             <span>·</span>
-                            <span>{session.messageCount}件</span>
+                            <span>{t(locale, "history.messageCount", { count: session.messageCount })}</span>
                             {provLabel && (
                               <>
                                 <span>·</span>
@@ -331,21 +338,21 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
                                 }}
                                 className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-500 text-white hover:bg-rose-600 cursor-pointer"
                               >
-                                削除
+                                {t(locale, "common.delete")}
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setPendingDeleteId(null)}
                                 className="px-1.5 py-0.5 rounded text-[10px] text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 cursor-pointer"
                               >
-                                戻す
+                                {t(locale, "history.undo")}
                               </button>
                             </div>
                           ) : (
                             <button
                               type="button"
                               data-testid={`chat-history-delete-${session.id}`}
-                              title="このチャットを履歴から削除"
+                              title={t(locale, "history.deleteTitle")}
                               onClick={() => setPendingDeleteId(session.id)}
                               className="p-1 rounded text-zinc-400 opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer"
                             >
@@ -369,7 +376,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
           type="button"
           data-testid="new-chat-button"
           onClick={handleNewChatButtonClick}
-          title="新しいチャットを開始 (⌘N) — 現在のチャットは履歴に保存されます"
+          title={t(locale, "history.newChatBtnTitle")}
           className={`p-1.5 rounded-md transition-colors cursor-pointer ${
             confirmNewChatOpen
               ? "text-indigo-500 bg-indigo-500/10"
@@ -388,19 +395,19 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
             <div
               data-testid="new-chat-confirm-popover"
               role="dialog"
-              aria-label="新しいチャットを開始する確認"
+              aria-label={t(locale, "history.confirmDialogAria")}
               className="absolute right-0 mt-1.5 z-40 w-[290px] rounded-xl bg-white dark:bg-[#191d26] border border-zinc-200 dark:border-zinc-700 shadow-xl p-3 space-y-2.5"
             >
               <div className="space-y-1">
                 <div className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100">
-                  新しいチャットを開始しますか？
+                  {t(locale, "history.confirmTitle")}
                 </div>
                 <p className="text-[11.5px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-                  現在のチャット（{activeMessageCount}件）は履歴に自動保存され、隣の履歴ボタンからいつでも復元できます。
+                  {t(locale, "history.confirmDesc", { count: activeMessageCount })}
                 </p>
                 {activeResponderCount > 0 && (
                   <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                    応答中の{activeResponderCount}件は停止して保存されます。
+                    {t(locale, "history.confirmActiveWarn", { count: activeResponderCount })}
                   </p>
                 )}
               </div>
@@ -411,7 +418,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
                   onClick={() => setConfirmNewChatOpen(false)}
                   className="px-2.5 py-1 rounded-lg text-[11.5px] font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                 >
-                  キャンセル
+                  {t(locale, "common.cancel")}
                 </button>
                 <button
                   ref={confirmButtonRef}
@@ -420,7 +427,7 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
                   onClick={handleConfirmNewChat}
                   className="px-2.5 py-1 rounded-lg text-[11.5px] font-medium bg-indigo-600 text-white hover:bg-indigo-500 transition-colors cursor-pointer"
                 >
-                  新規チャットを開始
+                  {t(locale, "history.confirmStartBtn")}
                 </button>
               </div>
             </div>

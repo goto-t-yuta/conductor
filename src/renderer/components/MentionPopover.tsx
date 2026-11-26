@@ -14,6 +14,7 @@ import {
   type ActiveMentionQuery,
   type MentionSuggestion,
 } from "../../shared/mentions.js";
+import { formatTaskStatusLabel, t, type UiLocale } from "../../shared/i18n.js";
 import { ProjectNamePill, TaskCodePill } from "./MentionChips.js";
 
 interface MentionPopoverProps {
@@ -21,6 +22,7 @@ interface MentionPopoverProps {
   suggestions: MentionSuggestion[];
   scopedProject: Project | null;
   activeIndex: number;
+  locale?: UiLocale;
   onHoverIndex: (index: number) => void;
   onSelect: (suggestion: MentionSuggestion) => void;
 }
@@ -40,21 +42,6 @@ function MentionTaskStatusIcon({ status }: { status: AgentTask["status"] }) {
   }
 }
 
-function statusLabel(status: AgentTask["status"]): string {
-  switch (status) {
-    case "running":
-      return "実行中";
-    case "queued":
-      return "待機中";
-    case "needs_review":
-      return "確認待ち";
-    case "done":
-      return "完了";
-    case "failed":
-      return "失敗";
-  }
-}
-
 function compactPath(fullPath: string): string {
   const normalized = fullPath.replace(/^\/Users\/[^/]+/, "~");
   const parts = normalized.split("/");
@@ -67,6 +54,7 @@ export const MentionPopover: React.FC<MentionPopoverProps> = ({
   suggestions,
   scopedProject,
   activeIndex,
+  locale = "ja",
   onHoverIndex,
   onSelect,
 }) => {
@@ -81,13 +69,13 @@ export const MentionPopover: React.FC<MentionPopoverProps> = ({
 
   const headerTitle =
     query.mode === "project_tasks"
-      ? `@${scopedProject?.name ?? query.projectQuery}/ のタスク`
-      : "プロジェクト / タスクをメンション";
+      ? t(locale, "mention.projectTasksTitle", { name: scopedProject?.name ?? query.projectQuery })
+      : t(locale, "mention.defaultTitle");
 
   return (
     <div
       role="listbox"
-      aria-label="メンション候補"
+      aria-label={t(locale, "mention.popoverAria")}
       className="absolute bottom-full left-0 right-0 mb-2 z-50 rounded-xl border border-zinc-200 dark:border-zinc-700/90 bg-white dark:bg-[#191d26] shadow-2xl overflow-hidden"
     >
       {/* Header */}
@@ -101,7 +89,7 @@ export const MentionPopover: React.FC<MentionPopoverProps> = ({
           </span>
         </div>
         <span className="shrink-0 hidden sm:inline text-[10px] text-zinc-400">
-          ↑↓ 移動 · Enter/Tab 選択 · Esc 閉じる
+          {t(locale, "mention.shortcutsHint")}
         </span>
       </div>
 
@@ -109,8 +97,10 @@ export const MentionPopover: React.FC<MentionPopoverProps> = ({
       {suggestions.length === 0 ? (
         <div className="px-3.5 py-4 text-center text-[12px] text-zinc-500 dark:text-zinc-400">
           {query.mode === "project_tasks"
-            ? `${scopedProject?.name ?? query.projectQuery} に一致するタスクがありません`
-            : "一致するプロジェクトまたはタスクがありません"}
+            ? t(locale, "mention.noProjectTasks", {
+                name: scopedProject?.name ?? query.projectQuery,
+              })
+            : t(locale, "mention.noMatches")}
         </div>
       ) : (
         <div className="max-h-72 overflow-y-auto py-1">
@@ -157,7 +147,7 @@ export const MentionPopover: React.FC<MentionPopoverProps> = ({
                         {item.task.title}
                       </span>
                       <span className="text-[10.5px] text-zinc-400 shrink-0">
-                        {statusLabel(item.task.status)}
+                        {formatTaskStatusLabel(item.task.status, locale)}
                       </span>
                     </>
                   ) : (
@@ -179,7 +169,7 @@ export const MentionPopover: React.FC<MentionPopoverProps> = ({
                       {item.taskCount > 0 && (
                         <span
                           className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 shrink-0"
-                          title={`@${item.project.name}/ でタスクを絞り込み`}
+                          title={t(locale, "mention.filterTasksTitle", { name: item.project.name })}
                         >
                           {item.taskCount} tasks · /
                         </span>

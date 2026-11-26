@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ModelOption } from "../shared/types.js";
+import { normalizeRawTokenUsage, type NormalizedRawUsage } from "../shared/usage.js";
 import { enrichedEnvironment, resolveCodexExecutable } from "./shell-env.js";
 
 export interface CodexNotification {
@@ -8,6 +9,12 @@ export interface CodexNotification {
   threadId: string | null;
   turnId: string | null;
   itemId: string | null;
+}
+
+export interface CodexExtractedTokenUsage {
+  total: NormalizedRawUsage | null;
+  last: NormalizedRawUsage | null;
+  direct: NormalizedRawUsage | null;
 }
 
 export interface CodexMCPConfig {
@@ -30,6 +37,49 @@ function asRecord(v: unknown): Record<string, unknown> | null {
 
 function asString(v: unknown): string | null {
   return typeof v === "string" ? v : null;
+}
+
+export function extractCodexTokenUsage(
+  notification: Pick<CodexNotification, "method" | "params">,
+): CodexExtractedTokenUsage | null {
+  const { method, params } = notification;
+  const isUsageMethod =
+    method === "thread/tokenUsage/updated" ||
+    method === "token_count" ||
+    method === "codex/event/token_count" ||
+    method === "turn/completed";
+  if (!isUsageMethod) return null;
+
+  const turn = asRecord(params.turn);
+  const msg = asRecord(params.msg);
+  const container =
+    asRecord(params.tokenUsage) ??
+    asRecord(params.token_usage) ??
+    asRecord(params.info) ??
+    asRecord(msg?.info) ??
+    asRecord(turn?.tokenUsage) ??
+    asRecord(turn?.token_usage) ??
+    asRecord(turn?.usage) ??
+    asRecord(params.usage) ??
+    (method === "turn/completed" ? null : params);
+
+  if (!container) return null;
+
+  const rawTotal =
+    asRecord(container.total) ??
+    asRecord(container.total_token_usage) ??
+    asRecord(container.totalTokenUsage);
+  const rawLast =
+    asRecord(container.last) ??
+    asRecord(container.last_token_usage) ??
+    asRecord(container.lastTokenUsage);
+
+  const total = rawTotal ? normalizeRawTokenUsage(rawTotal, "codex") : null;
+  const last = rawLast ? normalizeRawTokenUsage(rawLast, "codex") : null;
+  const direct = !total && !last ? normalizeRawTokenUsage(container, "codex") : null;
+
+  if (!total && !last && !direct) return null;
+  return { total, last, direct };
 }
 
 export class CodexAppServerClient {
@@ -386,9 +436,14 @@ export class CodexAppServerClient {
       const params = asRecord(parsed.params) ?? {};
       const threadId =
         asString(params.threadId) ??
+        asString(params.thread_id) ??
         asString(params.conversationId) ??
+        asString(params.conversation_id) ??
         asString(asRecord(params.thread)?.id);
-      const turnId = asString(params.turnId) ?? asString(asRecord(params.turn)?.id);
+      const turnId =
+        asString(params.turnId) ??
+        asString(params.turn_id) ??
+        asString(asRecord(params.turn)?.id);
       const itemId =
         asString(params.itemId) ??
         asString(params.callId) ??

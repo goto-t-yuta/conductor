@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ChevronRight,
   ExternalLink,
   FileText,
   Folder,
@@ -10,6 +11,7 @@ import {
   GitMerge,
   GitPullRequest,
   Globe,
+  Info,
   Loader2,
   MessageSquare,
   RefreshCw,
@@ -29,13 +31,19 @@ import type {
   Project,
   TaskLandStatus,
   TaskWorktreeStatus,
+  WorkerActivityEntry,
 } from "../../shared/types.js";
+import { formatTaskStatusLabel, t, type UiLocale } from "../../shared/i18n.js";
 import { formatTaskCode } from "../../shared/mentions.js";
 import {
-  getMarkTaskDoneBlockedReason,
+  getLocalizedMarkTaskDoneBlockedReason,
   requiresLandBeforeDone,
   validateManualTaskStatusTransition,
 } from "../../shared/task-status.js";
+import {
+  formatToolLogSummary,
+  partitionTaskActivities,
+} from "../lib/activity-log.js";
 import {
   getEffectiveProjectMode,
   getIntegrationModeOption,
@@ -45,21 +53,25 @@ import { MarkdownView } from "./MarkdownView.js";
 
 export interface TaskInspectorQuickStatusButtonProps {
   task: Pick<AgentTask, "title" | "status" | "worktreePath" | "worktreeBranch" | "landStatus">;
+  locale?: UiLocale;
   onUpdateStatus: (status: AgentTaskStatus) => void;
 }
 
 export const TaskInspectorQuickStatusButton: React.FC<TaskInspectorQuickStatusButtonProps> = ({
   task,
+  locale = "ja",
   onUpdateStatus,
 }) => {
-  const quickTransition = getQuickStatusTransition(task.status);
+  const quickTransition = getQuickStatusTransition(task.status, locale);
   if (!quickTransition) {
     return null;
   }
 
   const isDone = task.status === "done";
   const doneBlockedReason =
-    quickTransition.action === "done" ? getMarkTaskDoneBlockedReason(task) : null;
+    quickTransition.action === "done"
+      ? getLocalizedMarkTaskDoneBlockedReason(task, locale)
+      : null;
   const isBlocked = Boolean(doneBlockedReason);
 
   return (
@@ -104,6 +116,7 @@ export interface TaskStatusSelectProps {
   worktreePath?: string | null;
   worktreeBranch?: string | null;
   landStatus?: TaskLandStatus;
+  locale?: UiLocale;
   onUpdateStatus: (status: AgentTaskStatus) => void;
 }
 
@@ -112,21 +125,25 @@ export const TaskStatusSelect: React.FC<TaskStatusSelectProps> = ({
   worktreePath,
   worktreeBranch,
   landStatus,
+  locale = "ja",
   onUpdateStatus,
 }) => {
-  const doneBlockedReason = getMarkTaskDoneBlockedReason({
-    status,
-    worktreePath,
-    worktreeBranch,
-    landStatus,
-  });
+  const doneBlockedReason = getLocalizedMarkTaskDoneBlockedReason(
+    {
+      status,
+      worktreePath,
+      worktreeBranch,
+      landStatus,
+    },
+    locale,
+  );
   const allowMarkDone = !doneBlockedReason;
   return (
     <select
       data-testid="inspector-status-select"
       value={status}
-      aria-label="タスクステータス"
-      title={allowMarkDone ? "タスクステータスを変更" : doneBlockedReason!}
+      aria-label={t(locale, "inspector.statusAria")}
+      title={allowMarkDone ? t(locale, "inspector.statusTitle") : doneBlockedReason!}
       onChange={(e) => {
         const nextStatus = e.target.value as AgentTaskStatus;
         if (
@@ -144,18 +161,18 @@ export const TaskStatusSelect: React.FC<TaskStatusSelectProps> = ({
       }}
       className="text-[12px] rounded-lg px-2.5 py-1 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 outline-none"
     >
-      <option value="queued">Queued</option>
-      <option value="running">Running</option>
-      <option value="needs_review">Review</option>
+      <option value="queued">{formatTaskStatusLabel("queued", locale)}</option>
+      <option value="running">{formatTaskStatusLabel("running", locale)}</option>
+      <option value="needs_review">{formatTaskStatusLabel("needs_review", locale)}</option>
       <option
         value="done"
         data-testid="inspector-status-option-done"
         disabled={!allowMarkDone}
         title={allowMarkDone ? undefined : doneBlockedReason!}
       >
-        Done
+        {formatTaskStatusLabel("done", locale)}
       </option>
-      <option value="failed">Failed</option>
+      <option value="failed">{formatTaskStatusLabel("failed", locale)}</option>
     </select>
   );
 };
@@ -165,6 +182,8 @@ export interface TaskInspectorModalProps {
   project?: Project | null;
   projectColorHex: string;
   defaultIntegrationMode?: IntegrationMode;
+  locale?: UiLocale;
+  defaultToolLogExpanded?: boolean;
   onClose: () => void;
   onUpdateStatus: (status: AgentTaskStatus) => void;
   onOpenPreviewUrl: (url: string) => void;
@@ -182,6 +201,8 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
   project = null,
   projectColorHex,
   defaultIntegrationMode = "feature-branch",
+  locale = "ja",
+  defaultToolLogExpanded,
   onClose,
   onUpdateStatus,
   onOpenPreviewUrl,
@@ -198,9 +219,23 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
   const [isRefreshingGit, setIsRefreshingGit] = useState(false);
   const [isStartingConflictResolve, setIsStartingConflictResolve] = useState(false);
 
+  const partitionedActivities = useMemo(
+    () => partitionTaskActivities(task.activities),
+    [task.activities],
+  );
+  const [isToolLogExpanded, setIsToolLogExpanded] = useState(
+    defaultToolLogExpanded ?? !partitionedActivities.defaultToolLogCollapsed,
+  );
+
+  useEffect(() => {
+    setIsToolLogExpanded(
+      defaultToolLogExpanded ?? !partitionedActivities.defaultToolLogCollapsed,
+    );
+  }, [task.id, defaultToolLogExpanded, partitionedActivities.defaultToolLogCollapsed]);
+
   const effectiveMode =
     worktreeStatus?.effectiveMode ?? getEffectiveProjectMode(project, defaultIntegrationMode);
-  const modeOption = getIntegrationModeOption(effectiveMode);
+  const modeOption = getIntegrationModeOption(effectiveMode, locale);
   const isLanding = task.landStatus === "landing";
   const needsLand = requiresLandBeforeDone(task);
   const hasWorktreeInfo = Boolean(
@@ -274,12 +309,17 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
             {task.projectName}
           </span>
           <h2 className="text-[15px] font-semibold truncate flex-1 min-w-0">{task.title}</h2>
-          <TaskInspectorQuickStatusButton task={task} onUpdateStatus={onUpdateStatus} />
+          <TaskInspectorQuickStatusButton
+            task={task}
+            locale={locale}
+            onUpdateStatus={onUpdateStatus}
+          />
           <TaskStatusSelect
             status={task.status}
             worktreePath={task.worktreePath}
             worktreeBranch={task.worktreeBranch}
             landStatus={task.landStatus}
+            locale={locale}
             onUpdateStatus={onUpdateStatus}
           />
           <button
@@ -315,7 +355,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                       data-testid="inspector-unlanded-badge"
                       className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold normal-case tracking-normal bg-amber-500/15 text-amber-700 dark:text-amber-300"
                     >
-                      未Land
+                      {t(locale, "task.unlandedBadge")}
                     </span>
                   )}
                 </div>
@@ -327,7 +367,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                     type="button"
                     onClick={() => void refreshGitInfo()}
                     disabled={isRefreshingGit}
-                    title="Git 状態を更新"
+                    title={t(locale, "inspector.refreshGitTitle")}
                     className="p-1 rounded hover:bg-zinc-200/70 dark:hover:bg-zinc-800 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
                   >
                     <RefreshCw className={`w-3 h-3 ${isRefreshingGit ? "animate-spin" : ""}`} />
@@ -384,7 +424,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                 {worktreeStatus?.parentDirty && effectiveMode !== "per-task-pr" && (
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300">
                     <AlertTriangle className="w-3 h-3 shrink-0" />
-                    <span>親リポジトリに未コミット変更あり</span>
+                    <span>{t(locale, "inspector.parentDirty")}</span>
                   </span>
                 )}
               </div>
@@ -422,7 +462,9 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                   </div>
                   {task.conflictFiles && task.conflictFiles.length > 0 && (
                     <div className="pl-5 text-[11px] font-mono text-rose-600 dark:text-rose-400">
-                      対象ファイル: {task.conflictFiles.join(", ")}
+                      {t(locale, "inspector.conflictFiles", {
+                        files: task.conflictFiles.join(", "),
+                      })}
                     </div>
                   )}
                 </div>
@@ -458,7 +500,9 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                         <Sparkles className="w-3.5 h-3.5" />
                       )}
                       <span>
-                        {isStartingConflictResolve ? "解消を開始中..." : "AIでコンフリクト解消"}
+                        {isStartingConflictResolve
+                          ? t(locale, "inspector.aiResolveStarting")
+                          : t(locale, "inspector.aiResolveBtn")}
                       </span>
                     </button>
                   )}
@@ -478,7 +522,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                       )}
                       <span>
                         {isLanding
-                          ? "取り込み中..."
+                          ? t(locale, "inspector.landing")
                           : targetBranchDisplay
                             ? `Land → ${targetBranchDisplay}`
                             : "Land Changes"}
@@ -509,8 +553,8 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                         onClick={() => void onLandTask?.({ createPr: true })}
                         title={
                           worktreeStatus?.ghAvailable
-                            ? "ブランチを Push して gh CLI で PR を作成"
-                            : "ブランチを Push（gh CLI 未検出の場合は Push のみ実行）"
+                            ? t(locale, "inspector.pushPrGhTitle")
+                            : t(locale, "inspector.pushPrNoGhTitle")
                         }
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60 transition-colors cursor-pointer"
                       >
@@ -533,7 +577,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                       className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-300/70 dark:hover:bg-zinc-700 transition-colors cursor-pointer ml-auto"
                     >
                       <Trash2 className="w-3 h-3" />
-                      <span>Worktree を削除</span>
+                      <span>{t(locale, "inspector.deleteWorktree")}</span>
                     </button>
                   )}
                 </div>
@@ -544,7 +588,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
           {task.summary && (
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
-                概要
+                {t(locale, "inspector.summary")}
               </div>
               <p className="text-[13px] text-zinc-700 dark:text-zinc-300">{task.summary}</p>
             </div>
@@ -562,13 +606,14 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
           )}
 
           {task.latestOutput.trim() && (
-            <div>
+            <div data-testid="inspector-latest-output">
               <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-                ワーカー最新出力
+                {t(locale, "inspector.latestOutput")}
               </div>
-              <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-900/80 border border-zinc-200/70 dark:border-zinc-800">
+              <div className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-900/80 border border-zinc-200/80 dark:border-zinc-800">
                 <MarkdownView
                   content={task.latestOutput}
+                  locale={locale}
                   onOpenUrl={(url) => {
                     onOpenPreviewUrl(url);
                     onClose();
@@ -587,32 +632,82 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
           )}
 
           {task.activities.length > 0 && (
-            <div>
-              <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-                実行ログ ({task.activities.length})
+            <div data-testid="inspector-activity-section" className="space-y-2">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+                {t(locale, "inspector.activityLog", { count: task.activities.length })}
               </div>
-              <div className="space-y-1.5">
-                {[...task.activities].reverse().map((act) => (
-                  <div
-                    key={act.id}
-                    className="p-2.5 rounded-lg bg-zinc-100/80 dark:bg-zinc-900/70 border border-zinc-200/60 dark:border-zinc-800/80"
+
+              {partitionedActivities.highSignal.length > 0 && (
+                <div data-testid="inspector-high-signal-activities" className="space-y-1.5">
+                  {partitionedActivities.highSignal.map((act) => (
+                    <HighSignalActivityItem key={act.id} activity={act} />
+                  ))}
+                </div>
+              )}
+
+              {partitionedActivities.toolActivities.length > 0 && (
+                <div
+                  data-testid="inspector-tool-log-section"
+                  className="rounded-xl border border-zinc-200/70 dark:border-zinc-800/80 bg-zinc-50/70 dark:bg-zinc-900/50 overflow-hidden"
+                >
+                  <button
+                    type="button"
+                    data-testid="inspector-tool-log-toggle"
+                    aria-expanded={isToolLogExpanded}
+                    aria-label={
+                      isToolLogExpanded
+                        ? t(locale, "inspector.toolLogCollapseAria")
+                        : t(locale, "inspector.toolLogExpandAria")
+                    }
+                    onClick={() => setIsToolLogExpanded((prev) => !prev)}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-[12px] font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100/90 dark:hover:bg-zinc-800/60 transition-colors cursor-pointer"
                   >
-                    <div className="flex items-center gap-1.5 text-[12px] font-medium">
-                      {act.kind === "command" ? (
-                        <Terminal className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                      ) : (
-                        <FileText className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                      )}
-                      <span className={act.kind === "command" ? "font-mono" : ""}>{act.title}</span>
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      <Terminal className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                      <span className="truncate">
+                        {formatToolLogSummary(
+                          partitionedActivities.toolActivities.length,
+                          partitionedActivities.toolCounts,
+                          locale,
+                        )}
+                      </span>
+                    </span>
+                    <ChevronRight
+                      className={`w-3.5 h-3.5 text-zinc-400 shrink-0 transition-transform duration-150 ${
+                        isToolLogExpanded ? "rotate-90" : ""
+                      }`}
+                    />
+                  </button>
+
+                  {isToolLogExpanded && (
+                    <div
+                      data-testid="inspector-tool-log-list"
+                      className="border-t border-zinc-200/70 dark:border-zinc-800/80 max-h-72 overflow-y-auto divide-y divide-zinc-200/60 dark:divide-zinc-800/70"
+                    >
+                      {partitionedActivities.toolActivities.map((act, index) => (
+                        <div
+                          key={act.id}
+                          data-testid="inspector-tool-log-item"
+                          className="px-3 py-2 bg-white/60 dark:bg-zinc-950/30"
+                        >
+                          <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-zinc-700 dark:text-zinc-300">
+                            <span className="text-[10px] font-mono text-zinc-400 tabular-nums shrink-0">
+                              #{index + 1}
+                            </span>
+                            <Terminal className="w-3 h-3 text-zinc-400 shrink-0" />
+                            <span className="font-mono truncate">{act.title}</span>
+                          </div>
+                          {act.detail && (
+                            <pre className="mt-1 pl-5 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap line-clamp-6">
+                              {act.detail}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
                     </div>
-                    {act.detail && (
-                      <pre className="mt-1 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap line-clamp-6">
-                        {act.detail}
-                      </pre>
-                    )}
-                  </div>
-                ))}
-              </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -629,7 +724,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-indigo-500 text-white hover:bg-indigo-600 transition-colors cursor-pointer"
             >
               <Globe className="w-3.5 h-3.5" />
-              ブラウザで開く
+              {t(locale, "inspector.openInBrowser")}
             </button>
           )}
           <button
@@ -641,7 +736,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-zinc-200/80 dark:bg-zinc-800 hover:bg-zinc-300/70 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
           >
             <MessageSquare className="w-3.5 h-3.5" />
-            チャットで言及
+            {t(locale, "sidebar.mentionInChat")}
           </button>
           <div className="flex-1" />
           {task.status === "running" && (
@@ -651,7 +746,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 transition-colors cursor-pointer"
             >
               <Square className="w-3 h-3 fill-current" />
-              ワーカーを停止
+              {t(locale, "sidebar.stopWorker")}
             </button>
           )}
           <button
@@ -663,10 +758,47 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-rose-500 hover:bg-rose-500/10 transition-colors cursor-pointer"
           >
             <Trash2 className="w-3.5 h-3.5" />
-            削除
+            {t(locale, "common.delete")}
           </button>
         </div>
       </div>
+    </div>
+  );
+};
+
+const HighSignalActivityItem: React.FC<{ activity: WorkerActivityEntry }> = ({ activity }) => {
+  const isError = activity.kind === "error";
+  const isMessage = activity.kind === "message";
+  const isSystem = activity.kind === "system";
+
+  const containerClass = isError
+    ? "bg-rose-500/10 border-rose-500/25 text-rose-700 dark:text-rose-300"
+    : isMessage
+      ? "bg-indigo-500/[0.06] border-indigo-500/20 text-zinc-800 dark:text-zinc-200"
+      : "bg-zinc-100/80 dark:bg-zinc-900/70 border-zinc-200/60 dark:border-zinc-800/80 text-zinc-800 dark:text-zinc-200";
+
+  return (
+    <div
+      data-testid={`inspector-activity-${activity.kind}`}
+      className={`p-2.5 rounded-lg border ${containerClass}`}
+    >
+      <div className="flex items-center gap-1.5 text-[12px] font-medium">
+        {isError ? (
+          <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+        ) : isMessage ? (
+          <MessageSquare className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+        ) : isSystem ? (
+          <Info className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+        ) : (
+          <FileText className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+        )}
+        <span>{activity.title}</span>
+      </div>
+      {activity.detail && (
+        <pre className="mt-1 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap line-clamp-6">
+          {activity.detail}
+        </pre>
+      )}
     </div>
   );
 };

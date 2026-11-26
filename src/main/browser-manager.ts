@@ -1,5 +1,10 @@
 import crypto from "node:crypto";
 import { BrowserWindow, WebContentsView, shell } from "electron";
+import {
+  areBrowserBoundsEqual,
+  HIDDEN_BROWSER_BOUNDS,
+  normalizeBrowserBounds,
+} from "../shared/browser-bounds.js";
 import type {
   BrowserBounds,
   BrowserConsoleEntry,
@@ -125,23 +130,27 @@ const ELEMENT_PICKER_SCRIPT = `
 })();
 `;
 
+export type BrowserTabsChangeReason = "persistent" | "transient";
+
 export class BrowserManager {
   private readonly win: BrowserWindow;
   private readonly store: StateStore;
-  private readonly onTabsChanged: () => void;
+  private readonly onTabsChanged: (reason?: BrowserTabsChangeReason) => void;
   private readonly onElementPicked: (attachment: ChatAttachment) => void;
 
   private tabs = new Map<string, ManagedTab>();
   private tabOrder: string[] = [];
   private activeTabId: string | null = null;
   private attachedView: WebContentsView | null = null;
-  private lastBounds: BrowserBounds = { x: 0, y: 0, width: 0, height: 0, visible: false };
+  private lastBounds: BrowserBounds = HIDDEN_BROWSER_BOUNDS;
+  private lastAppliedView: WebContentsView | null = null;
+  private lastAppliedBounds: BrowserBounds | null = null;
   private pickingElement = false;
 
   constructor(options: {
     window: BrowserWindow;
     store: StateStore;
-    onTabsChanged: () => void;
+    onTabsChanged: (reason?: BrowserTabsChangeReason) => void;
     onElementPicked: (attachment: ChatAttachment) => void;
   }) {
     this.win = options.window;
@@ -188,13 +197,22 @@ export class BrowserManager {
   }
 
   public setBounds(bounds: BrowserBounds): void {
-    this.lastBounds = {
-      x: Math.round(bounds.x),
-      y: Math.round(bounds.y),
-      width: Math.max(0, Math.round(bounds.width)),
-      height: Math.max(0, Math.round(bounds.height)),
-      visible: bounds.visible,
-    };
+    const normalized = normalizeBrowserBounds(bounds);
+    if (areBrowserBoundsEqual(this.lastBounds, normalized)) {
+      if (!normalized.visible && !this.attachedView) {
+        return;
+      }
+      const activeView = this.activeManaged()?.view ?? null;
+      if (
+        normalized.visible &&
+        this.attachedView === activeView &&
+        this.lastAppliedView === activeView &&
+        areBrowserBoundsEqual(this.lastAppliedBounds, normalized)
+      ) {
+        return;
+      }
+    }
+    this.lastBounds = normalized;
     this.syncAttachedView();
   }
 
@@ -257,12 +275,15 @@ export class BrowserManager {
 
   public selectTab(tabId: string): void {
     if (!this.tabs.has(tabId)) return;
+    const changed = this.activeTabId !== tabId;
     if (this.pickingElement) {
       void this.setElementPicker(false);
     }
     this.activeTabId = tabId;
     this.syncAttachedView();
-    this.onTabsChanged();
+    if (changed) {
+      this.onTabsChanged("persistent");
+    }
   }
 
   public closeTab(tabId: string): void {
@@ -416,12 +437,16 @@ export class BrowserManager {
   public async setElementPicker(enabled: boolean): Promise<void> {
     const managed = this.activeManaged();
     if (!managed || !managed.meta.url) {
-      this.pickingElement = false;
-      this.onTabsChanged();
+      if (this.pickingElement) {
+        this.pickingElement = false;
+        this.onTabsChanged("transient");
+      }
       return;
     }
-    this.pickingElement = enabled;
-    this.onTabsChanged();
+    if (this.pickingElement !== enabled) {
+      this.pickingElement = enabled;
+      this.onTabsChanged("transient");
+    }
     try {
       if (enabled) {
         await managed.view.webContents.executeJavaScript(ELEMENT_PICKER_SCRIPT, true);
@@ -432,8 +457,10 @@ export class BrowserManager {
         );
       }
     } catch {
-      this.pickingElement = false;
-      this.onTabsChanged();
+      if (this.pickingElement) {
+        this.pickingElement = false;
+        this.onTabsChanged("transient");
+      }
     }
   }
 
@@ -728,6 +755,8 @@ export class BrowserManager {
       }
       this.attachedView = null;
     }
+    this.lastAppliedView = null;
+    this.lastAppliedBounds = null;
   }
 
   private syncAttachedView(): void {
@@ -743,18 +772,28 @@ export class BrowserManager {
       return;
     }
 
+    let viewChanged = false;
     if (this.attachedView !== managed.view) {
       this.detachCurrentView();
       this.win.contentView.addChildView(managed.view);
       this.attachedView = managed.view;
+      viewChanged = true;
     }
 
-    managed.view.setBounds({
-      x: this.lastBounds.x,
-      y: this.lastBounds.y,
-      width: this.lastBounds.width,
-      height: this.lastBounds.height,
-    });
+    if (
+      viewChanged ||
+      this.lastAppliedView !== managed.view ||
+      !areBrowserBoundsEqual(this.lastAppliedBounds, this.lastBounds)
+    ) {
+      managed.view.setBounds({
+        x: this.lastBounds.x,
+        y: this.lastBounds.y,
+        width: this.lastBounds.width,
+        height: this.lastBounds.height,
+      });
+      this.lastAppliedView = managed.view;
+      this.lastAppliedBounds = this.lastBounds;
+    }
   }
 
   private wireWebContentsEvents(managed: ManagedTab): void {
@@ -768,6 +807,12 @@ export class BrowserManager {
     });
 
     const syncMeta = () => {
+      const prevUrl = managed.meta.url;
+      const prevTitle = managed.meta.title;
+      const prevLoading = managed.meta.isLoading;
+      const prevCanGoBack = managed.meta.canGoBack;
+      const prevCanGoForward = managed.meta.canGoForward;
+
       const currentUrl = wc.getURL();
       if (currentUrl) managed.meta.url = currentUrl;
       const currentTitle = wc.getTitle();
@@ -779,20 +824,39 @@ export class BrowserManager {
       managed.meta.isLoading = wc.isLoading();
       managed.meta.canGoBack = wc.navigationHistory.canGoBack();
       managed.meta.canGoForward = wc.navigationHistory.canGoForward();
-      this.onTabsChanged();
+
+      const persistentChanged =
+        managed.meta.url !== prevUrl || managed.meta.title !== prevTitle;
+      const transientChanged =
+        managed.meta.isLoading !== prevLoading ||
+        managed.meta.canGoBack !== prevCanGoBack ||
+        managed.meta.canGoForward !== prevCanGoForward;
+
+      if (persistentChanged) {
+        this.onTabsChanged("persistent");
+      } else if (transientChanged) {
+        this.onTabsChanged("transient");
+      }
     };
 
     wc.on("did-start-loading", () => {
-      managed.meta.isLoading = true;
-      this.onTabsChanged();
+      if (!managed.meta.isLoading) {
+        managed.meta.isLoading = true;
+        this.onTabsChanged("transient");
+      }
     });
     wc.on("did-stop-loading", syncMeta);
     wc.on("did-navigate", () => {
+      const hadErrors =
+        managed.meta.consoleErrorCount > 0 || managed.meta.networkErrorCount > 0;
       managed.consoleEntries = [];
       managed.networkErrors = [];
       managed.meta.consoleErrorCount = 0;
       managed.meta.networkErrorCount = 0;
       syncMeta();
+      if (hadErrors) {
+        this.onTabsChanged("transient");
+      }
       this.ensureDebugger(managed);
     });
     wc.on("did-navigate-in-page", syncMeta);
@@ -802,8 +866,10 @@ export class BrowserManager {
     wc.on("console-message", (_event, _level, message) => {
       if (!message.startsWith(PICKER_PREFIX)) return;
       const jsonStr = message.slice(PICKER_PREFIX.length);
-      this.pickingElement = false;
-      this.onTabsChanged();
+      if (this.pickingElement) {
+        this.pickingElement = false;
+        this.onTabsChanged("transient");
+      }
       try {
         const parsed = JSON.parse(jsonStr) as {
           type?: string;
@@ -942,8 +1008,11 @@ export class BrowserManager {
         managed.consoleEntries.splice(0, managed.consoleEntries.length - 60);
       }
       if (type === "error") {
-        managed.meta.consoleErrorCount = managed.consoleEntries.filter((e) => e.level === "error").length;
-        this.onTabsChanged();
+        const nextCount = managed.consoleEntries.filter((e) => e.level === "error").length;
+        if (nextCount !== managed.meta.consoleErrorCount) {
+          managed.meta.consoleErrorCount = nextCount;
+          this.onTabsChanged("transient");
+        }
       }
       return;
     }
@@ -960,8 +1029,14 @@ export class BrowserManager {
         line: typeof details.lineNumber === "number" ? details.lineNumber : undefined,
         timestamp: new Date().toISOString(),
       });
-      managed.meta.consoleErrorCount = managed.consoleEntries.filter((e) => e.level === "error").length;
-      this.onTabsChanged();
+      if (managed.consoleEntries.length > 60) {
+        managed.consoleEntries.splice(0, managed.consoleEntries.length - 60);
+      }
+      const nextCount = managed.consoleEntries.filter((e) => e.level === "error").length;
+      if (nextCount !== managed.meta.consoleErrorCount) {
+        managed.meta.consoleErrorCount = nextCount;
+        this.onTabsChanged("transient");
+      }
       return;
     }
 
@@ -998,8 +1073,11 @@ export class BrowserManager {
         if (managed.networkErrors.length > 50) {
           managed.networkErrors.splice(0, managed.networkErrors.length - 50);
         }
-        managed.meta.networkErrorCount = managed.networkErrors.length;
-        this.onTabsChanged();
+        const nextCount = managed.networkErrors.length;
+        if (nextCount !== managed.meta.networkErrorCount) {
+          managed.meta.networkErrorCount = nextCount;
+          this.onTabsChanged("transient");
+        }
       }
       return;
     }
@@ -1019,8 +1097,11 @@ export class BrowserManager {
       if (managed.networkErrors.length > 50) {
         managed.networkErrors.splice(0, managed.networkErrors.length - 50);
       }
-      managed.meta.networkErrorCount = managed.networkErrors.length;
-      this.onTabsChanged();
+      const nextCount = managed.networkErrors.length;
+      if (nextCount !== managed.meta.networkErrorCount) {
+        managed.meta.networkErrorCount = nextCount;
+        this.onTabsChanged("transient");
+      }
     }
   }
 

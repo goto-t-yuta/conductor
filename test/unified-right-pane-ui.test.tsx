@@ -383,4 +383,90 @@ describe("UnifiedRightPane & RightPaneProjectSwitcher UI", () => {
     expect(html).toContain("const greeting = &#x27;hello&#x27;;");
     expect(html).toContain("Finder");
   });
+
+  it("renders editable Markdown source textarea, dirty tab indicator, Save/Discard controls, live Preview draft, and external change banner", () => {
+    const dirtyMdTab: MarkdownViewerTab = {
+      ...MD_TAB,
+      draftContent: "# Live Draft Heading\n\nUnsaved edits appear in preview too.",
+      isDirty: true,
+      viewMode: "raw",
+      externalChange: {
+        kind: "changed",
+        document: {
+          ...MD_TAB.document!,
+          content: "# External disk update\n",
+          mtimeMs: 1700000010000,
+        },
+        detectedAt: 1700000010000,
+      },
+    };
+
+    const dirtyUnifiedTab: UnifiedRightPaneTab = {
+      id: makeMarkdownUnifiedTabId(dirtyMdTab.filePath),
+      kind: "markdown",
+      projectScope: "proj-a",
+      title: dirtyMdTab.fileName,
+      subtitle: dirtyMdTab.filePath,
+      isLoading: false,
+      hasError: false,
+      markdownTab: dirtyMdTab,
+    };
+
+    const rawHtml = renderToStaticMarkup(
+      <UnifiedRightPane
+        {...makeProps({
+          tabs: [MIXED_TABS[0], dirtyUnifiedTab],
+          activeTab: dirtyUnifiedTab,
+          onMarkdownDraftChange: vi.fn(),
+          onSaveActiveMd: vi.fn(),
+          onDiscardActiveMd: vi.fn(),
+          onReloadExternalMdChange: vi.fn(),
+          onDismissExternalMdChange: vi.fn(),
+          onChangeMdViewMode: vi.fn(),
+        })}
+      />,
+    );
+
+    // Dirty dot on unified tab bar & meta header
+    expect(rawHtml).toContain('data-testid="markdown-tab-dirty-dot"');
+    expect(rawHtml).toContain('data-testid="markdown-dirty-indicator"');
+    expect(rawHtml).toContain("未保存");
+
+    // Editable textarea instead of read-only pre
+    expect(rawHtml).toContain("<textarea");
+    expect(rawHtml).toContain('data-testid="markdown-source-editor"');
+    expect(rawHtml).toMatch(/spellcheck="false"/i);
+    expect(rawHtml).toContain("# Live Draft Heading");
+
+    // Save & Discard buttons
+    expect(rawHtml).toContain('data-testid="markdown-save-btn"');
+    expect(rawHtml).toContain("保存");
+    expect(rawHtml).toContain('data-testid="markdown-discard-btn"');
+    expect(rawHtml).toContain("変更を破棄");
+
+    // Non-destructive external change banner with Reload button
+    expect(rawHtml).toContain('data-testid="markdown-external-change-banner"');
+    expect(rawHtml).toContain('data-testid="markdown-external-reload-btn"');
+    expect(rawHtml).toContain("再読み込み");
+
+    // Preview mode renders the live draft content before saving
+    const previewUnifiedTab: UnifiedRightPaneTab = {
+      ...dirtyUnifiedTab,
+      markdownTab: { ...dirtyMdTab, viewMode: "rendered" },
+    };
+    const previewHtml = renderToStaticMarkup(
+      <UnifiedRightPane
+        {...makeProps({
+          tabs: [previewUnifiedTab],
+          activeTab: previewUnifiedTab,
+          onSaveActiveMd: vi.fn(),
+          onDiscardActiveMd: vi.fn(),
+        })}
+      />,
+    );
+    expect(previewHtml).toContain("Live Draft Heading");
+    expect(previewHtml).toContain("Unsaved edits appear in preview too.");
+    expect(previewHtml).toContain('data-testid="markdown-save-btn"');
+    expect(previewHtml).toContain('data-testid="markdown-discard-btn"');
+  });
 });

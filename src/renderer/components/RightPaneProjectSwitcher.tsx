@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, FileCode2, FileText, Globe, Image as ImageIcon, Search, X } from "lucide-react";
+import { t, type UiLocale } from "../../shared/i18n.js";
 import type { ProjectScopeKey, ProjectSwitcherItem } from "../lib/right-pane-tabs.js";
 
 export interface RightPaneProjectSwitcherProps {
@@ -7,6 +8,7 @@ export interface RightPaneProjectSwitcherProps {
   withTabs: ProjectSwitcherItem[];
   others: ProjectSwitcherItem[];
   isOpen: boolean;
+  locale?: UiLocale;
   onOpenChange: (open: boolean) => void;
   onSelectScope: (scopeKey: ProjectScopeKey) => void;
 }
@@ -16,6 +18,7 @@ export const RightPaneProjectSwitcher: React.FC<RightPaneProjectSwitcherProps> =
   withTabs,
   others,
   isOpen,
+  locale = "ja",
   onOpenChange,
   onSelectScope,
 }) => {
@@ -127,7 +130,7 @@ export const RightPaneProjectSwitcher: React.FC<RightPaneProjectSwitcherProps> =
         aria-haspopup="listbox"
         aria-expanded={isOpen}
         onClick={() => onOpenChange(!isOpen)}
-        title={`右ペインのプロジェクトを切替: ${activeItem.name}`}
+        title={t(locale, "switcher.title", { name: activeItem.name })}
         className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer max-w-[168px] ${
           isOpen
             ? "bg-white dark:bg-[#1d222d] border-indigo-500/50 text-zinc-900 dark:text-zinc-100 shadow-xs"
@@ -158,7 +161,7 @@ export const RightPaneProjectSwitcher: React.FC<RightPaneProjectSwitcherProps> =
         <div
           data-testid="right-pane-project-dropdown"
           role="listbox"
-          aria-label="プロジェクトを切替"
+          aria-label={t(locale, "switcher.listboxAria")}
           className="absolute left-0 top-full mt-1.5 z-50 w-68 max-h-[380px] flex flex-col rounded-xl bg-white dark:bg-[#161a22] border border-zinc-200 dark:border-zinc-700/90 shadow-2xl overflow-hidden"
         >
           {/* Search Bar */}
@@ -170,14 +173,14 @@ export const RightPaneProjectSwitcher: React.FC<RightPaneProjectSwitcherProps> =
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="プロジェクトを検索..."
+                placeholder={t(locale, "sidebar.searchProjectsPlaceholder")}
                 className="w-full pl-8 pr-7 py-1.5 rounded-lg text-[12px] bg-zinc-50 dark:bg-[#0f1115] border border-zinc-200 dark:border-zinc-800 focus:border-indigo-500/60 outline-none select-text"
               />
               {searchQuery && (
                 <button
                   type="button"
                   onClick={() => setSearchQuery("")}
-                  aria-label="検索をクリア"
+                  aria-label={t(locale, "switcher.clearSearchAria")}
                   className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
                 >
                   <X className="w-3 h-3" />
@@ -190,14 +193,14 @@ export const RightPaneProjectSwitcher: React.FC<RightPaneProjectSwitcherProps> =
           <div className="flex-1 overflow-y-auto p-1.5 space-y-2">
             {filteredWithTabs.length === 0 && filteredOthers.length === 0 ? (
               <div className="px-3 py-6 text-center text-[11.5px] text-zinc-400">
-                一致するプロジェクトがありません
+                {t(locale, "sidebar.noMatchingProjects")}
               </div>
             ) : (
               <>
                 {filteredWithTabs.length > 0 && (
                   <div className="space-y-0.5">
                     <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-                      開いているタブ
+                      {t(locale, "switcher.openTabsSection")}
                     </div>
                     {filteredWithTabs.map(renderItemRow)}
                   </div>
@@ -209,7 +212,7 @@ export const RightPaneProjectSwitcher: React.FC<RightPaneProjectSwitcherProps> =
                       <div className="my-1 border-t border-zinc-200/70 dark:border-zinc-800" />
                     )}
                     <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
-                      すべてのプロジェクト
+                      {t(locale, "switcher.allProjectsSection")}
                     </div>
                     {filteredOthers.map(renderItemRow)}
                   </div>

@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowUp,
+  BarChart3,
   Bell,
   BookOpen,
   Camera,
@@ -17,6 +19,8 @@ import {
   Image as ImageIcon,
   Link2,
   Loader2,
+  Mic,
+  MicOff,
   PanelLeft,
   PanelRight,
   Paperclip,
@@ -25,6 +29,8 @@ import {
   Settings,
   Sparkles,
   Square,
+  Volume2,
+  VolumeX,
   X,
   XCircle,
   Zap,
@@ -40,13 +46,13 @@ import type {
   IntegrationMode,
   Project,
   RightPaneMode,
+  ToolActivityChip,
 } from "../../shared/types.js";
 import {
   detectActiveMention,
   extractResolvedMentionChips,
   formatTaskCode,
   getMentionSuggestions,
-  parseAndResolveMentions,
   removeActiveMentionQuery,
   removeResolvedMentionChip,
   resolveMessageMentionBadges,
@@ -56,14 +62,29 @@ import {
   type ResolvedMentionChip,
 } from "../../shared/mentions.js";
 import {
-  getMarkTaskDoneBlockedReason,
+  getLocalizedMarkTaskDoneBlockedReason,
   requiresLandBeforeDone,
   validateManualTaskStatusTransition,
 } from "../../shared/task-status.js";
+import { formatTokenCount, formatUsdCost, summarizeUsage } from "../../shared/usage.js";
+import { resolveUiLocale, t, type UiLocale } from "../../shared/i18n.js";
+import {
+  appendVoiceTranscript,
+  formatSpeechRecognitionError,
+  resolveSpeechLocale,
+} from "../../shared/voice.js";
 import { getEffectiveProjectMode } from "../lib/integration-mode.js";
+import {
+  buildToolChipDisplayPlan,
+  formatToolChipsSummary,
+} from "../lib/activity-log.js";
 import { isViewableImageAttachment } from "../lib/image-viewer.js";
 import { resolveTaskForTaskEvent } from "../lib/task-event.js";
 import { getQuickStatusTransition } from "../lib/task-sidebar.js";
+import {
+  getSpeechRecognitionConstructor,
+  type BrowserSpeechRecognition,
+} from "../lib/voice-client.js";
 import { ChatSessionControls } from "./ChatHistoryMenu.js";
 import { MarkdownView } from "./MarkdownView.js";
 import { UserMessageMentionBadges } from "./MentionBadges.js";
@@ -78,10 +99,15 @@ import {
   handleContainerScroll,
   handleUserScrollIntent,
   recordProgrammaticScroll,
+  recordSmoothScrollToBottom,
+  shouldShowScrollToBottomButton,
   syncScrollStateAfterResize,
   type ChatScrollState,
   type ScrollMetrics,
 } from "../lib/chat-scroll.js";
+
+const EMPTY_PROJECTS: Project[] = [];
+const EMPTY_TASKS: AgentTask[] = [];
 
 function readScrollMetrics(el: HTMLElement): ScrollMetrics {
   return {
@@ -98,6 +124,7 @@ export interface ChatJumpRequest {
 
 interface UnifiedChatProps {
   snapshot: AppSnapshot;
+  locale?: UiLocale;
   composerText: string;
   attachments: ChatAttachment[];
   selectedMentions?: ExplicitMentionTarget[];
@@ -120,6 +147,7 @@ interface UnifiedChatProps {
   onToggleSidebar: () => void;
   onToggleBrowser: () => void;
   rightPaneMode?: RightPaneMode;
+  isBrowserTabActive?: boolean;
   onToggleMarkdownViewer: () => void;
   onAddProject: () => void;
   onOpenUrl: (url: string, context?: { message?: ChatMessage }) => void;
@@ -151,11 +179,19 @@ interface UnifiedChatProps {
   onSetWorkerProvider: (provider: AgentProvider) => void;
   onSetChatModel: (model: string, effort?: string) => void;
   onSetWorkerModel: (model: string, effort?: string) => void;
+  onOpenUsage?: () => void;
   onOpenSettings?: () => void;
+  voiceReadbackEnabled?: boolean;
+  isSpeaking?: boolean;
+  voiceAutoSend?: boolean;
+  onToggleVoiceReadback?: () => void;
+  onStopSpeaking?: () => void;
+  onToggleVoiceAutoSend?: () => void;
 }
 
 export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   snapshot,
+  locale,
   composerText,
   attachments,
   selectedMentions = [],
@@ -177,6 +213,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   onToggleSidebar,
   onToggleBrowser,
   rightPaneMode,
+  isBrowserTabActive = false,
   onToggleMarkdownViewer,
   onAddProject,
   onOpenUrl,
@@ -197,7 +234,14 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   onSetWorkerProvider,
   onSetChatModel,
   onSetWorkerModel,
+  onOpenUsage,
   onOpenSettings,
+  voiceReadbackEnabled = Boolean(snapshot.voiceReadbackEnabled),
+  isSpeaking = false,
+  voiceAutoSend = false,
+  onToggleVoiceReadback,
+  onStopSpeaking,
+  onToggleVoiceAutoSend,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const contentContainerRef = useRef<HTMLDivElement>(null);
@@ -215,6 +259,253 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const hasMessagesRef = useRef(snapshot.messages.length > 0);
+  hasMessagesRef.current = snapshot.messages.length > 0;
+  const activeLocale = locale ?? resolveUiLocale(snapshot.preferredLanguage);
+
+  // Voice Input (Web Speech API STT) state
+  const [isListening, setIsListening] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const latestComposerTextRef = useRef(composerText);
+  latestComposerTextRef.current = composerText;
+  const interimTranscriptRef = useRef(interimTranscript);
+  interimTranscriptRef.current = interimTranscript;
+  const voiceAutoSendRef = useRef(voiceAutoSend);
+  voiceAutoSendRef.current = voiceAutoSend;
+  const preferredLanguageRef = useRef(snapshot.preferredLanguage);
+  preferredLanguageRef.current = snapshot.preferredLanguage;
+  const onComposerTextChangeRef = useRef(onComposerTextChange);
+  onComposerTextChangeRef.current = onComposerTextChange;
+  const onSendRef = useRef(onSend);
+  onSendRef.current = onSend;
+  const onStopSpeakingRef = useRef(onStopSpeaking);
+  onStopSpeakingRef.current = onStopSpeaking;
+  const voiceRecognizedAnyRef = useRef(false);
+  const voiceAbortedByUserRef = useRef(false);
+  const voiceHadErrorRef = useRef(false);
+
+  const speechLocale = useMemo(
+    () =>
+      resolveSpeechLocale(
+        snapshot.preferredLanguage,
+        typeof navigator !== "undefined" ? navigator.language : undefined,
+      ),
+    [snapshot.preferredLanguage],
+  );
+
+  const stopVoiceInput = useCallback((options?: { cancel?: boolean }) => {
+    const rec = recognitionRef.current;
+    if (!rec) {
+      setIsListening(false);
+      setInterimTranscript("");
+      interimTranscriptRef.current = "";
+      return;
+    }
+    if (options?.cancel) {
+      voiceAbortedByUserRef.current = true;
+      setInterimTranscript("");
+      interimTranscriptRef.current = "";
+      try {
+        rec.abort();
+      } catch {
+        // ignore
+      }
+    } else {
+      try {
+        rec.stop();
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+
+  const startVoiceInput = useCallback(async () => {
+    // Stop TTS readback before opening the microphone so Conductor doesn't hear itself
+    onStopSpeakingRef.current?.();
+    setVoiceError(null);
+
+    const RecognitionCtor = getSpeechRecognitionConstructor();
+    if (!RecognitionCtor) {
+      setVoiceError(
+        formatSpeechRecognitionError("unsupported", preferredLanguageRef.current),
+      );
+      return;
+    }
+
+    if (typeof window !== "undefined" && window.conductor?.voiceRequestMicPermission) {
+      try {
+        const perm = await window.conductor.voiceRequestMicPermission();
+        if (!perm.granted) {
+          setVoiceError(
+            formatSpeechRecognitionError("not-allowed", preferredLanguageRef.current),
+          );
+          return;
+        }
+      } catch {
+        // Continue and let Chromium handle permission if IPC is unavailable
+      }
+    }
+
+    // Ensure any stale recognition session is cleaned up
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.abort();
+      } catch {
+        // ignore
+      }
+      recognitionRef.current = null;
+    }
+
+    const recognition = new RecognitionCtor();
+    recognition.lang = speechLocale;
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    voiceRecognizedAnyRef.current = false;
+    voiceAbortedByUserRef.current = false;
+    voiceHadErrorRef.current = false;
+    interimTranscriptRef.current = "";
+    setInterimTranscript("");
+    recognitionRef.current = recognition;
+
+    recognition.onstart = () => {
+      if (recognitionRef.current !== recognition) return;
+      setIsListening(true);
+      textareaRef.current?.focus();
+    };
+
+    recognition.onresult = (event) => {
+      if (recognitionRef.current !== recognition) return;
+      let finalChunk = "";
+      let interimChunk = "";
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const transcript = result?.[0]?.transcript ?? "";
+        if (!transcript) continue;
+        if (result.isFinal) {
+          finalChunk = appendVoiceTranscript(finalChunk, transcript);
+        } else {
+          interimChunk = appendVoiceTranscript(interimChunk, transcript);
+        }
+      }
+
+      if (finalChunk) {
+        const nextText = appendVoiceTranscript(latestComposerTextRef.current, finalChunk);
+        latestComposerTextRef.current = nextText;
+        voiceRecognizedAnyRef.current = true;
+        onComposerTextChangeRef.current(nextText);
+        setCaretPos(nextText.length);
+      }
+
+      interimTranscriptRef.current = interimChunk;
+      setInterimTranscript(interimChunk);
+    };
+
+    recognition.onerror = (event) => {
+      if (recognitionRef.current !== recognition) return;
+      voiceHadErrorRef.current = true;
+      if (voiceAbortedByUserRef.current || event.error === "aborted") {
+        return;
+      }
+      const friendly = formatSpeechRecognitionError(
+        event.error || "unknown",
+        preferredLanguageRef.current,
+      );
+      if (friendly) {
+        setVoiceError(friendly);
+      }
+    };
+
+    recognition.onend = () => {
+      if (recognitionRef.current === recognition) {
+        recognitionRef.current = null;
+      }
+      setIsListening(false);
+
+      const leftoverInterim = interimTranscriptRef.current.trim();
+      interimTranscriptRef.current = "";
+      setInterimTranscript("");
+
+      if (!voiceAbortedByUserRef.current && leftoverInterim) {
+        const nextText = appendVoiceTranscript(latestComposerTextRef.current, leftoverInterim);
+        latestComposerTextRef.current = nextText;
+        voiceRecognizedAnyRef.current = true;
+        onComposerTextChangeRef.current(nextText);
+        setCaretPos(nextText.length);
+      }
+
+      if (
+        voiceAutoSendRef.current &&
+        voiceRecognizedAnyRef.current &&
+        !voiceAbortedByUserRef.current &&
+        !voiceHadErrorRef.current &&
+        latestComposerTextRef.current.trim().length > 0
+      ) {
+        setDismissedMentionKey(null);
+        setCaretPos(0);
+        onSendRef.current();
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch {
+      recognitionRef.current = null;
+      setIsListening(false);
+      setVoiceError(
+        formatSpeechRecognitionError("service-not-allowed", preferredLanguageRef.current),
+      );
+    }
+  }, [speechLocale]);
+
+  const toggleVoiceInput = useCallback(() => {
+    if (isListening || recognitionRef.current) {
+      stopVoiceInput();
+    } else {
+      void startVoiceInput();
+    }
+  }, [isListening, startVoiceInput, stopVoiceInput]);
+
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch {
+          // ignore
+        }
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
+
+  // Global Option+Space / Alt+Space shortcut inside Conductor window to toggle voice input
+  useEffect(() => {
+    const onWindowKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.altKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.shiftKey &&
+        (e.code === "Space" || e.key === " " || e.key === "\u00a0")
+      ) {
+        // Avoid hijacking inputs inside modals
+        const target = e.target as HTMLElement | null;
+        if (target && target !== textareaRef.current && target.closest("input, textarea, select")) {
+          return;
+        }
+        e.preventDefault();
+        textareaRef.current?.focus();
+        toggleVoiceInput();
+      }
+    };
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, [toggleVoiceInput]);
 
   const registerMessageEl = useCallback((messageId: string, el: HTMLDivElement | null) => {
     if (el) {
@@ -289,90 +580,141 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     return () => observer.disconnect();
   }, [unreadReplyIds, onMarkMessagesRead, snapshot.messages.length]);
 
-  const scrollContainerToBottom = useCallback((container: HTMLDivElement) => {
-    const beforeScrollTop = container.scrollTop;
-    container.scrollTop = container.scrollHeight;
-    const actualMetrics = readScrollMetrics(container);
-    const didScroll = Math.abs(actualMetrics.scrollTop - beforeScrollTop) >= 0.5;
-    scrollStateRef.current = recordProgrammaticScroll(
-      scrollStateRef.current,
-      "bottom",
-      actualMetrics,
-      didScroll,
-      Date.now(),
-    );
-  }, []);
+  const syncScrollToBottomVisibility = useCallback(
+    (metrics: ScrollMetrics | null, now: number = Date.now()) => {
+      setShowScrollToBottom(
+        shouldShowScrollToBottomButton(scrollStateRef.current, metrics, {
+          hasMessages: hasMessagesRef.current,
+          now,
+        }),
+      );
+    },
+    [],
+  );
+
+  const scrollContainerToBottom = useCallback(
+    (container: HTMLDivElement) => {
+      const beforeScrollTop = container.scrollTop;
+      container.scrollTop = container.scrollHeight;
+      const actualMetrics = readScrollMetrics(container);
+      const didScroll = Math.abs(actualMetrics.scrollTop - beforeScrollTop) >= 0.5;
+      const now = Date.now();
+      scrollStateRef.current = recordProgrammaticScroll(
+        scrollStateRef.current,
+        "bottom",
+        actualMetrics,
+        didScroll,
+        now,
+      );
+      syncScrollToBottomVisibility(actualMetrics, now);
+    },
+    [syncScrollToBottomVisibility],
+  );
+
+  const handleScrollToBottomClick = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    if (typeof container.scrollTo === "function") {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    } else {
+      container.scrollTop = container.scrollHeight;
+    }
+    const now = Date.now();
+    const metrics = readScrollMetrics(container);
+    scrollStateRef.current = recordSmoothScrollToBottom(scrollStateRef.current, metrics, now);
+    syncScrollToBottomVisibility(metrics, now);
+    flushVisibleUnread();
+  }, [flushVisibleUnread, syncScrollToBottomVisibility]);
 
   const handleChatScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    scrollStateRef.current = handleContainerScroll(
-      scrollStateRef.current,
-      readScrollMetrics(el),
-      Date.now(),
-    );
+    const now = Date.now();
+    const metrics = readScrollMetrics(el);
+    scrollStateRef.current = handleContainerScroll(scrollStateRef.current, metrics, now);
+    syncScrollToBottomVisibility(metrics, now);
     flushVisibleUnread();
-  }, [flushVisibleUnread]);
+  }, [flushVisibleUnread, syncScrollToBottomVisibility]);
 
-  const handleChatWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
-    const el = scrollContainerRef.current;
-    if (!el || e.deltaY === 0) return;
-    scrollStateRef.current = handleUserScrollIntent(
-      scrollStateRef.current,
-      e.deltaY < 0 ? "up" : "down",
-      readScrollMetrics(el),
-    );
-  }, []);
+  const handleChatWheel = useCallback(
+    (e: React.WheelEvent<HTMLDivElement>) => {
+      const el = scrollContainerRef.current;
+      if (!el || e.deltaY === 0) return;
+      const metrics = readScrollMetrics(el);
+      scrollStateRef.current = handleUserScrollIntent(
+        scrollStateRef.current,
+        e.deltaY < 0 ? "up" : "down",
+        metrics,
+      );
+      syncScrollToBottomVisibility(metrics);
+    },
+    [syncScrollToBottomVisibility],
+  );
 
-  const handleChatTouchStart = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
-    lastTouchYRef.current = e.touches[0]?.clientY ?? null;
-    scrollStateRef.current = clearPendingProgrammaticScroll(scrollStateRef.current);
-  }, []);
+  const handleChatTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      lastTouchYRef.current = e.touches[0]?.clientY ?? null;
+      scrollStateRef.current = clearPendingProgrammaticScroll(scrollStateRef.current);
+      const el = scrollContainerRef.current;
+      if (el) {
+        syncScrollToBottomVisibility(readScrollMetrics(el));
+      }
+    },
+    [syncScrollToBottomVisibility],
+  );
 
-  const handleChatTouchMove = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
-    const el = scrollContainerRef.current;
-    const currentY = e.touches[0]?.clientY;
-    const prevY = lastTouchYRef.current;
-    if (currentY !== undefined) {
-      lastTouchYRef.current = currentY;
-    }
-    if (!el || currentY === undefined || prevY === null || currentY === prevY) return;
-    // Swiping finger downward scrolls chat content upward toward earlier messages.
-    scrollStateRef.current = handleUserScrollIntent(
-      scrollStateRef.current,
-      currentY > prevY ? "up" : "down",
-      readScrollMetrics(el),
-    );
-  }, []);
+  const handleChatTouchMove = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      const el = scrollContainerRef.current;
+      const currentY = e.touches[0]?.clientY;
+      const prevY = lastTouchYRef.current;
+      if (currentY !== undefined) {
+        lastTouchYRef.current = currentY;
+      }
+      if (!el || currentY === undefined || prevY === null || currentY === prevY) return;
+      // Swiping finger downward scrolls chat content upward toward earlier messages.
+      const metrics = readScrollMetrics(el);
+      scrollStateRef.current = handleUserScrollIntent(
+        scrollStateRef.current,
+        currentY > prevY ? "up" : "down",
+        metrics,
+      );
+      syncScrollToBottomVisibility(metrics);
+    },
+    [syncScrollToBottomVisibility],
+  );
 
   const handleChatTouchEnd = useCallback(() => {
     lastTouchYRef.current = null;
   }, []);
 
-  const handleChatPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    const el = scrollContainerRef.current;
-    if (el && e.target === el) {
-      scrollStateRef.current = clearPendingProgrammaticScroll(scrollStateRef.current);
-    }
-  }, []);
+  const handleChatPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const el = scrollContainerRef.current;
+      if (el && e.target === el) {
+        scrollStateRef.current = clearPendingProgrammaticScroll(scrollStateRef.current);
+        syncScrollToBottomVisibility(readScrollMetrics(el));
+      }
+    },
+    [syncScrollToBottomVisibility],
+  );
 
-  const handleChatKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    if (e.key === "PageUp" || e.key === "ArrowUp" || e.key === "Home") {
-      scrollStateRef.current = handleUserScrollIntent(
-        scrollStateRef.current,
-        "up",
-        readScrollMetrics(el),
-      );
-    } else if (e.key === "PageDown" || e.key === "ArrowDown" || e.key === "End") {
-      scrollStateRef.current = handleUserScrollIntent(
-        scrollStateRef.current,
-        "down",
-        readScrollMetrics(el),
-      );
-    }
-  }, []);
+  const handleChatKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const el = scrollContainerRef.current;
+      if (!el) return;
+      if (e.key === "PageUp" || e.key === "ArrowUp" || e.key === "Home") {
+        const metrics = readScrollMetrics(el);
+        scrollStateRef.current = handleUserScrollIntent(scrollStateRef.current, "up", metrics);
+        syncScrollToBottomVisibility(metrics);
+      } else if (e.key === "PageDown" || e.key === "ArrowDown" || e.key === "End") {
+        const metrics = readScrollMetrics(el);
+        scrollStateRef.current = handleUserScrollIntent(scrollStateRef.current, "down", metrics);
+        syncScrollToBottomVisibility(metrics);
+      }
+    },
+    [syncScrollToBottomVisibility],
+  );
 
   useEffect(() => {
     const scrollEl = scrollContainerRef.current;
@@ -380,17 +722,16 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     if (!scrollEl || !contentEl || typeof ResizeObserver === "undefined") return;
 
     const observer = new ResizeObserver(() => {
-      scrollStateRef.current = syncScrollStateAfterResize(
-        scrollStateRef.current,
-        readScrollMetrics(scrollEl),
-        Date.now(),
-      );
+      const now = Date.now();
+      const metrics = readScrollMetrics(scrollEl);
+      scrollStateRef.current = syncScrollStateAfterResize(scrollStateRef.current, metrics, now);
+      syncScrollToBottomVisibility(metrics, now);
     });
 
     observer.observe(contentEl);
     observer.observe(scrollEl);
     return () => observer.disconnect();
-  }, []);
+  }, [syncScrollToBottomVisibility]);
 
   useLayoutEffect(() => {
     if (!jumpRequest) return;
@@ -413,13 +754,15 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     container.scrollTop = targetScrollTop;
     const actualMetrics = readScrollMetrics(container);
     const didScroll = Math.abs(actualMetrics.scrollTop - beforeScrollTop) >= 0.5;
+    const now = Date.now();
     scrollStateRef.current = recordProgrammaticScroll(
       scrollStateRef.current,
       "jump",
       actualMetrics,
       didScroll,
-      Date.now(),
+      now,
     );
+    syncScrollToBottomVisibility(actualMetrics, now);
     flushVisibleUnreadRef.current();
 
     setHighlightedMessageId(jumpRequest.messageId);
@@ -431,7 +774,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     }, 1800);
 
     return () => window.clearTimeout(timer);
-  }, [jumpRequest]);
+  }, [jumpRequest, syncScrollToBottomVisibility]);
 
   const activeTab = snapshot.browserTabs.find((t) => t.id === snapshot.activeBrowserTabId);
   const browserErrorCount = (activeTab?.consoleErrorCount ?? 0) + (activeTab?.networkErrorCount ?? 0);
@@ -563,38 +906,76 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     if (!container) return;
 
     const updateKind = classifyMessagesUpdate(prevMessages, nextMessages);
+    const now = Date.now();
+    const currentMetrics = readScrollMetrics(container);
     const decision = evaluateAutoScrollOnUpdate(scrollStateRef.current, {
       updateKind,
-      currentMetrics: readScrollMetrics(container),
-      now: Date.now(),
+      currentMetrics,
+      now,
     });
     scrollStateRef.current = decision.nextState;
 
     if (decision.shouldScrollToBottom) {
       scrollContainerToBottom(container);
       flushVisibleUnreadRef.current();
+    } else {
+      syncScrollToBottomVisibility(currentMetrics, now);
     }
-  }, [snapshot.activeChatSessionId, snapshot.messages, scrollContainerToBottom]);
+  }, [
+    snapshot.activeChatSessionId,
+    snapshot.messages,
+    scrollContainerToBottom,
+    syncScrollToBottomVisibility,
+  ]);
+
+  const displayComposerText =
+    isListening && interimTranscript
+      ? appendVoiceTranscript(composerText, interimTranscript)
+      : composerText;
 
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(160, Math.max(44, el.scrollHeight))}px`;
-  }, [composerText]);
+  }, [displayComposerText]);
+
+  const handlePickWelcomePrompt = useCallback(
+    (prompt: string) => {
+      onComposerTextChange(prompt);
+      textareaRef.current?.focus();
+    },
+    [onComposerTextChange],
+  );
+
+  const recentProjectNames = useMemo(
+    () => snapshot.projects.slice(0, 4).map((p) => p.name),
+    [snapshot.projects],
+  );
 
   const canSend = composerText.trim().length > 0 || attachments.length > 0;
   const handleTriggerSend = useCallback(() => {
+    if (isListening || recognitionRef.current) {
+      stopVoiceInput({ cancel: true });
+    }
     if (!canSend) return;
     setDismissedMentionKey(null);
     setCaretPos(0);
     onSend();
-  }, [canSend, onSend]);
+  }, [canSend, isListening, onSend, stopVoiceInput]);
   const chatProviderInfo = snapshot.providers[snapshot.chatProvider];
   const workerProviderInfo = snapshot.providers[snapshot.workerProvider];
   const activeChatModel = chatProviderInfo?.models.find((m) => m.model === snapshot.chatModel);
   const activeWorkerModel = workerProviderInfo?.models.find((m) => m.model === snapshot.workerModel);
   const allProviders: AgentProvider[] = ["codex", "agy", "claude"];
+  const todayUsage = useMemo(
+    () => summarizeUsage(snapshot.usageRecords ?? [], "today"),
+    [snapshot.usageRecords],
+  );
+  const allTimeUsage = useMemo(
+    () => summarizeUsage(snapshot.usageRecords ?? [], "all"),
+    [snapshot.usageRecords],
+  );
 
   return (
     <section className="flex flex-col h-full min-w-0 bg-white dark:bg-[#0f1115]">
@@ -608,7 +989,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
           <button
             type="button"
             onClick={onToggleSidebar}
-            title="タスク一覧を表示/非表示 (⌘B)"
+            title={t(activeLocale, "chat.toggleSidebarTitle")}
             className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
           >
             <PanelLeft className="w-4 h-4" />
@@ -618,7 +999,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             <span
               title={snapshot.connectionStatus}
               className={`w-2 h-2 rounded-full shrink-0 ${
-                snapshot.isConnected ? "bg-emerald-500" : "bg-amber-500 animate-pulse"
+                snapshot.isConnected ? "bg-emerald-500" : "bg-amber-500"
               }`}
             />
             <span className="text-[13px] font-semibold">Conductor</span>
@@ -636,7 +1017,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 cursor-pointer"
             >
               <RefreshCw className="w-3 h-3" />
-              再接続
+              {t(activeLocale, "chat.reconnect")}
             </button>
           )}
         </div>
@@ -645,13 +1026,17 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
           {snapshot.activeResponderCount > 0 && (
             <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-[11px] font-medium">
               <Loader2 className="w-3 h-3 animate-spin" />
-              <span>{snapshot.activeResponderCount}件 並列応答中</span>
+              <span>
+                {t(activeLocale, "chat.parallelResponding", {
+                  count: snapshot.activeResponderCount,
+                })}
+              </span>
               <button
                 type="button"
                 onClick={onStopAll}
                 className="text-rose-500 hover:underline ml-0.5 cursor-pointer"
               >
-                全停止
+                {t(activeLocale, "chat.stopAll")}
               </button>
             </div>
           )}
@@ -686,7 +1071,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                   {/* Front-Desk Chat Provider & Model */}
                   <div className="space-y-1.5">
                     <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
-                      チャット窓口（高速レスポンス）
+                      {t(activeLocale, "chat.frontDeskProvider")}
                     </div>
                     <div className="grid grid-cols-3 gap-1">
                       {allProviders.map((pId) => {
@@ -748,7 +1133,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                   {/* Background Worker Provider & Model */}
                   <div className="border-t border-zinc-200 dark:border-zinc-800 pt-2.5 space-y-1.5">
                     <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
-                      プロジェクト実行ワーカー（既定）
+                      {t(activeLocale, "chat.workerProvider")}
                     </div>
                     <div className="grid grid-cols-3 gap-1">
                       {allProviders.map((pId) => {
@@ -811,12 +1196,96 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             )}
           </div>
 
+          {onOpenUsage && (
+            <button
+              type="button"
+              data-testid="open-usage-btn"
+              onClick={onOpenUsage}
+              title={
+                allTimeUsage.totalTokens > 0
+                  ? t(activeLocale, "chat.usagePillTitle", {
+                      todayTokens: formatTokenCount(todayUsage.totalTokens),
+                      todayCost: formatUsdCost(todayUsage.costUsd, {
+                        estimated: todayUsage.hasEstimatedCost,
+                      }),
+                      allTokens: formatTokenCount(allTimeUsage.totalTokens),
+                      allCost: formatUsdCost(allTimeUsage.costUsd, {
+                        estimated: allTimeUsage.hasEstimatedCost,
+                      }),
+                    })
+                  : t(activeLocale, "chat.usagePillEmptyTitle")
+              }
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100/80 dark:bg-zinc-800/70 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer tabular-nums"
+            >
+              <BarChart3 className="w-3 h-3 text-indigo-500 shrink-0" />
+              {todayUsage.totalTokens > 0 ? (
+                <>
+                  <span>{formatTokenCount(todayUsage.totalTokens)}</span>
+                  <span className="text-zinc-400">·</span>
+                  <span>
+                    {formatUsdCost(todayUsage.costUsd, {
+                      estimated: todayUsage.hasEstimatedCost,
+                      compact: true,
+                    })}
+                  </span>
+                </>
+              ) : (
+                <span>Usage</span>
+              )}
+            </button>
+          )}
+
+          {isSpeaking && onStopSpeaking && (
+            <button
+              type="button"
+              data-testid="voice-stop-speaking-btn"
+              onClick={onStopSpeaking}
+              title={t(activeLocale, "voice.stopSpeakingTitle")}
+              aria-label={t(activeLocale, "voice.stopSpeakingTitle")}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 hover:bg-rose-500/15 hover:text-rose-600 dark:hover:text-rose-300 transition-colors cursor-pointer"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-ping" />
+              <Square className="w-2.5 h-2.5 fill-current" />
+              <span>{t(activeLocale, "voice.stopSpeaking")}</span>
+            </button>
+          )}
+
+          {onToggleVoiceReadback && (
+            <button
+              type="button"
+              data-testid="voice-readback-toggle-btn"
+              aria-pressed={voiceReadbackEnabled}
+              onClick={onToggleVoiceReadback}
+              title={
+                voiceReadbackEnabled
+                  ? t(activeLocale, "voice.readbackOnTitle")
+                  : t(activeLocale, "voice.readbackOffTitle")
+              }
+              aria-label={
+                voiceReadbackEnabled
+                  ? t(activeLocale, "voice.readbackDisableAria")
+                  : t(activeLocale, "voice.readbackEnableAria")
+              }
+              className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                voiceReadbackEnabled
+                  ? "text-indigo-500 bg-indigo-500/10 hover:bg-indigo-500/20"
+                  : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              }`}
+            >
+              {voiceReadbackEnabled ? (
+                <Volume2 className="w-4 h-4" />
+              ) : (
+                <VolumeX className="w-4 h-4" />
+              )}
+            </button>
+          )}
+
           {onOpenSettings && (
             <button
               type="button"
               data-testid="open-settings-btn"
               onClick={onOpenSettings}
-              title="設定 (Git Worktree / 統合モード)"
+              title={t(activeLocale, "chat.settingsTitle")}
               className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
             >
               <Settings className="w-4 h-4" />
@@ -828,6 +1297,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             activeSessionId={snapshot.activeChatSessionId}
             activeMessageCount={snapshot.messages.length}
             activeResponderCount={snapshot.activeResponderCount}
+            locale={activeLocale}
             newChatConfirmTrigger={newChatConfirmTrigger}
             onSelectSession={onSelectChatSession}
             onNewChat={onNewChat}
@@ -837,7 +1307,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
           <button
             type="button"
             onClick={onToggleMarkdownViewer}
-            title="Markdown Viewer を開く/切替 (⌘⇧M)"
+            title={t(activeLocale, "chat.toggleMarkdownTitle")}
             className={`p-1.5 rounded-md transition-colors cursor-pointer ${
               snapshot.showBrowserPane && rightPaneMode === "markdown"
                 ? "text-indigo-500 bg-indigo-500/10"
@@ -850,7 +1320,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
           <button
             type="button"
             onClick={onToggleBrowser}
-            title="右ペイン (Browser / Markdown) を表示/非表示 (⌘\)"
+            title={t(activeLocale, "chat.toggleRightPaneTitle")}
             className={`p-1.5 rounded-md transition-colors cursor-pointer ${
               snapshot.showBrowserPane
                 ? "text-indigo-500 bg-indigo-500/10"
@@ -874,67 +1344,54 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
       )}
 
       {/* Unified Chat Stream */}
-      <div
-        ref={scrollContainerRef}
-        onScroll={handleChatScroll}
-        onWheel={handleChatWheel}
-        onTouchStart={handleChatTouchStart}
-        onTouchMove={handleChatTouchMove}
-        onTouchEnd={handleChatTouchEnd}
-        onTouchCancel={handleChatTouchEnd}
-        onPointerDown={handleChatPointerDown}
-        onKeyDown={handleChatKeyDown}
-        className="flex-1 overflow-y-auto px-5 py-6"
-      >
-        <div ref={contentContainerRef} className="max-w-[740px] mx-auto space-y-5">
-          {snapshot.messages.length === 0 ? (
-            <EmptyWelcome
-              projectCount={snapshot.projects.length}
-              recentProjectNames={snapshot.projects.slice(0, 4).map((p) => p.name)}
-              onAddProject={onAddProject}
-              onPickPrompt={(prompt) => {
-                onComposerTextChange(prompt);
-                textareaRef.current?.focus();
-              }}
-            />
-          ) : (
-            snapshot.messages.map((msg) => {
-              const isHighlighted = highlightedMessageId === msg.id;
-              return (
-                <div
-                  key={msg.id}
-                  ref={(el) => registerMessageEl(msg.id, el)}
-                  data-message-id={msg.id}
-                  className={`scroll-mt-6 -mx-2.5 px-2.5 py-2 rounded-2xl transition-all duration-500 ${
-                    isHighlighted
-                      ? "bg-indigo-500/[0.09] dark:bg-indigo-500/[0.16] ring-2 ring-indigo-500/60 shadow-sm"
-                      : "ring-0 ring-transparent"
-                  }`}
-                >
-                  <MessageRow
-                    message={msg}
-                    projects={snapshot.projects}
-                    tasks={snapshot.tasks}
-                    defaultIntegrationMode={snapshot.defaultIntegrationMode}
-                    onOpenUrl={(url) => onOpenUrl(url, { message: msg })}
-                    onOpenMarkdownFile={(target, base) =>
-                      onOpenMarkdownFile(target, base, { message: msg })
-                    }
-                    onOpenImageAttachment={
-                      onOpenImageAttachment
-                        ? (att) => onOpenImageAttachment(att, { message: msg })
-                        : undefined
-                    }
-                    onOpenTask={onOpenTask}
-                    onUpdateTaskStatus={onUpdateTaskStatus}
-                    onLandTask={onLandTask}
-                    onStop={() => onStopMessage(msg.id)}
-                  />
-                </div>
-              );
-            })
-          )}
+      <div className="relative flex-1 min-h-0 flex flex-col">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleChatScroll}
+          onWheel={handleChatWheel}
+          onTouchStart={handleChatTouchStart}
+          onTouchMove={handleChatTouchMove}
+          onTouchEnd={handleChatTouchEnd}
+          onTouchCancel={handleChatTouchEnd}
+          onPointerDown={handleChatPointerDown}
+          onKeyDown={handleChatKeyDown}
+          className="flex-1 overflow-y-auto px-5 py-6"
+        >
+          <div ref={contentContainerRef} className="max-w-[740px] mx-auto space-y-5">
+            {snapshot.messages.length === 0 ? (
+              <EmptyWelcome
+                projectCount={snapshot.projects.length}
+                recentProjectNames={recentProjectNames}
+                locale={activeLocale}
+                onAddProject={onAddProject}
+                onPickPrompt={handlePickWelcomePrompt}
+              />
+            ) : (
+              <ChatMessageList
+                messages={snapshot.messages}
+                projects={snapshot.projects}
+                tasks={snapshot.tasks}
+                defaultIntegrationMode={snapshot.defaultIntegrationMode}
+                locale={activeLocale}
+                highlightedMessageId={highlightedMessageId}
+                registerMessageEl={registerMessageEl}
+                onOpenUrl={onOpenUrl}
+                onOpenMarkdownFile={onOpenMarkdownFile}
+                onOpenImageAttachment={onOpenImageAttachment}
+                onOpenTask={onOpenTask}
+                onUpdateTaskStatus={onUpdateTaskStatus}
+                onLandTask={onLandTask}
+                onStopMessage={onStopMessage}
+              />
+            )}
+          </div>
         </div>
+
+        <ScrollToBottomButton
+          visible={showScrollToBottom}
+          locale={activeLocale}
+          onClick={handleScrollToBottomClick}
+        />
       </div>
 
       {/* Non-Blocking Composer */}
@@ -949,6 +1406,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               suggestions={mentionSuggestions}
               scopedProject={scopedProject}
               activeIndex={clampedMentionIndex}
+              locale={activeLocale}
               onHoverIndex={setActiveMentionIndex}
               onSelect={handleSelectMention}
             />
@@ -973,8 +1431,12 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                             draftMentions: selectedMentions,
                           })
                         }
-                        title={`右ペインで画像を表示: ${att.label}`}
-                        aria-label={`画像を右ペインで表示: ${att.label}`}
+                        title={t(activeLocale, "chat.openImageInRightPaneTitle", {
+                          label: att.label,
+                        })}
+                        aria-label={t(activeLocale, "chat.openImageInRightPaneAria", {
+                          label: att.label,
+                        })}
                         className="group inline-flex items-center gap-1.5 min-w-0 rounded hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors cursor-pointer"
                       >
                         {att.imageDataUrl ? (
@@ -1003,7 +1465,9 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                     <button
                       type="button"
                       onClick={() => onRemoveAttachment(att.id)}
-                      aria-label={`${att.label} を削除`}
+                      aria-label={t(activeLocale, "chat.removeAttachmentAria", {
+                        label: att.label,
+                      })}
                       className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100 cursor-pointer"
                     >
                       <X className="w-3 h-3" />
@@ -1016,14 +1480,64 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
 
           <DraftMentionContextBar
             chips={draftMentionChips}
+            locale={activeLocale}
             onRemoveChip={handleRemoveDraftMention}
             hasAttachmentsAbove={attachments.length > 0}
           />
 
+          {isListening && (
+            <div
+              data-testid="composer-voice-listening-bar"
+              className="flex items-center justify-between gap-2 px-3.5 pt-2 pb-0.5 text-[11.5px] text-rose-600 dark:text-rose-400"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="relative flex h-2 w-2 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500" />
+                </span>
+                <span className="font-medium shrink-0">
+                  {t(activeLocale, "voice.listeningLabel", { locale: speechLocale })}
+                </span>
+                <span className="text-zinc-500 dark:text-zinc-400 truncate">
+                  {interimTranscript || t(activeLocale, "voice.listeningHint")}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => stopVoiceInput()}
+                className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-rose-500/12 hover:bg-rose-500/20 text-rose-600 dark:text-rose-300 cursor-pointer shrink-0"
+              >
+                {t(activeLocale, "common.stop")}
+              </button>
+            </div>
+          )}
+
+          {voiceError && (
+            <div
+              data-testid="composer-voice-error-banner"
+              className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11.5px] text-amber-800 dark:text-amber-200 flex items-start gap-2"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+              <span className="flex-1 leading-relaxed">{voiceError}</span>
+              <button
+                type="button"
+                onClick={() => setVoiceError(null)}
+                aria-label={t(activeLocale, "voice.dismissErrorAria")}
+                className="text-amber-600/80 hover:text-amber-800 dark:text-amber-300/80 dark:hover:text-amber-100 cursor-pointer shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           <textarea
             ref={textareaRef}
-            value={composerText}
+            value={displayComposerText}
             onChange={(e) => {
+              if (interimTranscriptRef.current) {
+                interimTranscriptRef.current = "";
+                setInterimTranscript("");
+              }
               onComposerTextChange(e.target.value);
               setCaretPos(e.target.selectionStart ?? e.target.value.length);
               setDismissedMentionKey(null);
@@ -1060,6 +1574,24 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               const composing =
                 e.nativeEvent.isComposing || isComposingRef.current || e.keyCode === 229;
               if (composing) return;
+
+              if (
+                e.altKey &&
+                !e.metaKey &&
+                !e.ctrlKey &&
+                !e.shiftKey &&
+                (e.code === "Space" || e.key === " " || e.key === "\u00a0")
+              ) {
+                e.preventDefault();
+                toggleVoiceInput();
+                return;
+              }
+
+              if (isListening && e.key === "Escape") {
+                e.preventDefault();
+                stopVoiceInput({ cancel: true });
+                return;
+              }
 
               if (showMentionPopover) {
                 if (e.key === "Escape") {
@@ -1112,7 +1644,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                 }
               }
             }}
-            placeholder="複数プロジェクトへの指示や質問を入力…（@ でプロジェクト/タスクを指定・応答中でも連投OK）"
+            placeholder={t(activeLocale, "chat.composerPlaceholder")}
             rows={1}
             className="w-full resize-none bg-transparent px-3.5 pt-3 pb-1.5 text-[14px] leading-relaxed outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 select-text"
           />
@@ -1121,73 +1653,140 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             <div className="flex items-center gap-0.5">
               <button
                 type="button"
+                data-testid="composer-attach-image-btn"
                 onClick={onPickLocalImages}
-                title="画像を添付"
+                title={t(activeLocale, "chat.attachImage")}
+                aria-label={t(activeLocale, "chat.attachImage")}
                 className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
               >
                 <Paperclip className="w-4 h-4" />
               </button>
 
-              <button
-                type="button"
-                onClick={onCaptureScreenshot}
-                title="右ブラウザのスクショを添付 (⌘⇧S)"
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-              >
-                <Camera className="w-3.5 h-3.5" />
-                <span>スクショ</span>
-              </button>
+              {isBrowserTabActive && (
+                <>
+                  <button
+                    type="button"
+                    data-testid="composer-screenshot-btn"
+                    onClick={onCaptureScreenshot}
+                    title={t(activeLocale, "chat.screenshotTitle")}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>{t(activeLocale, "chat.screenshotBtn")}</span>
+                  </button>
 
-              <button
-                type="button"
-                onClick={onToggleElementPicker}
-                title="右ブラウザ上の要素を選択してチャットへ送る (⌘⇧P)"
-                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] transition-colors cursor-pointer ${
-                  snapshot.isPickingElement
-                    ? "bg-indigo-500 text-white"
-                    : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
-                }`}
-              >
-                <Crosshair className="w-3.5 h-3.5" />
-                <span>要素選択</span>
-              </button>
+                  <button
+                    type="button"
+                    data-testid="composer-element-picker-btn"
+                    onClick={onToggleElementPicker}
+                    title={t(activeLocale, "chat.elementPickerTitle")}
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] transition-colors cursor-pointer ${
+                      snapshot.isPickingElement
+                        ? "bg-indigo-500 text-white"
+                        : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
+                    }`}
+                  >
+                    <Crosshair className="w-3.5 h-3.5" />
+                    <span>{t(activeLocale, "chat.elementPickerBtn")}</span>
+                  </button>
 
-              <button
-                type="button"
-                onClick={onAttachCurrentUrl}
-                title="現在のブラウザURLを添付"
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-              >
-                <Link2 className="w-3.5 h-3.5" />
-                <span>URL</span>
-              </button>
+                  <button
+                    type="button"
+                    data-testid="composer-attach-url-btn"
+                    onClick={onAttachCurrentUrl}
+                    title={t(activeLocale, "chat.attachUrlTitle")}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                  >
+                    <Link2 className="w-3.5 h-3.5" />
+                    <span>URL</span>
+                  </button>
 
-              {browserErrorCount > 0 && (
-                <button
-                  type="button"
-                  onClick={onAttachConsoleErrors}
-                  title="右ブラウザのコンソール/通信エラーをチャットへ添付"
-                  className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] font-medium bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 transition-colors cursor-pointer"
-                >
-                  <AlertTriangle className="w-3.5 h-3.5" />
-                  <span>エラー ({browserErrorCount})</span>
-                </button>
+                  {browserErrorCount > 0 && (
+                    <button
+                      type="button"
+                      data-testid="composer-attach-errors-btn"
+                      onClick={onAttachConsoleErrors}
+                      title={t(activeLocale, "chat.attachErrorsTitle")}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] font-medium bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 transition-colors cursor-pointer"
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      <span>{t(activeLocale, "chat.errorsCountBtn", { count: browserErrorCount })}</span>
+                    </button>
+                  )}
+                </>
               )}
             </div>
 
-            <button
-              type="button"
-              onClick={handleTriggerSend}
-              disabled={!canSend}
-              title="送信 (Enter) — 連投OK"
-              className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${
-                canSend
-                  ? "bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer shadow-sm"
-                  : "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 cursor-not-allowed"
-              }`}
-            >
-              <ArrowUp className="w-4 h-4 stroke-[2.5]" />
-            </button>
+            <div className="flex items-center gap-1.5">
+              {onToggleVoiceAutoSend && (
+                <button
+                  type="button"
+                  data-testid="composer-voice-autosend-btn"
+                  aria-pressed={voiceAutoSend}
+                  onClick={onToggleVoiceAutoSend}
+                  title={
+                    voiceAutoSend
+                      ? t(activeLocale, "voice.autoSendOnTitle")
+                      : t(activeLocale, "voice.autoSendOffTitle")
+                  }
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
+                    voiceAutoSend
+                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30"
+                      : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 border border-transparent"
+                  }`}
+                >
+                  <span>{t(activeLocale, "voice.autoSendShort")}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                data-testid="composer-voice-mic-btn"
+                aria-pressed={isListening}
+                onClick={toggleVoiceInput}
+                title={
+                  isListening
+                    ? t(activeLocale, "voice.micStopTitle", { locale: speechLocale })
+                    : t(activeLocale, "voice.micStartTitle", { locale: speechLocale })
+                }
+                aria-label={
+                  isListening
+                    ? t(activeLocale, "voice.micStopAria")
+                    : t(activeLocale, "voice.micStartAria")
+                }
+                className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+                  isListening
+                    ? "bg-rose-500 hover:bg-rose-600 text-white shadow-sm ring-2 ring-rose-500/35"
+                    : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800"
+                }`}
+              >
+                {isListening && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-0 rounded-full bg-rose-500/40 animate-ping pointer-events-none"
+                  />
+                )}
+                {isListening ? (
+                  <MicOff className="w-4 h-4 relative z-10" />
+                ) : (
+                  <Mic className="w-4 h-4" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleTriggerSend}
+                disabled={!canSend}
+                title={t(activeLocale, "chat.sendTitle")}
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${
+                  canSend
+                    ? "bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer shadow-sm"
+                    : "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 cursor-not-allowed"
+                }`}
+              >
+                <ArrowUp className="w-4 h-4 stroke-[2.5]" />
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1195,29 +1794,227 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   );
 };
 
+export interface ScrollToBottomButtonProps {
+  visible: boolean;
+  locale: UiLocale;
+  onClick: () => void;
+}
+
+export const ScrollToBottomButton: React.FC<ScrollToBottomButtonProps> = React.memo(
+  ({ visible, locale, onClick }) => {
+    if (!visible) return null;
+    const label = t(locale, "chat.scrollToBottom");
+    return (
+      <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-4">
+        <button
+          type="button"
+          data-testid="chat-scroll-to-bottom-btn"
+          onClick={onClick}
+          title={label}
+          aria-label={label}
+          className="pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11.5px] font-medium border border-zinc-200/90 dark:border-zinc-700/90 bg-white/95 dark:bg-[#191d26]/95 backdrop-blur-md text-zinc-700 dark:text-zinc-200 shadow-md shadow-zinc-950/10 dark:shadow-black/35 hover:border-indigo-500/50 hover:text-indigo-600 dark:hover:text-indigo-300 hover:bg-white dark:hover:bg-[#1f2430] active:scale-[0.98] transition-all cursor-pointer"
+        >
+          <ArrowDown className="w-3.5 h-3.5 shrink-0" />
+          <span>{label}</span>
+        </button>
+      </div>
+    );
+  },
+);
+
+const ChatMessageItem: React.FC<{
+  message: ChatMessage;
+  projects: Project[];
+  tasks: AgentTask[];
+  defaultIntegrationMode?: IntegrationMode;
+  locale: UiLocale;
+  isHighlighted: boolean;
+  registerMessageEl: (messageId: string, el: HTMLDivElement | null) => void;
+  onOpenUrl: (url: string, context?: { message?: ChatMessage }) => void;
+  onOpenMarkdownFile: (
+    target: string,
+    baseFilePath?: string,
+    context?: { message?: ChatMessage },
+  ) => void;
+  onOpenImageAttachment?: (
+    attachment: ChatAttachment,
+    context?: {
+      message?: ChatMessage;
+      draftText?: string;
+      draftMentions?: ExplicitMentionTarget[];
+    },
+  ) => void;
+  onOpenTask: (taskId: string) => void;
+  onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
+  onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
+  onStopMessage: (id: string) => void;
+}> = React.memo(({
+  message,
+  projects,
+  tasks,
+  defaultIntegrationMode,
+  locale,
+  isHighlighted,
+  registerMessageEl,
+  onOpenUrl,
+  onOpenMarkdownFile,
+  onOpenImageAttachment,
+  onOpenTask,
+  onUpdateTaskStatus,
+  onLandTask,
+  onStopMessage,
+}) => {
+  const setRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      registerMessageEl(message.id, el);
+    },
+    [registerMessageEl, message.id],
+  );
+
+  const handleOpenUrl = useCallback(
+    (url: string) => onOpenUrl(url, { message }),
+    [onOpenUrl, message],
+  );
+
+  const handleOpenMarkdownFile = useCallback(
+    (target: string, base?: string) => onOpenMarkdownFile(target, base, { message }),
+    [onOpenMarkdownFile, message],
+  );
+
+  const handleOpenImage = useCallback(
+    (att: ChatAttachment) => onOpenImageAttachment?.(att, { message }),
+    [onOpenImageAttachment, message],
+  );
+
+  const handleStop = useCallback(
+    () => onStopMessage(message.id),
+    [onStopMessage, message.id],
+  );
+
+  return (
+    <div
+      ref={setRef}
+      data-message-id={message.id}
+      className={`scroll-mt-6 -mx-2.5 px-2.5 py-2 rounded-2xl transition-colors duration-300 ${
+        isHighlighted
+          ? "bg-indigo-500/[0.09] dark:bg-indigo-500/[0.16] ring-2 ring-indigo-500/60 shadow-sm"
+          : "ring-0 ring-transparent"
+      }`}
+    >
+      <MessageRow
+        message={message}
+        projects={projects}
+        tasks={tasks}
+        defaultIntegrationMode={defaultIntegrationMode}
+        locale={locale}
+        onOpenUrl={handleOpenUrl}
+        onOpenMarkdownFile={handleOpenMarkdownFile}
+        onOpenImageAttachment={onOpenImageAttachment ? handleOpenImage : undefined}
+        onOpenTask={onOpenTask}
+        onUpdateTaskStatus={onUpdateTaskStatus}
+        onLandTask={onLandTask}
+        onStop={handleStop}
+      />
+    </div>
+  );
+});
+
+const ChatMessageList: React.FC<{
+  messages: ChatMessage[];
+  projects: Project[];
+  tasks: AgentTask[];
+  defaultIntegrationMode?: IntegrationMode;
+  locale: UiLocale;
+  highlightedMessageId: string | null;
+  registerMessageEl: (messageId: string, el: HTMLDivElement | null) => void;
+  onOpenUrl: (url: string, context?: { message?: ChatMessage }) => void;
+  onOpenMarkdownFile: (
+    target: string,
+    baseFilePath?: string,
+    context?: { message?: ChatMessage },
+  ) => void;
+  onOpenImageAttachment?: (
+    attachment: ChatAttachment,
+    context?: {
+      message?: ChatMessage;
+      draftText?: string;
+      draftMentions?: ExplicitMentionTarget[];
+    },
+  ) => void;
+  onOpenTask: (taskId: string) => void;
+  onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
+  onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
+  onStopMessage: (id: string) => void;
+}> = React.memo(({
+  messages,
+  projects,
+  tasks,
+  defaultIntegrationMode,
+  locale,
+  highlightedMessageId,
+  registerMessageEl,
+  onOpenUrl,
+  onOpenMarkdownFile,
+  onOpenImageAttachment,
+  onOpenTask,
+  onUpdateTaskStatus,
+  onLandTask,
+  onStopMessage,
+}) => {
+  return (
+    <>
+      {messages.map((msg) => {
+        const needsWorkspaceRefs = msg.role !== "assistant";
+        return (
+          <ChatMessageItem
+            key={msg.id}
+            message={msg}
+            projects={needsWorkspaceRefs ? projects : EMPTY_PROJECTS}
+            tasks={needsWorkspaceRefs ? tasks : EMPTY_TASKS}
+            defaultIntegrationMode={
+              msg.role === "taskEvent" ? defaultIntegrationMode : undefined
+            }
+            locale={locale}
+            isHighlighted={highlightedMessageId === msg.id}
+            registerMessageEl={registerMessageEl}
+            onOpenUrl={onOpenUrl}
+            onOpenMarkdownFile={onOpenMarkdownFile}
+            onOpenImageAttachment={onOpenImageAttachment}
+            onOpenTask={onOpenTask}
+            onUpdateTaskStatus={onUpdateTaskStatus}
+            onLandTask={onLandTask}
+            onStopMessage={onStopMessage}
+          />
+        );
+      })}
+    </>
+  );
+});
+
 const EmptyWelcome: React.FC<{
   projectCount: number;
   recentProjectNames: string[];
+  locale: UiLocale;
   onAddProject: () => void;
   onPickPrompt: (prompt: string) => void;
-}> = ({ projectCount, recentProjectNames, onAddProject, onPickPrompt }) => {
-  const sampleName = recentProjectNames[0] ?? "プロジェクト";
+}> = React.memo(({ projectCount, recentProjectNames, locale, onAddProject, onPickPrompt }) => {
+  const sampleName = recentProjectNames[0] ?? t(locale, "chat.welcomeSampleFallback");
   const prompts = [
     {
-      title: "最近のプロジェクト状況を整理",
-      prompt: "最近触っているプロジェクトのブランチと未コミット変更をまとめて教えて。",
+      title: t(locale, "chat.welcomePrompt1Title"),
+      prompt: t(locale, "chat.welcomePrompt1Body"),
     },
     {
-      title: `${sampleName} の調査を依頼`,
-      prompt: `${sampleName} の現状を調査してタスクにまとめて。`,
+      title: t(locale, "chat.welcomePrompt2Title", { name: sampleName }),
+      prompt: t(locale, "chat.welcomePrompt2Body", { name: sampleName }),
     },
     {
-      title: "右ブラウザを自動操作して検証",
-      prompt: "右のIn-App Browserで開いているページをスナップショット確認して、コンソールエラーがないか調べて。",
+      title: t(locale, "chat.welcomePrompt3Title"),
+      prompt: t(locale, "chat.welcomePrompt3Body"),
     },
     {
-      title: "開発サーバー起動＋ブラウザ表示",
-      prompt: `${sampleName} の開発サーバーを起動して、右のIn-App Browserで開いて確認できるようにして。`,
+      title: t(locale, "chat.welcomePrompt4Title"),
+      prompt: t(locale, "chat.welcomePrompt4Body", { name: sampleName }),
     },
   ];
 
@@ -1228,10 +2025,10 @@ const EmptyWelcome: React.FC<{
       </div>
       <div className="space-y-1.5">
         <h1 className="text-[21px] font-semibold tracking-tight">
-          1つのチャットで、すべてのプロジェクトを動かす
+          {t(locale, "chat.welcomeHeading")}
         </h1>
         <p className="text-[13px] text-zinc-500 dark:text-zinc-400 max-w-md">
-          連投OKの並列高速チャット。左のタスクはエージェントが自動管理し、右の Chromium ブラウザを直接操作・検証できます。
+          {t(locale, "chat.welcomeSubtitle")}
         </p>
       </div>
 
@@ -1239,15 +2036,15 @@ const EmptyWelcome: React.FC<{
         <span className="w-2 h-2 rounded-full bg-emerald-500" />
         <span>
           {projectCount > 0
-            ? `${projectCount}個のプロジェクトを自動認識済み（そのまま名前で指示できます）`
-            : "プロジェクトを自動検出中..."}
+            ? t(locale, "chat.welcomeProjectsDetected", { count: projectCount })
+            : t(locale, "chat.welcomeProjectsScanning")}
         </span>
         <button
           type="button"
           onClick={onAddProject}
           className="text-indigo-500 hover:underline font-medium cursor-pointer ml-1"
         >
-          + フォルダ追加
+          {t(locale, "chat.welcomeAddFolder")}
         </button>
       </div>
 
@@ -1268,82 +2065,14 @@ const EmptyWelcome: React.FC<{
       </div>
     </div>
   );
-};
-
-const HighlightedUserText: React.FC<{
-  text: string;
-  projects: Project[];
-  tasks: AgentTask[];
-  onOpenTask: (taskId: string) => void;
-}> = ({ text, projects, tasks, onOpenTask }) => {
-  const { mentions } = useMemo(
-    () => parseAndResolveMentions(text, projects, tasks),
-    [text, projects, tasks],
-  );
-
-  if (mentions.length === 0) {
-    return <>{text}</>;
-  }
-
-  const nodes: React.ReactNode[] = [];
-  let cursor = 0;
-
-  for (const m of mentions) {
-    if (m.start > cursor) {
-      nodes.push(<React.Fragment key={`t:${cursor}`}>{text.slice(cursor, m.start)}</React.Fragment>);
-    }
-
-    if (m.task) {
-      nodes.push(
-        <button
-          key={`m:${m.start}`}
-          type="button"
-          onClick={() => onOpenTask(m.task!.id)}
-          title={`${formatTaskCode(m.task.taskNumber)} · ${m.task.projectName}: ${m.task.title} (${m.task.status})`}
-          className="inline-flex items-center px-1.5 py-0.2 mx-0.2 rounded-md font-mono text-[12.5px] font-semibold bg-indigo-500/20 text-indigo-700 dark:text-indigo-200 hover:bg-indigo-500/30 transition-colors cursor-pointer align-baseline"
-        >
-          {m.raw}
-        </button>,
-      );
-    } else if (m.project) {
-      nodes.push(
-        <span
-          key={`m:${m.start}`}
-          title={m.project.path}
-          className="inline-flex items-center px-1.5 py-0.2 mx-0.2 rounded-md font-medium text-[13px] align-baseline"
-          style={{
-            backgroundColor: `${m.project.colorHex}24`,
-            color: m.project.colorHex,
-          }}
-        >
-          {m.raw}
-        </span>,
-      );
-    } else {
-      nodes.push(
-        <span
-          key={`m:${m.start}`}
-          className="inline-flex items-center px-1.5 py-0.2 mx-0.2 rounded-md font-mono text-[12.5px] bg-zinc-500/15 text-zinc-700 dark:text-zinc-300 align-baseline"
-        >
-          {m.raw}
-        </span>,
-      );
-    }
-    cursor = m.end;
-  }
-
-  if (cursor < text.length) {
-    nodes.push(<React.Fragment key={`t:${cursor}`}>{text.slice(cursor)}</React.Fragment>);
-  }
-
-  return <>{nodes}</>;
-};
+});
 
 export interface TaskEventCardProps {
   message: ChatMessage;
   tasks: AgentTask[];
   projects?: Project[];
   defaultIntegrationMode?: IntegrationMode;
+  locale?: UiLocale;
   onOpenUrl: (url: string) => void;
   onOpenMarkdownFile: (target: string, baseFilePath?: string) => void;
   onOpenTask: (taskId: string) => void;
@@ -1356,6 +2085,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
   tasks,
   projects = [],
   defaultIntegrationMode = "feature-branch",
+  locale = "ja",
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenTask,
@@ -1364,13 +2094,13 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
 }) => {
   const resolvedTask = resolveTaskForTaskEvent(message, tasks);
   const targetTaskId = resolvedTask?.id ?? message.relatedTaskId;
-  const quickTransition = resolvedTask ? getQuickStatusTransition(resolvedTask.status) : null;
+  const quickTransition = resolvedTask ? getQuickStatusTransition(resolvedTask.status, locale) : null;
   const isDone = resolvedTask?.status === "done";
   const isRunning = resolvedTask?.status === "running";
   const needsLand = resolvedTask ? requiresLandBeforeDone(resolvedTask) : false;
   const doneBlockedReason =
     resolvedTask && quickTransition?.action === "done"
-      ? getMarkTaskDoneBlockedReason(resolvedTask)
+      ? getLocalizedMarkTaskDoneBlockedReason(resolvedTask, locale)
       : null;
   const isQuickDoneBlocked = Boolean(doneBlockedReason);
   const hasActiveWorktree = Boolean(resolvedTask?.worktreePath && resolvedTask?.worktreeBranch);
@@ -1428,7 +2158,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                   className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 shrink-0"
                 >
                   <CheckCircle2 className="w-3 h-3" />
-                  <span>Done</span>
+                  <span>{t(locale, "task.doneBadge")}</span>
                 </span>
               )}
               {isRunning && (
@@ -1437,7 +2167,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                   className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 shrink-0"
                 >
                   <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                  <span>Running</span>
+                  <span>{t(locale, "task.runningBadge")}</span>
                 </span>
               )}
               {needsLand && !isRunning && (
@@ -1446,7 +2176,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                   title={doneBlockedReason ?? undefined}
                   className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 shrink-0"
                 >
-                  未Land
+                  {t(locale, "task.unlandedBadge")}
                 </span>
               )}
             </div>
@@ -1463,8 +2193,10 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                   }}
                   title={
                     isPrMode
-                      ? `ブランチ ${resolvedTask.worktreeBranch} を Push / PR 作成`
-                      : `変更を Land (${effectiveMode})`
+                      ? t(locale, "sidebar.pushPrTitle", {
+                          branch: resolvedTask.worktreeBranch ?? "",
+                        })
+                      : t(locale, "sidebar.landChangesTitle", { mode: effectiveMode })
                   }
                   aria-label={`${resolvedTask.title}: ${isPrMode ? "Push / PR" : "Land"}`}
                   className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border transition-colors shrink-0 ${
@@ -1526,6 +2258,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
 
           <MarkdownView
             content={message.text}
+            locale={locale}
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
           />
@@ -1539,7 +2272,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
             <span className="font-mono text-[10.5px] font-semibold text-indigo-600 dark:text-indigo-300">
               {formatTaskCode(resolvedTask.taskNumber)}
             </span>
-            <span>タスク詳細を開く</span>
+            <span>{t(locale, "chat.openTaskDetail")}</span>
           </button>
         </div>
       ) : (
@@ -1548,6 +2281,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
           <div className="flex-1 min-w-0 space-y-2">
             <MarkdownView
               content={message.text}
+              locale={locale}
               onOpenUrl={onOpenUrl}
               onOpenMarkdownFile={onOpenMarkdownFile}
             />
@@ -1558,7 +2292,7 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
                 onClick={() => onOpenTask(targetTaskId)}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/50 transition-colors cursor-pointer"
               >
-                <span>タスク詳細を開く</span>
+                <span>{t(locale, "chat.openTaskDetail")}</span>
               </button>
             )}
           </div>
@@ -1568,11 +2302,14 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
   );
 };
 
+const MemoTaskEventCard = React.memo(TaskEventCard);
+
 const MessageRow: React.FC<{
   message: ChatMessage;
   projects: Project[];
   tasks: AgentTask[];
   defaultIntegrationMode?: IntegrationMode;
+  locale: UiLocale;
   onOpenUrl: (url: string) => void;
   onOpenMarkdownFile: (target: string, baseFilePath?: string) => void;
   onOpenImageAttachment?: (attachment: ChatAttachment) => void;
@@ -1580,11 +2317,12 @@ const MessageRow: React.FC<{
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
   onStop: () => void;
-}> = ({
+}> = React.memo(({
   message,
   projects,
   tasks,
   defaultIntegrationMode,
+  locale,
   onOpenUrl,
   onOpenMarkdownFile,
   onOpenImageAttachment,
@@ -1607,6 +2345,10 @@ const MessageRow: React.FC<{
         : [],
     [message.role, message.text, message.mentions, message.inferredMentions, projects, tasks],
   );
+  const userMentionContext = useMemo(
+    () => (message.role === "user" ? { projects, tasks, onOpenTask } : undefined),
+    [message.role, projects, tasks, onOpenTask],
+  );
 
   if (message.role === "user") {
     const hasMetaChips = mentionBadges.length > 0 || message.attachments.length > 0;
@@ -1617,7 +2359,11 @@ const MessageRow: React.FC<{
             data-testid="user-message-meta-chips"
             className="flex flex-wrap justify-end gap-1.5 max-w-[82%]"
           >
-            <UserMessageMentionBadges badges={mentionBadges} onOpenTask={onOpenTask} />
+            <UserMessageMentionBadges
+              badges={mentionBadges}
+              locale={locale}
+              onOpenTask={onOpenTask}
+            />
             {message.attachments.map((att) => {
               const viewableImage =
                 isViewableImageAttachment(att) && Boolean(onOpenImageAttachment);
@@ -1627,8 +2373,8 @@ const MessageRow: React.FC<{
                     key={att.id}
                     type="button"
                     onClick={() => onOpenImageAttachment?.(att)}
-                    title={`右ペインで画像を表示: ${att.label}`}
-                    aria-label={`画像を右ペインで表示: ${att.label}`}
+                    title={t(locale, "chat.openImageInRightPaneTitle", { label: att.label })}
+                    aria-label={t(locale, "chat.openImageInRightPaneAria", { label: att.label })}
                     className="group inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 border border-transparent hover:border-indigo-500/40 text-[11px] text-zinc-600 dark:text-zinc-300 hover:text-indigo-600 dark:hover:text-indigo-300 transition-all cursor-pointer"
                   >
                     {att.imageDataUrl ? (
@@ -1662,12 +2408,17 @@ const MessageRow: React.FC<{
             })}
           </div>
         )}
-        <div className="max-w-[82%] rounded-2xl px-4 py-2.5 text-[14px] leading-relaxed bg-indigo-500/12 dark:bg-indigo-500/20 text-zinc-900 dark:text-zinc-100 whitespace-pre-wrap select-text">
-          <HighlightedUserText
-            text={message.text}
-            projects={projects}
-            tasks={tasks}
-            onOpenTask={onOpenTask}
+        <div
+          data-testid="user-message-bubble"
+          className="max-w-[82%] min-w-0 rounded-2xl px-4 py-2.5 bg-indigo-500/12 dark:bg-indigo-500/20 text-zinc-900 dark:text-zinc-100 select-text"
+        >
+          <MarkdownView
+            content={message.text}
+            variant="user"
+            locale={locale}
+            onOpenUrl={onOpenUrl}
+            onOpenMarkdownFile={onOpenMarkdownFile}
+            mentionContext={userMentionContext}
           />
         </div>
       </div>
@@ -1676,11 +2427,12 @@ const MessageRow: React.FC<{
 
   if (message.role === "taskEvent") {
     return (
-      <TaskEventCard
+      <MemoTaskEventCard
         message={message}
         tasks={tasks}
         projects={projects}
         defaultIntegrationMode={defaultIntegrationMode}
+        locale={locale}
         onOpenUrl={onOpenUrl}
         onOpenMarkdownFile={onOpenMarkdownFile}
         onOpenTask={onOpenTask}
@@ -1719,7 +2471,7 @@ const MessageRow: React.FC<{
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] text-rose-500 hover:bg-rose-500/10 cursor-pointer"
             >
               <Square className="w-2.5 h-2.5 fill-current" />
-              停止
+              {t(locale, "common.stop")}
             </button>
           </>
         )}
@@ -1733,7 +2485,7 @@ const MessageRow: React.FC<{
             className="inline-flex items-center gap-1 text-[11.5px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer"
           >
             {showReasoning ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-            思考プロセス
+            {t(locale, "chat.reasoningProcess")}
           </button>
           {showReasoning && (
             <div className="mt-1 p-2.5 rounded-lg bg-zinc-100/70 dark:bg-zinc-900/70 text-[12px] text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap select-text">
@@ -1744,36 +2496,117 @@ const MessageRow: React.FC<{
       )}
 
       {message.toolChips.length > 0 && (
-        <div className="pl-7 flex flex-wrap gap-1.5">
-          {message.toolChips.map((chip) => (
-            <span
-              key={chip.id}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300"
-            >
-              {chip.isError ? (
-                <XCircle className="w-3 h-3 text-rose-500" />
-              ) : chip.isCompleted ? (
-                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
-              ) : (
-                <Loader2 className="w-3 h-3 text-indigo-500 animate-spin" />
-              )}
-              <span>{chip.label}</span>
-            </span>
-          ))}
-        </div>
+        <MessageToolChips
+          toolChips={message.toolChips}
+          isStreaming={message.isStreaming}
+          locale={locale}
+        />
       )}
 
       <div className="pl-7">
         {message.text ? (
           <MarkdownView
             content={message.text}
+            locale={locale}
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
           />
         ) : message.isStreaming ? (
-          <span className="text-[13px] text-zinc-400">応答を準備中...</span>
+          <span className="text-[13px] text-zinc-400">{t(locale, "chat.preparingReply")}</span>
         ) : null}
       </div>
     </div>
   );
-};
+});
+
+export interface MessageToolChipsProps {
+  toolChips: ToolActivityChip[];
+  isStreaming: boolean;
+  locale: UiLocale;
+  defaultExpanded?: boolean;
+}
+
+const ToolChipPill: React.FC<{ chip: ToolActivityChip }> = React.memo(({ chip }) => (
+  <span
+    data-testid="message-tool-chip"
+    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300"
+  >
+    {chip.isError ? (
+      <XCircle className="w-3 h-3 text-rose-500 shrink-0" />
+    ) : chip.isCompleted ? (
+      <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />
+    ) : (
+      <Loader2 className="w-3 h-3 text-indigo-500 animate-spin shrink-0" />
+    )}
+    <span>{chip.label}</span>
+  </span>
+));
+
+export const MessageToolChips: React.FC<MessageToolChipsProps> = React.memo(({
+  toolChips,
+  isStreaming,
+  locale,
+  defaultExpanded = false,
+}) => {
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  const plan = useMemo(
+    () => buildToolChipDisplayPlan(toolChips, { isStreaming }),
+    [toolChips, isStreaming],
+  );
+
+  if (toolChips.length === 0) {
+    return null;
+  }
+
+  return (
+    <div data-testid="message-tool-chips" className="pl-7 space-y-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {plan.shouldCollapseByDefault && (
+          <button
+            type="button"
+            data-testid="message-tool-chips-toggle"
+            aria-expanded={isExpanded}
+            aria-label={
+              isExpanded
+                ? t(locale, "chat.toolChipsCollapseAria")
+                : t(locale, "chat.toolChipsExpandAria")
+            }
+            onClick={() => setIsExpanded((prev) => !prev)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800/80 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 text-zinc-600 dark:text-zinc-300 border border-zinc-200/70 dark:border-zinc-700/70 transition-colors cursor-pointer"
+          >
+            {plan.errorCount > 0 ? (
+              <XCircle className="w-3 h-3 text-rose-500 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />
+            )}
+            <span>
+              {formatToolChipsSummary(
+                plan.collapsibleChips.length,
+                plan.toolCounts,
+                plan.errorCount,
+                locale,
+              )}
+            </span>
+            {isExpanded ? (
+              <ChevronDown className="w-3 h-3 text-zinc-400 shrink-0" />
+            ) : (
+              <ChevronRight className="w-3 h-3 text-zinc-400 shrink-0" />
+            )}
+          </button>
+        )}
+
+        {plan.visibleChips.map((chip) => (
+          <ToolChipPill key={chip.id} chip={chip} />
+        ))}
+      </div>
+
+      {plan.shouldCollapseByDefault && isExpanded && (
+        <div data-testid="message-tool-chips-expanded" className="flex flex-wrap gap-1.5">
+          {plan.collapsibleChips.map((chip) => (
+            <ToolChipPill key={chip.id} chip={chip} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});

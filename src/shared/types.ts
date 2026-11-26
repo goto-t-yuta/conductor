@@ -6,6 +6,12 @@ import type {
   TextFileReadResult,
 } from "./file-tree.js";
 import type { PreferredLanguage } from "./language.js";
+import type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
+import type {
+  VoiceMicPermissionResult,
+  VoiceSpeakRequest,
+  VoiceSpeakResult,
+} from "./voice.js";
 
 export type {
   ListDirectoryResult,
@@ -15,6 +21,12 @@ export type {
   TextFileReadResult,
 } from "./file-tree.js";
 export type { PreferredLanguage } from "./language.js";
+export type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
+export type {
+  VoiceMicPermissionResult,
+  VoiceSpeakRequest,
+  VoiceSpeakResult,
+} from "./voice.js";
 
 export type AgentProvider = "codex" | "agy" | "claude";
 
@@ -292,6 +304,13 @@ export interface MarkdownReadResult {
   error?: string;
 }
 
+export interface MarkdownWriteResult {
+  ok: boolean;
+  filePath: string;
+  document?: MarkdownDocument;
+  error?: string;
+}
+
 export interface MarkdownWatchEvent {
   filePath: string;
   kind: "changed" | "deleted" | "error";
@@ -307,6 +326,22 @@ export interface ModelOption {
   supportedEfforts: string[];
   defaultEffort: string;
   isDefault: boolean;
+}
+
+export interface RemoteAccessStatus {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  token: string;
+  bindHost: string | null;
+  tailscaleIp: string | null;
+  magicDnsName: string | null;
+  lanIp: string | null;
+  url: string | null;
+  magicDnsUrl: string | null;
+  connectUri: string | null;
+  connectedClients: number;
+  error: string | null;
 }
 
 export interface AppSnapshot {
@@ -335,6 +370,12 @@ export interface AppSnapshot {
   defaultIntegrationMode: IntegrationMode;
   autoLandOnComplete: boolean;
   preferredLanguage: PreferredLanguage;
+  voiceReadbackEnabled?: boolean;
+  remoteAccessEnabled?: boolean;
+  remoteAccessPort?: number;
+  remoteAccessToken?: string;
+  remoteAccess?: RemoteAccessStatus;
+  usageRecords?: UsageRecord[];
   lastErrorBanner: string | null;
 }
 
@@ -359,6 +400,11 @@ export interface PersistedState {
   defaultIntegrationMode?: IntegrationMode;
   autoLandOnComplete?: boolean;
   preferredLanguage?: PreferredLanguage;
+  voiceReadbackEnabled?: boolean;
+  remoteAccessEnabled?: boolean;
+  remoteAccessPort?: number;
+  remoteAccessToken?: string;
+  usageRecords?: UsageRecord[];
 }
 
 export interface TaskStatusUpdateResult {
@@ -431,6 +477,17 @@ export interface ConductorAPI {
   setAutoLandOnComplete(enabled: boolean): Promise<void>;
   setProjectIntegrationMode(projectId: string, mode: IntegrationMode | null): Promise<void>;
   setPreferredLanguage(language: PreferredLanguage): Promise<void>;
+  setVoiceReadbackEnabled(enabled: boolean): Promise<void>;
+  setRemoteAccessEnabled(enabled: boolean): Promise<RemoteAccessStatus>;
+  setRemoteAccessPort(port: number): Promise<RemoteAccessStatus>;
+  regenerateRemoteAccessToken(): Promise<RemoteAccessStatus>;
+  refreshRemoteAccessStatus(): Promise<RemoteAccessStatus>;
+  clearUsageRecords(): Promise<void>;
+
+  // Voice (TTS & macOS Microphone Permission)
+  voiceSpeak(request: VoiceSpeakRequest): Promise<VoiceSpeakResult>;
+  voiceStop(): Promise<void>;
+  voiceRequestMicPermission(): Promise<VoiceMicPermissionResult>;
 
   // Tasks
   updateTaskStatus(taskId: string, status: AgentTaskStatus): Promise<TaskStatusUpdateResult>;
@@ -460,6 +517,7 @@ export interface ConductorAPI {
   // Local Markdown Viewer
   markdownOpenDialog(): Promise<string[]>;
   markdownReadFile(filePathOrUrl: string, baseFilePath?: string): Promise<MarkdownReadResult>;
+  markdownWriteFile(filePath: string, content: string): Promise<MarkdownWriteResult>;
   markdownWatchFile(filePathOrUrl: string): Promise<{ ok: boolean; filePath?: string; error?: string }>;
   markdownUnwatch(): Promise<void>;
   onMarkdownFileChanged(listener: (event: MarkdownWatchEvent) => void): () => void;

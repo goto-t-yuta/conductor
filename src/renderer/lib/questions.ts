@@ -1,6 +1,45 @@
-import type { AgentProvider, ChatMessage, ToolActivityChip } from "../../shared/types.js";
+import type {
+  AgentProvider,
+  AgentTask,
+  ChatMessage,
+  Project,
+  ToolActivityChip,
+} from "../../shared/types.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
+import {
+  findProjectForTask,
+  formatTaskCode,
+  parseAndResolveMentions,
+  resolveMessageMentionBadges,
+} from "../../shared/mentions.js";
 
 export type QuestionStatus = "streaming" | "completed" | "error" | "pending";
+
+export interface QuestionRelatedProject {
+  projectId: string | null;
+  projectName: string;
+  projectColorHex?: string;
+}
+
+export interface QuestionRelatedTask {
+  taskId: string;
+  taskNumber: number;
+  taskCode: string;
+  taskTitle: string;
+  projectId: string | null;
+  projectName: string;
+  projectColorHex?: string;
+}
+
+export interface DeriveQuestionItemsOptions {
+  projects?: readonly Project[];
+  tasks?: readonly AgentTask[];
+}
+
+export interface QuestionSearchContext {
+  projects?: readonly Project[];
+  tasks?: readonly AgentTask[];
+}
 
 export interface QuestionItem {
   /** Stable identifier (userMessageId when present, otherwise replyMessageId) */
@@ -10,6 +49,12 @@ export interface QuestionItem {
   /** Message ID to scroll to when clicked (replyMessageId, falling back to userMessageId) */
   targetMessageId: string;
   questionSnippet: string;
+  /** Full un-truncated question text (and attachment labels) used for search matching */
+  questionText?: string;
+  /** Related projects referenced explicitly, inline, via inferred mentions, or via related tasks */
+  relatedProjects?: QuestionRelatedProject[];
+  /** Related tasks referenced explicitly, inline, via inferred mentions, or via relatedTaskId */
+  relatedTasks?: QuestionRelatedTask[];
   status: QuestionStatus;
   isUnread: boolean;
   provider?: AgentProvider;
@@ -162,20 +207,24 @@ function withEllipsis(label: string): string {
   return `${trimmed}…`;
 }
 
-function buildQuestionSnippet(userMsg: ChatMessage | null, replyMsg: ChatMessage | null): string {
+function buildQuestionSnippet(
+  userMsg: ChatMessage | null,
+  replyMsg: ChatMessage | null,
+  locale: UiLocale = "ja",
+): string {
   if (userMsg) {
     const textSnippet = truncateSnippet(userMsg.text, 140);
     if (textSnippet) return textSnippet;
     if (userMsg.attachments.length > 0) {
       const labels = userMsg.attachments.map((a) => a.label).join(", ");
-      return truncateSnippet(`添付: ${labels}`, 140);
+      return truncateSnippet(t(locale, "questions.attachmentPrefix", { labels }), 140);
     }
   }
   if (replyMsg?.replyToSnippet) {
     const snippet = truncateSnippet(replyMsg.replyToSnippet, 140);
     if (snippet) return snippet;
   }
-  return "(質問)";
+  return t(locale, "questions.fallbackSnippet");
 }
 
 function buildDetailLine(params: {
@@ -184,8 +233,9 @@ function buildDetailLine(params: {
   replyPreview: string | null;
   hasReasoning: boolean;
   timeLabel: string;
+  locale: UiLocale;
 }): string {
-  const { status, latestTool, replyPreview, hasReasoning, timeLabel } = params;
+  const { status, latestTool, replyPreview, hasReasoning, timeLabel, locale } = params;
 
   if (status === "streaming") {
     if (latestTool?.isRunning) {
@@ -198,13 +248,13 @@ function buildDetailLine(params: {
       return latestTool.label;
     }
     if (hasReasoning) {
-      return "思考中…";
+      return t(locale, "questions.thinking");
     }
-    return "応答を準備中…";
+    return t(locale, "questions.preparing");
   }
 
   if (status === "pending") {
-    return "応答待機中…";
+    return t(locale, "questions.waiting");
   }
 
   if (replyPreview) {
@@ -216,10 +266,10 @@ function buildDetailLine(params: {
   }
 
   if (status === "error") {
-    return "エラーで終了しました";
+    return t(locale, "questions.endedWithError");
   }
 
-  return timeLabel || "回答完了";
+  return timeLabel || t(locale, "questions.answered");
 }
 
 function sortTier(item: QuestionItem): number {
@@ -233,10 +283,143 @@ function parseTimestampMs(iso: string): number {
   return Number.isNaN(ms) ? 0 : ms;
 }
 
+function buildFullQuestionText(
+  userMsg: ChatMessage | null,
+  replyMsg: ChatMessage | null,
+): string {
+  const parts: string[] = [];
+  if (userMsg?.text?.trim()) {
+    parts.push(userMsg.text.trim());
+  }
+  if (userMsg?.attachments?.length) {
+    for (const att of userMsg.attachments) {
+      if (att.label?.trim()) {
+        parts.push(att.label.trim());
+      }
+    }
+  }
+  if (parts.length === 0 && replyMsg?.replyToSnippet?.trim()) {
+    parts.push(replyMsg.replyToSnippet.trim());
+  }
+  return parts.join(" ");
+}
+
+function extractQuestionRelations(
+  userMsg: ChatMessage | null,
+  replyMsg: ChatMessage | null,
+  projects: Project[],
+  tasks: AgentTask[],
+): {
+  relatedProjects: QuestionRelatedProject[];
+  relatedTasks: QuestionRelatedTask[];
+} {
+  const relatedProjects: QuestionRelatedProject[] = [];
+  const relatedTasks: QuestionRelatedTask[] = [];
+  const seenProjectIds = new Set<string>();
+  const seenProjectNames = new Set<string>();
+  const seenTaskIds = new Set<string>();
+  const seenTaskNumbers = new Set<number>();
+
+  const addProject = (
+    projectId: string | null,
+    projectName: string,
+    projectColorHex?: string,
+  ) => {
+    const trimmedName = projectName.trim();
+    if (!trimmedName) return;
+    const lowerName = trimmedName.toLowerCase();
+    if ((projectId && seenProjectIds.has(projectId)) || seenProjectNames.has(lowerName)) {
+      return;
+    }
+    if (projectId) seenProjectIds.add(projectId);
+    seenProjectNames.add(lowerName);
+    relatedProjects.push({
+      projectId,
+      projectName: trimmedName,
+      projectColorHex,
+    });
+  };
+
+  const addTask = (task: QuestionRelatedTask) => {
+    if ((task.taskId && seenTaskIds.has(task.taskId)) || seenTaskNumbers.has(task.taskNumber)) {
+      return;
+    }
+    if (task.taskId) seenTaskIds.add(task.taskId);
+    seenTaskNumbers.add(task.taskNumber);
+    relatedTasks.push(task);
+    if (task.projectName) {
+      addProject(task.projectId, task.projectName, task.projectColorHex);
+    }
+  };
+
+  const absorbBadges = (
+    text: string,
+    persistedMentions?: ChatMessage["mentions"],
+    inferredMentions?: ChatMessage["inferredMentions"],
+  ) => {
+    const badges = resolveMessageMentionBadges(
+      text,
+      projects,
+      tasks,
+      persistedMentions,
+      inferredMentions,
+    );
+    for (const badge of badges) {
+      if (badge.kind === "task") {
+        addTask({
+          taskId: badge.taskId,
+          taskNumber: badge.taskNumber,
+          taskCode: badge.taskCode,
+          taskTitle: badge.taskTitle,
+          projectId: badge.projectId,
+          projectName: badge.projectName,
+          projectColorHex: badge.projectColorHex,
+        });
+      } else {
+        addProject(badge.projectId, badge.projectName, badge.projectColorHex);
+      }
+    }
+  };
+
+  if (userMsg) {
+    absorbBadges(userMsg.text, userMsg.mentions, userMsg.inferredMentions);
+  } else if (replyMsg?.replyToSnippet) {
+    absorbBadges(replyMsg.replyToSnippet);
+  }
+
+  if (replyMsg && (replyMsg.mentions?.length || replyMsg.inferredMentions?.length)) {
+    absorbBadges("", replyMsg.mentions, replyMsg.inferredMentions);
+  }
+
+  const relatedTaskIds = [userMsg?.relatedTaskId, replyMsg?.relatedTaskId].filter(
+    (id): id is string => Boolean(id),
+  );
+  for (const taskId of relatedTaskIds) {
+    const liveTask = tasks.find((t) => t.id === taskId);
+    if (!liveTask) continue;
+    const liveProj = findProjectForTask(projects, liveTask);
+    addTask({
+      taskId: liveTask.id,
+      taskNumber: liveTask.taskNumber,
+      taskCode: formatTaskCode(liveTask.taskNumber),
+      taskTitle: liveTask.title,
+      projectId: liveProj?.id ?? liveTask.projectId,
+      projectName: liveTask.projectName || liveProj?.name || "",
+      projectColorHex: liveProj?.colorHex,
+    });
+  }
+
+  return { relatedProjects, relatedTasks };
+}
+
 export function deriveQuestionItems(
   messages: readonly ChatMessage[],
   unreadReplyIds?: ReadonlySet<string>,
+  locale: UiLocale = "ja",
+  options?: DeriveQuestionItemsOptions,
 ): QuestionItem[] {
+  const projects = options?.projects ? [...options.projects] : [];
+  const tasks = options?.tasks ? [...options.tasks] : [];
   const assistantByReplyTo = new Map<string, ChatMessage>();
   for (const msg of messages) {
     if (msg.role === "assistant" && msg.replyToMessageId) {
@@ -274,13 +457,23 @@ export function deriveQuestionItems(
     const createdAt = userMsg?.createdAt ?? replyMsg?.createdAt ?? "";
     const updatedAt = replyMsg?.createdAt ?? userMsg?.createdAt ?? "";
     const timeLabel = formatQuestionTime(updatedAt);
+    const questionText = buildFullQuestionText(userMsg, replyMsg);
+    const { relatedProjects, relatedTasks } = extractQuestionRelations(
+      userMsg,
+      replyMsg,
+      projects,
+      tasks,
+    );
 
     rawItems.push({
       id,
       userMessageId: userMsg?.id ?? replyMsg?.replyToMessageId ?? null,
       replyMessageId: replyMsg?.id ?? null,
       targetMessageId: replyMsg?.id ?? userMsg!.id,
-      questionSnippet: buildQuestionSnippet(userMsg, replyMsg),
+      questionSnippet: buildQuestionSnippet(userMsg, replyMsg, locale),
+      questionText,
+      relatedProjects,
+      relatedTasks,
       status,
       isUnread,
       provider: replyMsg?.provider,
@@ -293,6 +486,7 @@ export function deriveQuestionItems(
         replyPreview,
         hasReasoning: Boolean(replyMsg?.reasoningSummary?.trim()),
         timeLabel,
+        locale,
       }),
       createdAt,
       updatedAt,
@@ -357,6 +551,88 @@ export function summarizeQuestions(items: readonly QuestionItem[]): QuestionSumm
     activeCount,
     unreadCount,
   };
+}
+
+/**
+ * Matches a question item against a user search query using question text/snippet,
+ * related project names, related tasks (T# code, @T#, project/T#, and title),
+ * reply preview, detail line, tool label, and provider.
+ * Whitespace-separated tokens are matched with AND semantics (case-insensitive).
+ */
+export function matchesQuestionQuery(
+  item: QuestionItem,
+  query: string,
+  context?: QuestionSearchContext,
+): boolean {
+  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return true;
+
+  const parts: string[] = [];
+  if (item.questionSnippet) parts.push(item.questionSnippet);
+  if (item.questionText) parts.push(item.questionText);
+  if (item.replyPreview) parts.push(item.replyPreview);
+  if (item.detailLine) parts.push(item.detailLine);
+  if (item.latestToolLabel) parts.push(item.latestToolLabel);
+  if (item.provider) parts.push(item.provider);
+
+  const relatedProjects = item.relatedProjects ?? [];
+  for (const proj of relatedProjects) {
+    if (proj.projectName) {
+      parts.push(proj.projectName, `@${proj.projectName}`);
+    }
+  }
+
+  const relatedTasks = item.relatedTasks ?? [];
+  for (const task of relatedTasks) {
+    const code = task.taskCode || formatTaskCode(task.taskNumber);
+    parts.push(code, `@${code}`);
+    if (task.taskTitle) parts.push(task.taskTitle);
+    if (task.projectName) {
+      parts.push(task.projectName, `${task.projectName}/${code}`, `@${task.projectName}/${code}`);
+    }
+  }
+
+  // Fallback mention resolution if the item was derived without projects/tasks context
+  if (
+    relatedProjects.length === 0 &&
+    relatedTasks.length === 0 &&
+    (context?.projects?.length || context?.tasks?.length)
+  ) {
+    const sourceText = item.questionText || item.questionSnippet;
+    if (sourceText.includes("@")) {
+      const parsed = parseAndResolveMentions(
+        sourceText,
+        context.projects ? [...context.projects] : [],
+        context.tasks ? [...context.tasks] : [],
+      );
+      for (const proj of parsed.projects) {
+        parts.push(proj.name, `@${proj.name}`);
+      }
+      for (const task of parsed.tasks) {
+        const code = formatTaskCode(task.taskNumber);
+        parts.push(code, `@${code}`, task.title);
+        if (task.projectName) {
+          parts.push(
+            task.projectName,
+            `${task.projectName}/${code}`,
+            `@${task.projectName}/${code}`,
+          );
+        }
+      }
+    }
+  }
+
+  const haystack = parts.join("\n").toLowerCase();
+  return tokens.every((token) => haystack.includes(token));
+}
+
+export function filterQuestions(
+  items: readonly QuestionItem[],
+  query: string,
+  context?: QuestionSearchContext,
+): QuestionItem[] {
+  if (!query.trim()) return [...items];
+  return items.filter((item) => matchesQuestionQuery(item, query, context));
 }
 
 export function reconcileUnreadReplies(params: {

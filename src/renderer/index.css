@@ -172,6 +172,143 @@
   vertical-align: middle;
 }
 
+/* Compact, high-contrast Markdown overrides for user message bubbles */
+.conductor-markdown-user {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.conductor-markdown-user > :first-child {
+  margin-top: 0;
+}
+
+.conductor-markdown-user > :last-child {
+  margin-bottom: 0;
+}
+
+.conductor-markdown-user p {
+  margin: 0.45em 0;
+}
+
+.conductor-markdown-user ul,
+.conductor-markdown-user ol {
+  margin: 0.4em 0;
+  padding-left: 1.35em;
+}
+
+.conductor-markdown-user li {
+  margin: 0.18em 0;
+}
+
+.conductor-markdown-user h1,
+.conductor-markdown-user h2,
+.conductor-markdown-user h3,
+.conductor-markdown-user h4,
+.conductor-markdown-user h5,
+.conductor-markdown-user h6 {
+  font-weight: 600;
+  margin: 0.55em 0 0.3em;
+  line-height: 1.35;
+}
+
+.conductor-markdown-user h1 {
+  font-size: 1.15em;
+}
+
+.conductor-markdown-user h2 {
+  font-size: 1.08em;
+}
+
+.conductor-markdown-user h3 {
+  font-size: 1.02em;
+}
+
+.conductor-markdown-user :not(pre) > code {
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  color: #312e81;
+  padding: 0.08em 0.36em;
+  border-radius: 5px;
+  word-break: break-word;
+}
+
+.conductor-markdown-user a {
+  color: #4338ca;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.conductor-markdown-user blockquote {
+  margin: 0.5em 0;
+  padding: 0.4em 0.8em;
+  border-left: 3px solid rgba(79, 70, 229, 0.65);
+  background: rgba(255, 255, 255, 0.58);
+  border-radius: 0 8px 8px 0;
+  color: rgba(24, 24, 27, 0.88);
+  opacity: 1;
+}
+
+.conductor-markdown-user blockquote > :first-child {
+  margin-top: 0;
+}
+
+.conductor-markdown-user blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.conductor-markdown-user th,
+.conductor-markdown-user td {
+  border-color: rgba(79, 70, 229, 0.22);
+}
+
+.conductor-markdown-user th {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.conductor-markdown-user hr {
+  border-top-color: rgba(79, 70, 229, 0.22);
+  margin: 0.8em 0;
+}
+
+.conductor-markdown-user input[type="checkbox"] {
+  accent-color: #4f46e5;
+}
+
+@media (prefers-color-scheme: dark) {
+  .conductor-markdown-user :not(pre) > code {
+    background: rgba(15, 17, 21, 0.48);
+    border-color: rgba(129, 140, 248, 0.28);
+    color: #e0e7ff;
+  }
+
+  .conductor-markdown-user a {
+    color: #a5b4fc;
+  }
+
+  .conductor-markdown-user blockquote {
+    border-left-color: rgba(129, 140, 248, 0.78);
+    background: rgba(15, 17, 21, 0.36);
+    color: rgba(244, 244, 245, 0.9);
+  }
+
+  .conductor-markdown-user th,
+  .conductor-markdown-user td {
+    border-color: rgba(129, 140, 248, 0.28);
+  }
+
+  .conductor-markdown-user th {
+    background: rgba(15, 17, 21, 0.35);
+  }
+
+  .conductor-markdown-user hr {
+    border-top-color: rgba(129, 140, 248, 0.28);
+  }
+
+  .conductor-markdown-user input[type="checkbox"] {
+    accent-color: #818cf8;
+  }
+}
+
 /* Rich document typography for the dedicated Markdown Viewer */
 .conductor-markdown-doc {
   font-size: 14.5px;
@@ -248,5 +385,15 @@
       linear-gradient(-45deg, rgba(255, 255, 255, 0.05) 25%, transparent 25%),
       linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.05) 75%),
       linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.05) 75%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

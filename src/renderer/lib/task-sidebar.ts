@@ -1,4 +1,5 @@
 import type { AgentTask, AgentTaskStatus } from "../../shared/types.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 
 export const REOPEN_TARGET_STATUS: AgentTaskStatus = "needs_review";
 
@@ -9,7 +10,10 @@ export interface QuickStatusTransition {
   title: string;
 }
 
-export function getQuickStatusTransition(status: AgentTaskStatus): QuickStatusTransition | null {
+export function getQuickStatusTransition(
+  status: AgentTaskStatus,
+  locale: UiLocale = "ja",
+): QuickStatusTransition | null {
   if (status === "running") {
     return null;
   }
@@ -18,14 +22,14 @@ export function getQuickStatusTransition(status: AgentTaskStatus): QuickStatusTr
       action: "reopen",
       label: "Reopen",
       nextStatus: REOPEN_TARGET_STATUS,
-      title: "再オープンする",
+      title: t(locale, "task.reopenTitle"),
     };
   }
   return {
     action: "done",
     label: "Done",
     nextStatus: "done",
-    title: "完了にする",
+    title: t(locale, "task.markDoneTitle"),
   };
 }
 
@@ -99,4 +103,100 @@ export function getTaskCardSubtitle(task: AgentTask): string | null {
     return task.summary || task.currentStep || null;
   }
   return task.currentStep || task.summary || null;
+}
+
+export const QUESTIONS_SECTION_HEIGHT_STORAGE_KEY = "conductor:questionsSectionHeight";
+export const QUESTIONS_SECTION_MIN_HEIGHT = 100;
+export const QUESTIONS_SECTION_MAX_HEIGHT_RATIO = 0.65;
+
+export interface QuestionsHeightStorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
+}
+
+function getBrowserStorage(): QuestionsHeightStorageLike | null {
+  try {
+    const g = globalThis as unknown as { localStorage?: QuestionsHeightStorageLike };
+    return g.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function getQuestionsSectionMaxHeight(sidebarHeight: number): number {
+  if (!Number.isFinite(sidebarHeight) || sidebarHeight <= 0) {
+    return QUESTIONS_SECTION_MIN_HEIGHT;
+  }
+  return Math.max(
+    QUESTIONS_SECTION_MIN_HEIGHT,
+    Math.floor(sidebarHeight * QUESTIONS_SECTION_MAX_HEIGHT_RATIO),
+  );
+}
+
+export function clampQuestionsSectionHeight(
+  height: number,
+  sidebarHeight?: number | null,
+): number {
+  if (!Number.isFinite(height)) {
+    return QUESTIONS_SECTION_MIN_HEIGHT;
+  }
+  const rounded = Math.round(height);
+  if (typeof sidebarHeight === "number" && Number.isFinite(sidebarHeight) && sidebarHeight > 0) {
+    const maxHeight = getQuestionsSectionMaxHeight(sidebarHeight);
+    return Math.min(maxHeight, Math.max(QUESTIONS_SECTION_MIN_HEIGHT, rounded));
+  }
+  return Math.max(QUESTIONS_SECTION_MIN_HEIGHT, rounded);
+}
+
+export function parseQuestionsSectionHeight(
+  raw: string | null | undefined,
+  sidebarHeight?: number | null,
+): number | null {
+  if (raw == null) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return clampQuestionsSectionHeight(parsed, sidebarHeight);
+}
+
+export function loadQuestionsSectionHeight(
+  storage?: QuestionsHeightStorageLike | null,
+  sidebarHeight?: number | null,
+): number | null {
+  try {
+    const target = storage === undefined ? getBrowserStorage() : storage;
+    if (!target) return null;
+    return parseQuestionsSectionHeight(
+      target.getItem(QUESTIONS_SECTION_HEIGHT_STORAGE_KEY),
+      sidebarHeight,
+    );
+  } catch {
+    return null;
+  }
+}
+
+export function saveQuestionsSectionHeight(
+  height: number | null,
+  storage?: QuestionsHeightStorageLike | null,
+  sidebarHeight?: number | null,
+): void {
+  try {
+    const target = storage === undefined ? getBrowserStorage() : storage;
+    if (!target) return;
+    if (height === null) {
+      if (typeof target.removeItem === "function") {
+        target.removeItem(QUESTIONS_SECTION_HEIGHT_STORAGE_KEY);
+      } else {
+        target.setItem(QUESTIONS_SECTION_HEIGHT_STORAGE_KEY, "");
+      }
+      return;
+    }
+    if (!Number.isFinite(height)) return;
+    const clamped = clampQuestionsSectionHeight(height, sidebarHeight);
+    target.setItem(QUESTIONS_SECTION_HEIGHT_STORAGE_KEY, String(clamped));
+  } catch {
+    // Ignore storage errors (e.g. private browsing / quota limits)
+  }
 }

@@ -10,10 +10,24 @@ import type {
 } from "../../shared/types.js";
 import type { ImageViewerTab } from "./image-viewer.js";
 
+export interface MarkdownExternalChange {
+  kind: "changed" | "deleted";
+  document?: MarkdownDocument;
+  detectedAt: number;
+  message?: string;
+}
+
 export interface MarkdownViewerTab {
   filePath: string;
   fileName: string;
   document: MarkdownDocument | null;
+  draftContent?: string | null;
+  isDirty?: boolean;
+  isSaving?: boolean;
+  saveError?: string | null;
+  lastSavedAt?: number | null;
+  externalChange?: MarkdownExternalChange | null;
+  viewMode?: "rendered" | "raw";
   error: string | null;
   deletedOnDisk?: boolean;
   isLoading: boolean;
@@ -486,6 +500,36 @@ function dedupeOrder(ids: readonly string[]): string[] {
   return out;
 }
 
+export function areRightPaneWorkspaceStatesEqual(
+  a: RightPaneWorkspaceState,
+  b: RightPaneWorkspaceState,
+): boolean {
+  if (a === b) return true;
+  if (a.activeProjectScope !== b.activeProjectScope) return false;
+
+  const aTabKeys = Object.keys(a.tabProjects);
+  const bTabKeys = Object.keys(b.tabProjects);
+  if (aTabKeys.length !== bTabKeys.length) return false;
+  for (const key of aTabKeys) {
+    if (a.tabProjects[key] !== b.tabProjects[key]) return false;
+  }
+
+  const aWsKeys = Object.keys(a.workspaces);
+  const bWsKeys = Object.keys(b.workspaces);
+  if (aWsKeys.length !== bWsKeys.length) return false;
+  for (const scope of aWsKeys) {
+    const aWs = a.workspaces[scope];
+    const bWs = b.workspaces[scope];
+    if (!bWs || aWs.activeTabId !== bWs.activeTabId) return false;
+    if (aWs.tabOrder.length !== bWs.tabOrder.length) return false;
+    for (let i = 0; i < aWs.tabOrder.length; i += 1) {
+      if (aWs.tabOrder[i] !== bWs.tabOrder[i]) return false;
+    }
+  }
+
+  return true;
+}
+
 /**
  * Reconciles the unified right-pane workspace state against live browser tabs,
  * markdown tabs, image tabs, and registered projects.
@@ -632,11 +676,13 @@ export function reconcileWorkspaceState(
     nextTabProjects[tabId] = scope;
   }
 
-  return {
+  const nextState: RightPaneWorkspaceState = {
     activeProjectScope: nextActiveProjectScope,
     workspaces: nextWorkspaces,
     tabProjects: nextTabProjects,
   };
+
+  return areRightPaneWorkspaceStatesEqual(state, nextState) ? state : nextState;
 }
 
 /**
@@ -847,6 +893,13 @@ export function getActiveUnifiedTab(
   if (tabs.length === 0) return null;
   const activeId = state.workspaces[state.activeProjectScope]?.activeTabId;
   return tabs.find((t) => t.id === activeId) ?? tabs[0] ?? null;
+}
+
+export function isRightPaneBrowserTabActive(
+  showRightPane: boolean | undefined,
+  activeTab: UnifiedRightPaneTab | null | undefined,
+): boolean {
+  return Boolean(showRightPane) && activeTab?.kind === "browser";
 }
 
 export function buildProjectSwitcherItems(

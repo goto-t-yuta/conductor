@@ -6,13 +6,21 @@ import {
   validateManualTaskStatusTransition,
 } from "../src/shared/task-status.js";
 import {
+  QUESTIONS_SECTION_HEIGHT_STORAGE_KEY,
+  QUESTIONS_SECTION_MIN_HEIGHT,
   REOPEN_TARGET_STATUS,
+  clampQuestionsSectionHeight,
   filterCompletedTasks,
   formatCompletedCountBadge,
+  getQuestionsSectionMaxHeight,
   getQuickStatusTransition,
   getTaskCardSubtitle,
+  loadQuestionsSectionHeight,
   matchesCompletedTaskQuery,
+  parseQuestionsSectionHeight,
   partitionSidebarTasks,
+  saveQuestionsSectionHeight,
+  type QuestionsHeightStorageLike,
 } from "../src/renderer/lib/task-sidebar.js";
 
 function makeTask(
@@ -185,5 +193,94 @@ describe("task-sidebar helpers", () => {
 
     expect(getTaskCardSubtitle(doneTask)).toBe("UIを改善しました");
     expect(getTaskCardSubtitle(reviewTask)).toBe("完了・確認待ち");
+  });
+
+  it("clamps Questions section height between min height and 65% of sidebar height", () => {
+    expect(getQuestionsSectionMaxHeight(800)).toBe(520);
+    expect(getQuestionsSectionMaxHeight(120)).toBe(QUESTIONS_SECTION_MIN_HEIGHT);
+    expect(getQuestionsSectionMaxHeight(0)).toBe(QUESTIONS_SECTION_MIN_HEIGHT);
+    expect(getQuestionsSectionMaxHeight(Number.NaN)).toBe(QUESTIONS_SECTION_MIN_HEIGHT);
+
+    expect(clampQuestionsSectionHeight(40, 800)).toBe(QUESTIONS_SECTION_MIN_HEIGHT);
+    expect(clampQuestionsSectionHeight(240, 800)).toBe(240);
+    expect(clampQuestionsSectionHeight(249.6, 800)).toBe(250);
+    expect(clampQuestionsSectionHeight(700, 800)).toBe(520);
+    expect(clampQuestionsSectionHeight(300, 120)).toBe(QUESTIONS_SECTION_MIN_HEIGHT);
+    expect(clampQuestionsSectionHeight(Number.NaN, 800)).toBe(QUESTIONS_SECTION_MIN_HEIGHT);
+
+    // Without known sidebar height, still enforces minimum and rounds
+    expect(clampQuestionsSectionHeight(50)).toBe(QUESTIONS_SECTION_MIN_HEIGHT);
+    expect(clampQuestionsSectionHeight(360.4)).toBe(360);
+  });
+
+  it("parses, persists, restores, and resets Questions section height in storage", () => {
+    expect(parseQuestionsSectionHeight(null)).toBeNull();
+    expect(parseQuestionsSectionHeight("")).toBeNull();
+    expect(parseQuestionsSectionHeight("   ")).toBeNull();
+    expect(parseQuestionsSectionHeight("abc")).toBeNull();
+    expect(parseQuestionsSectionHeight("0")).toBeNull();
+    expect(parseQuestionsSectionHeight("-120")).toBeNull();
+    expect(parseQuestionsSectionHeight("Infinity")).toBeNull();
+    expect(parseQuestionsSectionHeight(" 280.6 ", 800)).toBe(281);
+    expect(parseQuestionsSectionHeight("900", 800)).toBe(520);
+    expect(parseQuestionsSectionHeight("40", 800)).toBe(QUESTIONS_SECTION_MIN_HEIGHT);
+
+    const store = new Map<string, string>();
+    const memoryStorage: QuestionsHeightStorageLike = {
+      getItem: (key) => store.get(key) ?? null,
+      setItem: (key, value) => {
+        store.set(key, value);
+      },
+      removeItem: (key) => {
+        store.delete(key);
+      },
+    };
+
+    expect(loadQuestionsSectionHeight(memoryStorage, 800)).toBeNull();
+
+    saveQuestionsSectionHeight(310.4, memoryStorage, 800);
+    expect(store.get(QUESTIONS_SECTION_HEIGHT_STORAGE_KEY)).toBe("310");
+    expect(loadQuestionsSectionHeight(memoryStorage, 800)).toBe(310);
+    // Re-clamps dynamically if the sidebar later becomes shorter
+    expect(loadQuestionsSectionHeight(memoryStorage, 400)).toBe(260);
+
+    // Clamps on save as well
+    saveQuestionsSectionHeight(900, memoryStorage, 800);
+    expect(store.get(QUESTIONS_SECTION_HEIGHT_STORAGE_KEY)).toBe("520");
+
+    // Reset removes the persisted key
+    saveQuestionsSectionHeight(null, memoryStorage);
+    expect(store.has(QUESTIONS_SECTION_HEIGHT_STORAGE_KEY)).toBe(false);
+    expect(loadQuestionsSectionHeight(memoryStorage, 800)).toBeNull();
+
+    // Works even if storage omits removeItem
+    const minimalStore = new Map<string, string>();
+    const minimalStorage: QuestionsHeightStorageLike = {
+      getItem: (key) => minimalStore.get(key) ?? null,
+      setItem: (key, value) => {
+        minimalStore.set(key, value);
+      },
+    };
+    saveQuestionsSectionHeight(240, minimalStorage, 800);
+    expect(loadQuestionsSectionHeight(minimalStorage, 800)).toBe(240);
+    saveQuestionsSectionHeight(null, minimalStorage);
+    expect(loadQuestionsSectionHeight(minimalStorage, 800)).toBeNull();
+
+    // Handles null or throwing storage gracefully
+    expect(loadQuestionsSectionHeight(null)).toBeNull();
+    const throwingStorage: QuestionsHeightStorageLike = {
+      getItem: () => {
+        throw new Error("denied");
+      },
+      setItem: () => {
+        throw new Error("quota");
+      },
+      removeItem: () => {
+        throw new Error("denied");
+      },
+    };
+    expect(() => saveQuestionsSectionHeight(200, throwingStorage)).not.toThrow();
+    expect(() => saveQuestionsSectionHeight(null, throwingStorage)).not.toThrow();
+    expect(loadQuestionsSectionHeight(throwingStorage)).toBeNull();
   });
 });

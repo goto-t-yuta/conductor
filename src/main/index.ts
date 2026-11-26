@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, shell, systemPreferences } from "electron";
 import type {
   AgentProvider,
   AgentTaskStatus,
@@ -9,20 +9,28 @@ import type {
   IntegrationMode,
   PreferredLanguage,
   SendMessagePayload,
+  VoiceMicPermissionResult,
+  VoiceSpeakRequest,
 } from "../shared/types.js";
 import { BrowserManager } from "./browser-manager.js";
 import { ConductorController } from "./conductor-controller.js";
 import { readLocalImageFile } from "./image-viewer.js";
-import { MarkdownFileWatcher, readLocalMarkdownFile } from "./markdown-viewer.js";
+import {
+  MarkdownFileWatcher,
+  readLocalMarkdownFile,
+  writeLocalMarkdownFile,
+} from "./markdown-viewer.js";
 import { registerProjectFileTreeIpcHandlers } from "./project-files.js";
 import { QuitGuard } from "./quit-guard.js";
 import { StateStore } from "./state-store.js";
+import { VoiceTtsManager } from "./voice-tts.js";
 
 let mainWindow: BrowserWindow | null = null;
 let browserManager: BrowserManager | null = null;
 let markdownWatcher: MarkdownFileWatcher | null = null;
 let controller: ConductorController | null = null;
 let stateStore: StateStore | null = null;
+const voiceTts = new VoiceTtsManager();
 
 const SHUTDOWN_TIMEOUT_MS = 3_000;
 
@@ -36,6 +44,7 @@ const quitGuard = new QuitGuard({
     return result.response === 1;
   },
   performShutdown: async () => {
+    voiceTts.stop();
     markdownWatcher?.dispose();
     markdownWatcher = null;
     browserManager?.destroyAll();
@@ -277,6 +286,56 @@ function registerIpcHandlers(): void {
   ipcMain.handle("conductor:setPreferredLanguage", (_e, language: PreferredLanguage) =>
     controller?.setPreferredLanguage(language),
   );
+  ipcMain.handle("conductor:setVoiceReadbackEnabled", (_e, enabled: boolean) => {
+    const next = Boolean(enabled);
+    if (!next) {
+      voiceTts.stop();
+    }
+    controller?.setVoiceReadbackEnabled(next);
+  });
+  ipcMain.handle("conductor:setRemoteAccessEnabled", (_e, enabled: boolean) =>
+    controller?.setRemoteAccessEnabled(Boolean(enabled)),
+  );
+  ipcMain.handle("conductor:setRemoteAccessPort", (_e, port: number) =>
+    controller?.setRemoteAccessPort(Number(port)),
+  );
+  ipcMain.handle("conductor:regenerateRemoteAccessToken", () =>
+    controller?.regenerateRemoteAccessToken(),
+  );
+  ipcMain.handle("conductor:refreshRemoteAccessStatus", () =>
+    controller?.refreshRemoteAccessStatus(),
+  );
+  ipcMain.handle("conductor:clearUsageRecords", () => controller?.clearUsageRecords());
+
+  // Voice IPC (OS-standard TTS & macOS Microphone permission)
+  ipcMain.handle("voice:speak", (_e, request: VoiceSpeakRequest) =>
+    voiceTts.speak(request ?? { text: "" }),
+  );
+  ipcMain.handle("voice:stop", () => {
+    voiceTts.stop();
+  });
+  ipcMain.handle("voice:requestMicPermission", async (): Promise<VoiceMicPermissionResult> => {
+    if (process.platform !== "darwin") {
+      return { granted: true, status: "granted", platform: process.platform };
+    }
+    try {
+      const currentStatus = systemPreferences.getMediaAccessStatus("microphone");
+      if (currentStatus === "granted") {
+        return { granted: true, status: "granted", platform: "darwin" };
+      }
+      if (currentStatus === "not-determined") {
+        const granted = await systemPreferences.askForMediaAccess("microphone");
+        return {
+          granted,
+          status: granted ? "granted" : "denied",
+          platform: "darwin",
+        };
+      }
+      return { granted: false, status: currentStatus, platform: "darwin" };
+    } catch {
+      return { granted: false, status: "error", platform: "darwin" };
+    }
+  });
 
   ipcMain.handle("conductor:updateTaskStatus", (_e, taskId: string, status: AgentTaskStatus) =>
     controller?.updateTaskStatus(taskId, status) ?? { ok: false, error: "Controller not initialized" },
@@ -349,6 +408,17 @@ function registerIpcHandlers(): void {
       readLocalMarkdownFile(filePathOrUrl, baseFilePath),
   );
 
+  ipcMain.handle(
+    "markdown:write-file",
+    (_e, filePathOrUrl: string, content: string) => {
+      const result = writeLocalMarkdownFile(filePathOrUrl, content);
+      if (result.ok && result.document) {
+        markdownWatcher?.recordKnownDocument(result.document);
+      }
+      return result;
+    },
+  );
+
   ipcMain.handle("markdown:watchFile", (_e, filePathOrUrl: string) => {
     if (!markdownWatcher) {
       markdownWatcher = new MarkdownFileWatcher((event) =>
@@ -394,7 +464,8 @@ async function createWindow(): Promise<void> {
   browserManager = new BrowserManager({
     window: mainWindow,
     store: stateStore,
-    onTabsChanged: () => controller?.notifyBrowserChanged(),
+    onTabsChanged: (reason) =>
+      controller?.notifyBrowserChanged({ persist: reason !== "transient" }),
     onElementPicked: (attachment) => sendToRenderer("conductor:browserAttachment", attachment),
   });
 
@@ -405,6 +476,35 @@ async function createWindow(): Promise<void> {
   });
 
   const devUrl = process.env.CONDUCTOR_DEV_SERVER_URL;
+  mainWindow.webContents.session.setPermissionRequestHandler(
+    (_webContents, permission, callback) => {
+      if (permission === "clipboard-sanitized-write") {
+        callback(true);
+        return;
+      }
+      if (permission === "media") {
+        if (process.platform === "darwin") {
+          const status = systemPreferences.getMediaAccessStatus("microphone");
+          if (status === "granted") {
+            callback(true);
+            return;
+          }
+          if (status === "not-determined") {
+            void systemPreferences
+              .askForMediaAccess("microphone")
+              .then((granted) => callback(granted))
+              .catch(() => callback(false));
+            return;
+          }
+          callback(false);
+          return;
+        }
+        callback(true);
+        return;
+      }
+      callback(false);
+    },
+  );
   if (devUrl) {
     await mainWindow.loadURL(devUrl);
   } else {
@@ -412,6 +512,7 @@ async function createWindow(): Promise<void> {
   }
 
   mainWindow.on("closed", () => {
+    voiceTts.stop();
     markdownWatcher?.dispose();
     markdownWatcher = null;
     browserManager?.destroyAll();

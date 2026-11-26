@@ -6,23 +6,32 @@ import type {
   ChatAttachment,
   ChatMessage,
   ExplicitMentionTarget,
+  MarkdownDocument,
   Project,
   ProjectFileEntry,
   RightPaneMode,
 } from "../shared/types.js";
 import { classifyProjectFile, formatFileTreeIpcError } from "../shared/file-tree.js";
+import { resolveUiLocale, t } from "../shared/i18n.js";
 import {
   addExplicitMentionTarget,
   removeExplicitMentionTarget,
   type MentionChipRemovalTarget,
 } from "../shared/mentions.js";
+import {
+  DEFAULT_VOICE_AUTO_SEND,
+  collectVoiceReadbackUtterances,
+  createInitialVoiceReadbackTracker,
+} from "../shared/voice.js";
+import { speakTextWithFallback, stopAllVoicePlayback } from "./lib/voice-client.js";
 import type { MarkdownOpenedImage } from "./components/MarkdownView.js";
 import type { MarkdownViewerTab } from "./components/MarkdownViewerPane.js";
-import { SettingsModal } from "./components/SettingsModal.js";
+import { SettingsModal, type SettingsModalTab } from "./components/SettingsModal.js";
 import { TaskInspectorModal } from "./components/TaskInspectorModal.js";
 import { TaskSidebar } from "./components/TaskSidebar.js";
 import { UnifiedChat, type ChatJumpRequest } from "./components/UnifiedChat.js";
 import { UnifiedRightPane } from "./components/UnifiedRightPane.js";
+import { hideBrowserBounds } from "./lib/browser-bounds-client.js";
 import {
   buildImageTabFromAttachment,
   extractImageFileName,
@@ -30,12 +39,24 @@ import {
   upsertImageTab,
   type ImageViewerTab,
 } from "./lib/image-viewer.js";
+import {
+  applyMarkdownDiskDeleted,
+  applyMarkdownDiskReload,
+  applyMarkdownDraftEdit,
+  beginMarkdownSave,
+  completeMarkdownSave,
+  discardMarkdownDraft,
+  dismissMarkdownExternalChange,
+  getEffectiveMarkdownContent,
+  setMarkdownTabViewMode,
+} from "./lib/markdown-editor-state.js";
 import { extractHash, isMarkdownPathOrUrl } from "./lib/markdown-utils.js";
 import {
   deriveQuestionItems,
   reconcileUnreadReplies,
   type QuestionItem,
 } from "./lib/questions.js";
+import { reconcileAppSnapshot } from "./lib/snapshot-reconcile.js";
 import {
   activateTabInWorkspace,
   buildProjectSwitcherItems,
@@ -47,6 +68,7 @@ import {
   inferProjectFromFilePath,
   inferProjectFromMessage,
   inferProjectFromTask,
+  isRightPaneBrowserTabActive,
   loadRightPaneWorkspaceFromStorage,
   makeBrowserUnifiedTabId,
   makeCodeUnifiedTabId,
@@ -67,6 +89,23 @@ import {
 } from "./lib/right-pane-tabs.js";
 
 const RECENT_MD_STORAGE_KEY = "conductor:recentMarkdownFiles";
+const VOICE_AUTO_SEND_STORAGE_KEY = "conductor:voiceAutoSend";
+
+function loadVoiceAutoSend(): boolean {
+  try {
+    return window.localStorage.getItem(VOICE_AUTO_SEND_STORAGE_KEY) === "true";
+  } catch {
+    return DEFAULT_VOICE_AUTO_SEND;
+  }
+}
+
+function saveVoiceAutoSend(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(VOICE_AUTO_SEND_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // ignore storage errors
+  }
+}
 
 function loadRecentMarkdownFiles(): string[] {
   try {
@@ -114,7 +153,54 @@ export const App: React.FC = () => {
   const selectedMentionsRef = useRef<ExplicitMentionTarget[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
+  const [settingsModalTab, setSettingsModalTab] = useState<SettingsModalTab | null>(null);
+  const [voiceAutoSend, setVoiceAutoSend] = useState<boolean>(() => loadVoiceAutoSend());
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const voiceTrackerRef = useRef(createInitialVoiceReadbackTracker());
+  const voiceQueueRef = useRef<Array<{ text: string; language: "ja" | "en" }>>([]);
+  const voiceDrainingRef = useRef(false);
+  const voiceEpochRef = useRef(0);
+
+  const updateVoiceAutoSend = useCallback((enabled: boolean) => {
+    setVoiceAutoSend(enabled);
+    saveVoiceAutoSend(enabled);
+  }, []);
+
+  const handleStopSpeaking = useCallback(() => {
+    voiceEpochRef.current += 1;
+    voiceQueueRef.current = [];
+    voiceDrainingRef.current = false;
+    setIsSpeaking(false);
+    void stopAllVoicePlayback();
+  }, []);
+
+  const drainVoiceQueue = useCallback(async () => {
+    if (voiceDrainingRef.current) return;
+    voiceDrainingRef.current = true;
+    const epoch = voiceEpochRef.current;
+
+    try {
+      while (voiceQueueRef.current.length > 0 && voiceEpochRef.current === epoch) {
+        const next = voiceQueueRef.current.shift();
+        if (!next) break;
+        setIsSpeaking(true);
+        await speakTextWithFallback(next, () => voiceEpochRef.current !== epoch);
+      }
+    } finally {
+      if (voiceEpochRef.current === epoch) {
+        voiceDrainingRef.current = false;
+        setIsSpeaking(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      voiceEpochRef.current += 1;
+      voiceQueueRef.current = [];
+      void stopAllVoicePlayback();
+    };
+  }, []);
 
   const updateComposerText = useCallback((nextText: string) => {
     composerTextRef.current = nextText;
@@ -168,6 +254,9 @@ export const App: React.FC = () => {
 
   // Local Markdown Viewer state
   const [mdTabs, setMdTabs] = useState<MarkdownViewerTab[]>([]);
+  const mdTabsRef = useRef<MarkdownViewerTab[]>(mdTabs);
+  mdTabsRef.current = mdTabs;
+  const lastSelfSavedMdDocsRef = useRef<Map<string, MarkdownDocument>>(new Map());
   const [recentMdFiles, setRecentMdFiles] = useState<string[]>(() => loadRecentMarkdownFiles());
   const [mdAutoReload, setMdAutoReload] = useState(true);
   const [mdIsWatching, setMdIsWatching] = useState(false);
@@ -205,6 +294,43 @@ export const App: React.FC = () => {
     setUnreadReplyIds(new Set());
     setJumpRequest(null);
   }, [snapshot?.activeChatSessionId]);
+
+  // Automatic OS-standard TTS readback for completed replies and concise TaskEvent notices
+  useEffect(() => {
+    if (!snapshot) return;
+    const readbackEnabled = Boolean(snapshot.voiceReadbackEnabled);
+    const { nextState, utterances } = collectVoiceReadbackUtterances(voiceTrackerRef.current, {
+      sessionId: snapshot.activeChatSessionId,
+      messages: snapshot.messages,
+      tasks: snapshot.tasks,
+      preferredLanguage: snapshot.preferredLanguage,
+      readbackEnabled,
+    });
+    voiceTrackerRef.current = nextState;
+
+    if (!readbackEnabled) {
+      return;
+    }
+
+    if (utterances.length > 0) {
+      voiceQueueRef.current.push(...utterances);
+      void drainVoiceQueue();
+    }
+  }, [
+    snapshot?.activeChatSessionId,
+    snapshot?.messages,
+    snapshot?.tasks,
+    snapshot?.preferredLanguage,
+    snapshot?.voiceReadbackEnabled,
+    drainVoiceQueue,
+  ]);
+
+  // Immediately stop any active readback if user disables voiceReadbackEnabled
+  useEffect(() => {
+    if (snapshot && !snapshot.voiceReadbackEnabled && isSpeaking) {
+      handleStopSpeaking();
+    }
+  }, [snapshot?.voiceReadbackEnabled, isSpeaking, handleStopSpeaking]);
 
   useEffect(() => {
     const messages = snapshot?.messages ?? [];
@@ -255,14 +381,28 @@ export const App: React.FC = () => {
     [handleMarkMessagesRead],
   );
 
+  const uiLocale = useMemo(
+    () => resolveUiLocale(snapshot?.preferredLanguage),
+    [snapshot?.preferredLanguage],
+  );
+  const uiLocaleRef = useRef(uiLocale);
+  uiLocaleRef.current = uiLocale;
+
   const questions = useMemo(
-    () => deriveQuestionItems(snapshot?.messages ?? [], unreadReplyIds),
-    [snapshot?.messages, unreadReplyIds],
+    () =>
+      deriveQuestionItems(snapshot?.messages ?? [], unreadReplyIds, uiLocale, {
+        projects: snapshot?.projects ?? [],
+        tasks: snapshot?.tasks ?? [],
+      }),
+    [snapshot?.messages, snapshot?.projects, snapshot?.tasks, unreadReplyIds, uiLocale],
   );
 
   useEffect(() => {
-    void window.conductor.getSnapshot().then(setSnapshot);
-    const unsubSnap = window.conductor.onSnapshot(setSnapshot);
+    const applyIncomingSnapshot = (incoming: AppSnapshot) => {
+      setSnapshot((prev) => reconcileAppSnapshot(prev, incoming));
+    };
+    void window.conductor.getSnapshot().then(applyIncomingSnapshot);
+    const unsubSnap = window.conductor.onSnapshot(applyIncomingSnapshot);
     const unsubAtt = window.conductor.onAttachmentFromBrowser((att) => {
       updateAttachments((prev) => [...prev, att]);
     });
@@ -270,7 +410,7 @@ export const App: React.FC = () => {
       unsubSnap();
       unsubAtt();
     };
-  }, []);
+  }, [updateAttachments]);
 
   const recordRecentMarkdownFile = useCallback((filePath: string) => {
     setRecentMdFiles((prev) => {
@@ -372,11 +512,13 @@ export const App: React.FC = () => {
     mdRestoreTick,
   ]);
 
+  const hasSnapshot = snapshot !== null;
+
   // Persist right-pane workspace state (active project, tab order, open markdown files)
   useEffect(() => {
-    if (!snapshot || pendingRestoreMdPathsRef.current.size > 0) return;
+    if (!hasSnapshot || pendingRestoreMdPathsRef.current.size > 0) return;
     saveRightPaneWorkspaceToStorage(workspaceState, mdTabs);
-  }, [snapshot, workspaceState, mdTabs]);
+  }, [hasSnapshot, workspaceState, mdTabs]);
 
   // Derived unified right-pane selectors
   const activeProjectScope = workspaceState.activeProjectScope;
@@ -441,25 +583,24 @@ export const App: React.FC = () => {
     activeUnifiedTab?.kind === "code" ? activeUnifiedTab.codeTab.filePath : null;
   const isMarkdownPaneVisible =
     Boolean(snapshot?.showBrowserPane) && activeUnifiedTab?.kind === "markdown";
+  const isBrowserTabActive = isRightPaneBrowserTabActive(
+    snapshot?.showBrowserPane,
+    activeUnifiedTab,
+  );
   const derivedRightPaneMode: RightPaneMode = activeUnifiedTab?.kind ?? "browser";
 
   // Keep native Electron BrowserManager active tab & WebContentsView visibility in sync
   useEffect(() => {
-    if (!snapshot) return;
-    if (!snapshot.showBrowserPane || activeUnifiedTab?.kind !== "browser") {
-      void window.conductor.browserSetBounds({
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        visible: false,
-      });
+    if (!hasSnapshot) return;
+    if (!snapshot?.showBrowserPane || activeUnifiedTab?.kind !== "browser") {
+      hideBrowserBounds();
       return;
     }
     if (snapshot.activeBrowserTabId !== activeUnifiedTab.browserTab.id) {
       void window.conductor.browserSelectTab(activeUnifiedTab.browserTab.id);
     }
   }, [
+    hasSnapshot,
     snapshot?.showBrowserPane,
     snapshot?.activeBrowserTabId,
     activeUnifiedTab?.kind,
@@ -476,6 +617,7 @@ export const App: React.FC = () => {
         anchor?: string | null;
         fallbackProjectId?: string | null;
         message?: ChatMessage | null;
+        forceDiscardDraft?: boolean;
       },
     ) => {
       const anchor = options?.anchor !== undefined ? options.anchor : extractHash(pathOrUrl);
@@ -512,6 +654,14 @@ export const App: React.FC = () => {
         const doc = result.document;
         setMdTabs((prev) => {
           const existingIdx = prev.findIndex((t) => t.filePath === doc.filePath);
+          if (existingIdx >= 0) {
+            const copy = [...prev];
+            copy[existingIdx] = applyMarkdownDiskReload(copy[existingIdx], doc, now, {
+              force: options?.forceDiscardDraft,
+              lastSelfSavedDoc: lastSelfSavedMdDocsRef.current.get(doc.filePath) ?? null,
+            }).tab;
+            return copy;
+          }
           const nextTab: MarkdownViewerTab = {
             filePath: doc.filePath,
             fileName: doc.fileName,
@@ -521,11 +671,6 @@ export const App: React.FC = () => {
             isLoading: false,
             lastReloadedAt: now,
           };
-          if (existingIdx >= 0) {
-            const copy = [...prev];
-            copy[existingIdx] = nextTab;
-            return copy;
-          }
           return [...prev, nextTab];
         });
         recordRecentMarkdownFile(doc.filePath);
@@ -548,7 +693,7 @@ export const App: React.FC = () => {
             const copy = [...prev];
             copy[existingIdx] = {
               ...copy[existingIdx],
-              error: result.error ?? "ファイルを読み込めませんでした。",
+              error: result.error ?? t(uiLocaleRef.current, "markdown.readFailed"),
               isLoading: false,
             };
             return copy;
@@ -559,7 +704,7 @@ export const App: React.FC = () => {
               filePath: targetPath,
               fileName: baseName,
               document: null,
-              error: result.error ?? "ファイルを読み込めませんでした。",
+              error: result.error ?? t(uiLocaleRef.current, "markdown.readFailed"),
               isLoading: false,
               lastReloadedAt: now,
             },
@@ -605,6 +750,8 @@ export const App: React.FC = () => {
 
   const handleRefreshActiveMd = useCallback(() => {
     if (!activeMdPath) return;
+    const currentTab = mdTabsRef.current.find((t) => t.filePath === activeMdPath);
+    const wasDirty = Boolean(currentTab?.isDirty);
     setMdTabs((prev) =>
       prev.map((t) => (t.filePath === activeMdPath ? { ...t, isLoading: true } : t)),
     );
@@ -613,9 +760,123 @@ export const App: React.FC = () => {
       activateTab: false,
       anchor: null,
     }).then(() => {
-      setMdJustReloadedAt(Date.now());
+      if (!wasDirty) {
+        setMdJustReloadedAt(Date.now());
+      }
     });
   }, [activeMdPath, loadMarkdownIntoTab]);
+
+  const handleMarkdownDraftChange = useCallback((filePath: string, nextContent: string) => {
+    setMdTabs((prev) =>
+      prev.map((t) => (t.filePath === filePath ? applyMarkdownDraftEdit(t, nextContent) : t)),
+    );
+  }, []);
+
+  const handleChangeMarkdownViewMode = useCallback(
+    (filePath: string, mode: "rendered" | "raw") => {
+      setMdTabs((prev) =>
+        prev.map((t) => (t.filePath === filePath ? setMarkdownTabViewMode(t, mode) : t)),
+      );
+    },
+    [],
+  );
+
+  const handleSaveActiveMarkdown = useCallback(async () => {
+    if (!activeMdPath) return;
+    const tab = mdTabsRef.current.find((t) => t.filePath === activeMdPath);
+    if (!tab || tab.isSaving || (!tab.isDirty && !tab.deletedOnDisk)) return;
+
+    const targetPath = tab.filePath;
+    const contentToSave = getEffectiveMarkdownContent(tab);
+
+    setMdTabs((prev) =>
+      prev.map((t) => (t.filePath === targetPath ? beginMarkdownSave(t) : t)),
+    );
+
+    try {
+      const result = await window.conductor.markdownWriteFile(targetPath, contentToSave);
+      if (result.ok && result.document) {
+        lastSelfSavedMdDocsRef.current.set(result.document.filePath, result.document);
+      }
+      const savedAt = Date.now();
+      setMdTabs((prev) =>
+        prev.map((t) => (t.filePath === targetPath ? completeMarkdownSave(t, result, savedAt) : t)),
+      );
+    } catch (err) {
+      const savedAt = Date.now();
+      const message =
+        err instanceof Error ? err.message : t(uiLocaleRef.current, "markdown.saveFailed");
+      setMdTabs((prev) =>
+        prev.map((t) =>
+          t.filePath === targetPath
+            ? completeMarkdownSave(t, { ok: false, filePath: targetPath, error: message }, savedAt)
+            : t,
+        ),
+      );
+    }
+  }, [activeMdPath]);
+
+  const handleDiscardActiveMarkdown = useCallback(async () => {
+    if (!activeMdPath) return;
+    const targetPath = activeMdPath;
+    setMdTabs((prev) =>
+      prev.map((t) => (t.filePath === targetPath ? { ...t, isLoading: true } : t)),
+    );
+    try {
+      const result = await window.conductor.markdownReadFile(targetPath);
+      const now = Date.now();
+      if (result.ok && result.document) {
+        setMdTabs((prev) =>
+          prev.map((t) =>
+            t.filePath === targetPath
+              ? { ...discardMarkdownDraft(t, result.document, now), isLoading: false }
+              : t,
+          ),
+        );
+        setMdJustReloadedAt(now);
+      } else {
+        setMdTabs((prev) =>
+          prev.map((t) =>
+            t.filePath === targetPath
+              ? {
+                  ...discardMarkdownDraft(t),
+                  error: result.error ?? t.error,
+                  isLoading: false,
+                }
+              : t,
+          ),
+        );
+      }
+    } catch {
+      setMdTabs((prev) =>
+        prev.map((t) =>
+          t.filePath === targetPath ? { ...discardMarkdownDraft(t), isLoading: false } : t,
+        ),
+      );
+    }
+  }, [activeMdPath]);
+
+  const handleReloadExternalMarkdownChange = useCallback(async () => {
+    if (!activeMdPath) return;
+    const targetPath = activeMdPath;
+    setMdTabs((prev) =>
+      prev.map((t) => (t.filePath === targetPath ? { ...t, isLoading: true } : t)),
+    );
+    await loadMarkdownIntoTab(targetPath, {
+      switchToViewer: false,
+      activateTab: false,
+      anchor: null,
+      forceDiscardDraft: true,
+    });
+    setMdJustReloadedAt(Date.now());
+  }, [activeMdPath, loadMarkdownIntoTab]);
+
+  const handleDismissExternalMarkdownChange = useCallback(() => {
+    if (!activeMdPath) return;
+    setMdTabs((prev) =>
+      prev.map((t) => (t.filePath === activeMdPath ? dismissMarkdownExternalChange(t) : t)),
+    );
+  }, [activeMdPath]);
 
   // Subscribe to main-process file watcher live-reload events
   useEffect(() => {
@@ -623,44 +884,38 @@ export const App: React.FC = () => {
       if (event.kind === "changed" && event.document) {
         const doc = event.document;
         const now = Date.now();
+        const lastSelfSavedDoc = lastSelfSavedMdDocsRef.current.get(event.filePath) ?? null;
+        const existing = mdTabsRef.current.find((t) => t.filePath === event.filePath);
+        if (existing) {
+          const preview = applyMarkdownDiskReload(existing, doc, now, { lastSelfSavedDoc });
+          if (preview.didReload) {
+            setMdJustReloadedAt(now);
+          }
+        }
         setMdTabs((prev) =>
           prev.map((t) =>
             t.filePath === event.filePath
-              ? {
-                  ...t,
-                  document: doc,
-                  error: null,
-                  deletedOnDisk: false,
-                  isLoading: false,
-                  lastReloadedAt: now,
-                }
+              ? applyMarkdownDiskReload(t, doc, now, { lastSelfSavedDoc }).tab
               : t,
           ),
         );
-        setMdJustReloadedAt(now);
       } else if (event.kind === "deleted") {
+        const now = Date.now();
         setMdTabs((prev) =>
           prev.map((t) =>
-            t.filePath === event.filePath
-              ? {
-                  ...t,
-                  deletedOnDisk: true,
-                  error: event.error ?? "ファイルが削除または移動されました。",
-                  isLoading: false,
-                }
-              : t,
+            t.filePath === event.filePath ? applyMarkdownDiskDeleted(t, event.error, now) : t,
           ),
         );
       } else if (event.kind === "error") {
         setMdTabs((prev) =>
-          prev.map((t) =>
-            t.filePath === event.filePath
+          prev.map((tab) =>
+            tab.filePath === event.filePath
               ? {
-                  ...t,
-                  error: event.error ?? "ファイルの再読み込みに失敗しました。",
+                  ...tab,
+                  error: event.error ?? t(uiLocaleRef.current, "markdown.reloadFailed"),
                   isLoading: false,
                 }
-              : t,
+              : tab,
           ),
         );
       }
@@ -1013,13 +1268,7 @@ export const App: React.FC = () => {
   }, [activeCodePath, loadCodeFileIntoTab]);
 
   const handleCloseRightPane = useCallback(() => {
-    void window.conductor.browserSetBounds({
-      x: 0,
-      y: 0,
-      width: 0,
-      height: 0,
-      visible: false,
-    });
+    hideBrowserBounds();
     void window.conductor.setLayout({ showBrowserPane: false });
   }, []);
 
@@ -1156,6 +1405,7 @@ export const App: React.FC = () => {
     if (tab.kind === "browser") {
       void window.conductor.browserCloseTab(tab.browserTab.id);
     } else if (tab.kind === "markdown") {
+      lastSelfSavedMdDocsRef.current.delete(tab.markdownTab.filePath);
       setMdTabs((prev) => prev.filter((t) => t.filePath !== tab.markdownTab.filePath));
     } else if (tab.kind === "code") {
       setCodeTabs((prev) => prev.filter((t) => t.filePath !== tab.codeTab.filePath));
@@ -1172,13 +1422,7 @@ export const App: React.FC = () => {
     if (parsedNext?.kind === "browser") {
       void window.conductor.browserSelectTab(parsedNext.rawId);
     } else {
-      void window.conductor.browserSetBounds({
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        visible: false,
-      });
+      hideBrowserBounds();
     }
   }, []);
 
@@ -1216,8 +1460,9 @@ export const App: React.FC = () => {
   }, [activeUnifiedTab, activeProjectTabs]);
 
   const handleToggleMarkdownViewer = useCallback(() => {
-    if (!snapshot) return;
-    if (!snapshot.showBrowserPane) {
+    const snap = snapshotRef.current;
+    if (!snap) return;
+    if (!snap.showBrowserPane) {
       void window.conductor.setLayout({ showBrowserPane: true });
     }
     const existingMdTab = activeProjectTabs.find((t) => t.kind === "markdown");
@@ -1226,18 +1471,19 @@ export const App: React.FC = () => {
       return;
     }
     void handleOpenMarkdownDialog();
-  }, [snapshot, activeProjectTabs, activeUnifiedTab?.kind, handleSelectUnifiedTab, handleOpenMarkdownDialog]);
+  }, [activeProjectTabs, activeUnifiedTab?.kind, handleSelectUnifiedTab, handleOpenMarkdownDialog]);
 
   // Global keyboard shortcuts from macOS menu
   useEffect(() => {
     return window.conductor.onShortcut((action) => {
-      if (!snapshot) return;
+      const snap = snapshotRef.current;
+      if (!snap) return;
       switch (action) {
         case "toggle-sidebar":
-          void window.conductor.setLayout({ showTaskSidebar: !snapshot.showTaskSidebar });
+          void window.conductor.setLayout({ showTaskSidebar: !snap.showTaskSidebar });
           break;
         case "toggle-browser":
-          if (snapshot.showBrowserPane) {
+          if (snap.showBrowserPane) {
             handleCloseRightPane();
           } else {
             void window.conductor.setLayout({ showBrowserPane: true });
@@ -1267,7 +1513,6 @@ export const App: React.FC = () => {
       }
     });
   }, [
-    snapshot,
     captureScreenshot,
     handleToggleMarkdownViewer,
     handleOpenMarkdownDialog,
@@ -1297,10 +1542,377 @@ export const App: React.FC = () => {
     window.addEventListener("mouseup", onUp);
   };
 
+  const handleSend = useCallback(() => {
+    const snap = snapshotRef.current;
+    if (!snap) return;
+    const text = composerTextRef.current;
+    const atts = [...attachmentsRef.current];
+    const mentions = [...selectedMentionsRef.current];
+    if (!text.trim() && atts.length === 0) return;
+
+    updateComposerText("");
+    updateAttachments([]);
+    updateSelectedMentions([]);
+
+    // Automatically switch the right-pane project scope when the user mentions a project or task
+    const mentionedProject = resolveProjectFromChatText(
+      text,
+      snap.projects,
+      snap.tasks,
+      mentions,
+    );
+    if (mentionedProject) {
+      setWorkspaceState((prev) => switchActiveProjectScope(prev, mentionedProject.id));
+    }
+
+    void window.conductor.sendMessage({
+      text,
+      attachments: atts,
+      ...(mentions.length > 0 ? { mentions } : {}),
+    });
+  }, [updateComposerText, updateAttachments, updateSelectedMentions]);
+
+  const handleAttachCurrentUrl = useCallback(() => {
+    const snap = snapshotRef.current;
+    if (!snap) return;
+    const firstBrowserWithUrl = activeProjectTabs.find(
+      (t): t is Extract<UnifiedRightPaneTab, { kind: "browser" }> =>
+        t.kind === "browser" && Boolean(t.browserTab.url),
+    );
+    const activeBrowser =
+      (activeUnifiedTab?.kind === "browser" ? activeUnifiedTab.browserTab : null) ??
+      firstBrowserWithUrl?.browserTab ??
+      snap.browserTabs.find((t) => t.id === snap.activeBrowserTabId) ??
+      null;
+    if (!activeBrowser?.url) return;
+    updateAttachments((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        kind: "browserURL",
+        label: activeBrowser.title || activeBrowser.url,
+        url: activeBrowser.url,
+        metadataText: `[Current In-App Browser URL: ${activeBrowser.url} (${activeBrowser.title})]`,
+      },
+    ]);
+  }, [activeProjectTabs, activeUnifiedTab, updateAttachments]);
+
+  const handleAttachMarkdownFile = useCallback(
+    (filePath: string, fileName: string) => {
+      updateAttachments((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          kind: "taskRef",
+          label: `MD: ${fileName}`,
+          metadataText: `[Referenced Local Markdown File path="${filePath}"]`,
+        },
+      ]);
+    },
+    [updateAttachments],
+  );
+
+  const handleAttachCodeFile = useCallback(
+    (filePath: string, fileName: string) => {
+      updateAttachments((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          kind: "taskRef",
+          label: `File: ${fileName}`,
+          metadataText: `[Referenced Local File path="${filePath}"]`,
+        },
+      ]);
+    },
+    [updateAttachments],
+  );
+
+  const handleAddMention = useCallback(
+    (target: ExplicitMentionTarget) => {
+      updateSelectedMentions((prev) => addExplicitMentionTarget(prev, target));
+    },
+    [updateSelectedMentions],
+  );
+
+  const handleRemoveMention = useCallback(
+    (target: MentionChipRemovalTarget) => {
+      updateSelectedMentions((prev) => removeExplicitMentionTarget(prev, target));
+    },
+    [updateSelectedMentions],
+  );
+
+  const handleMentionProject = useCallback(
+    (proj: Project) => {
+      handleAddMention({
+        kind: "project",
+        projectId: proj.id,
+        projectName: proj.name,
+        projectPath: proj.path,
+        projectColorHex: proj.colorHex,
+      });
+    },
+    [handleAddMention],
+  );
+
+  const handleMentionTask = useCallback(
+    (task: AgentTask) => {
+      const projects = snapshotRef.current?.projects ?? [];
+      const taskProject = projects.find(
+        (p) =>
+          (task.projectId && p.id === task.projectId) ||
+          p.name.toLowerCase() === task.projectName.toLowerCase(),
+      );
+      handleAddMention({
+        kind: "task",
+        taskId: task.id,
+        taskNumber: task.taskNumber,
+        taskTitle: task.title,
+        taskStatus: task.status,
+        projectId: taskProject?.id ?? task.projectId,
+        projectName: task.projectName || taskProject?.name || "",
+        projectPath: task.projectPath ?? taskProject?.path ?? null,
+        projectColorHex: taskProject?.colorHex ?? "#6366F1",
+      });
+    },
+    [handleAddMention],
+  );
+
+  const handleUpdateTaskStatus = useCallback((taskId: string, status: AgentTaskStatus) => {
+    void window.conductor.updateTaskStatus(taskId, status);
+  }, []);
+
+  const handleAddProjectDialog = useCallback(() => {
+    void window.conductor.addProjectDialog();
+  }, []);
+
+  const handleScanDirectoryDialog = useCallback(() => {
+    void window.conductor.scanDirectoryDialog();
+  }, []);
+
+  const handleRescanProjects = useCallback(() => {
+    void window.conductor.rescanProjects();
+  }, []);
+
+  const handleRemoveProject = useCallback((id: string) => {
+    setSelectedProjectId((prev) => (prev === id ? null : prev));
+    void window.conductor.removeProject(id);
+  }, []);
+
+  const handleOpenPreviewUrl = useCallback(
+    (url: string, task?: AgentTask) => {
+      void handleOpenUrlInBrowser(url, { task });
+    },
+    [handleOpenUrlInBrowser],
+  );
+
+  const handleStopWorker = useCallback((id: string) => {
+    void window.conductor.stopTaskWorker(id);
+  }, []);
+
+  const handleDeleteTask = useCallback((id: string) => {
+    setSelectedTaskId((prev) => (prev === id ? null : prev));
+    void window.conductor.deleteTask(id);
+  }, []);
+
+  const handleLandTask = useCallback((id: string, opts?: { createPr?: boolean }) => {
+    void window.conductor.landTask(id, opts);
+  }, []);
+
+  const handleRemoveAttachment = useCallback(
+    (id: string) => {
+      updateAttachments((prev) => prev.filter((a) => a.id !== id));
+    },
+    [updateAttachments],
+  );
+
+  const handleAddAttachment = useCallback(
+    (att: ChatAttachment) => {
+      updateAttachments((prev) => [...prev, att]);
+    },
+    [updateAttachments],
+  );
+
+  const handleStopMessage = useCallback((id: string) => {
+    void window.conductor.stopMessage(id);
+  }, []);
+
+  const handleStopAllResponders = useCallback(() => {
+    void window.conductor.stopAllResponders();
+  }, []);
+
+  const handleNewChat = useCallback(() => {
+    updateSelectedMentions([]);
+    void window.conductor.startFreshChat();
+  }, [updateSelectedMentions]);
+
+  const handleSelectChatSession = useCallback((id: string) => {
+    void window.conductor.selectChatSession(id);
+  }, []);
+
+  const handleDeleteChatSession = useCallback((id: string) => {
+    void window.conductor.deleteChatSession(id);
+  }, []);
+
+  const handleToggleSidebar = useCallback(() => {
+    const snap = snapshotRef.current;
+    if (!snap) return;
+    void window.conductor.setLayout({ showTaskSidebar: !snap.showTaskSidebar });
+  }, []);
+
+  const handleToggleBrowserPane = useCallback(() => {
+    const snap = snapshotRef.current;
+    if (!snap) return;
+    if (snap.showBrowserPane) {
+      handleCloseRightPane();
+    } else {
+      void window.conductor.setLayout({ showBrowserPane: true });
+    }
+  }, [handleCloseRightPane]);
+
+  const handleOpenChatUrl = useCallback(
+    (url: string, ctx?: { message?: ChatMessage }) => {
+      void handleOpenUrlInBrowser(url, { message: ctx?.message });
+    },
+    [handleOpenUrlInBrowser],
+  );
+
+  const handleCaptureScreenshotClick = useCallback(() => {
+    void captureScreenshot();
+  }, [captureScreenshot]);
+
+  const handleAttachConsoleErrorsClick = useCallback(() => {
+    void attachConsoleErrors();
+  }, [attachConsoleErrors]);
+
+  const handlePickLocalImages = useCallback(async () => {
+    const imgs = await window.conductor.pickLocalImages();
+    if (imgs.length > 0) updateAttachments((prev) => [...prev, ...imgs]);
+  }, [updateAttachments]);
+
+  const handlePasteImage = useCallback(
+    async (base64: string) => {
+      const att = await window.conductor.savePastedImage(base64);
+      if (att) updateAttachments((prev) => [...prev, att]);
+    },
+    [updateAttachments],
+  );
+
+  const handleReconnect = useCallback(() => {
+    void window.conductor.reconnect();
+  }, []);
+
+  const handleDismissError = useCallback(() => {
+    void window.conductor.dismissError();
+  }, []);
+
+  const handleSetChatProvider = useCallback((p: AppSnapshot["chatProvider"]) => {
+    void window.conductor.setChatProvider(p);
+  }, []);
+
+  const handleSetWorkerProvider = useCallback((p: AppSnapshot["workerProvider"]) => {
+    void window.conductor.setWorkerProvider(p);
+  }, []);
+
+  const handleSetChatModel = useCallback((m: string, e?: string) => {
+    void window.conductor.setChatModel(m, e);
+  }, []);
+
+  const handleSetWorkerModel = useCallback((m: string, e?: string) => {
+    void window.conductor.setWorkerModel(m, e);
+  }, []);
+
+  const handleOpenUsage = useCallback(() => {
+    setSettingsModalTab("usage");
+  }, []);
+
+  const handleOpenSettings = useCallback(() => {
+    setSettingsModalTab("general");
+  }, []);
+
+  const handleToggleVoiceReadback = useCallback(() => {
+    const snap = snapshotRef.current;
+    if (!snap) return;
+    const next = !snap.voiceReadbackEnabled;
+    if (!next) {
+      handleStopSpeaking();
+    }
+    void window.conductor.setVoiceReadbackEnabled(next);
+  }, [handleStopSpeaking]);
+
+  const handleToggleVoiceAutoSend = useCallback(() => {
+    setVoiceAutoSend((prev) => {
+      const next = !prev;
+      saveVoiceAutoSend(next);
+      return next;
+    });
+  }, []);
+
+  const handleNavigateBrowserProp = useCallback(
+    (url: string, newTab?: boolean) => {
+      void handleNavigateActiveBrowser(url, newTab);
+    },
+    [handleNavigateActiveBrowser],
+  );
+
+  const handleNewBrowserTabClick = useCallback(() => {
+    void handleNewBrowserTab();
+  }, [handleNewBrowserTab]);
+
+  const handleBrowserBack = useCallback(() => {
+    void window.conductor.browserBack();
+  }, []);
+
+  const handleBrowserForward = useCallback(() => {
+    void window.conductor.browserForward();
+  }, []);
+
+  const handleBrowserReload = useCallback(() => {
+    void window.conductor.browserReload();
+  }, []);
+
+  const handleBrowserToggleDevTools = useCallback(() => {
+    void window.conductor.browserToggleDevTools();
+  }, []);
+
+  const handleBrowserOpenExternal = useCallback(() => {
+    void window.conductor.browserOpenExternal();
+  }, []);
+
+  const handleClearMdPendingAnchor = useCallback(() => {
+    setMdPendingAnchor(null);
+  }, []);
+
+  const handleToggleMdAutoReload = useCallback(() => {
+    setMdAutoReload((v) => !v);
+  }, []);
+
+  const handleOpenMarkdownDialogClick = useCallback(() => {
+    void handleOpenMarkdownDialog();
+  }, [handleOpenMarkdownDialog]);
+
+  const handleRemoveRecentMd = useCallback((fp: string) => {
+    setRecentMdFiles((prev) => {
+      const next = prev.filter((p) => p !== fp);
+      saveRecentMarkdownFiles(next);
+      return next;
+    });
+  }, []);
+
+  const handleOpenRightPaneUrl = useCallback(
+    (url: string) => {
+      void handleOpenUrlInBrowser(url);
+    },
+    [handleOpenUrlInBrowser],
+  );
+
+  const handleRevealInFinder = useCallback((fp: string) => {
+    void window.conductor.openPathInFinder(fp);
+  }, []);
+
   if (!snapshot) {
     return (
       <div className="h-full w-full flex items-center justify-center text-[13px] text-zinc-400">
-        Conductor を起動しています...
+        {t(uiLocale, "app.starting")}
       </div>
     );
   }
@@ -1318,122 +1930,6 @@ export const App: React.FC = () => {
     : null;
 
   const selectedTaskColor = selectedTaskProject?.colorHex ?? "#6366F1";
-
-  const handleSend = () => {
-    const text = composerTextRef.current;
-    const atts = [...attachmentsRef.current];
-    const mentions = [...selectedMentionsRef.current];
-    if (!text.trim() && atts.length === 0) return;
-
-    updateComposerText("");
-    updateAttachments([]);
-    updateSelectedMentions([]);
-
-    // Automatically switch the right-pane project scope when the user mentions a project or task
-    const mentionedProject = resolveProjectFromChatText(
-      text,
-      snapshot.projects,
-      snapshot.tasks,
-      mentions,
-    );
-    if (mentionedProject) {
-      setWorkspaceState((prev) => switchActiveProjectScope(prev, mentionedProject.id));
-    }
-
-    void window.conductor.sendMessage({
-      text,
-      attachments: atts,
-      ...(mentions.length > 0 ? { mentions } : {}),
-    });
-  };
-
-  const handleAttachCurrentUrl = () => {
-    const firstBrowserWithUrl = activeProjectTabs.find(
-      (t): t is Extract<UnifiedRightPaneTab, { kind: "browser" }> =>
-        t.kind === "browser" && Boolean(t.browserTab.url),
-    );
-    const activeBrowser =
-      (activeUnifiedTab?.kind === "browser" ? activeUnifiedTab.browserTab : null) ??
-      firstBrowserWithUrl?.browserTab ??
-      snapshot.browserTabs.find((t) => t.id === snapshot.activeBrowserTabId) ??
-      null;
-    if (!activeBrowser?.url) return;
-    updateAttachments((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        kind: "browserURL",
-        label: activeBrowser.title || activeBrowser.url,
-        url: activeBrowser.url,
-        metadataText: `[Current In-App Browser URL: ${activeBrowser.url} (${activeBrowser.title})]`,
-      },
-    ]);
-  };
-
-  const handleAttachMarkdownFile = (filePath: string, fileName: string) => {
-    updateAttachments((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        kind: "taskRef",
-        label: `MD: ${fileName}`,
-        metadataText: `[Referenced Local Markdown File path="${filePath}"]`,
-      },
-    ]);
-  };
-
-  const handleAttachCodeFile = (filePath: string, fileName: string) => {
-    updateAttachments((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        kind: "taskRef",
-        label: `File: ${fileName}`,
-        metadataText: `[Referenced Local File path="${filePath}"]`,
-      },
-    ]);
-  };
-
-  const handleAddMention = (target: ExplicitMentionTarget) => {
-    updateSelectedMentions((prev) => addExplicitMentionTarget(prev, target));
-  };
-
-  const handleRemoveMention = (target: MentionChipRemovalTarget) => {
-    updateSelectedMentions((prev) => removeExplicitMentionTarget(prev, target));
-  };
-
-  const handleMentionProject = (proj: Project) => {
-    handleAddMention({
-      kind: "project",
-      projectId: proj.id,
-      projectName: proj.name,
-      projectPath: proj.path,
-      projectColorHex: proj.colorHex,
-    });
-  };
-
-  const handleMentionTask = (task: (typeof snapshot.tasks)[number]) => {
-    const taskProject = snapshot.projects.find(
-      (p) =>
-        (task.projectId && p.id === task.projectId) ||
-        p.name.toLowerCase() === task.projectName.toLowerCase(),
-    );
-    handleAddMention({
-      kind: "task",
-      taskId: task.id,
-      taskNumber: task.taskNumber,
-      taskTitle: task.title,
-      taskStatus: task.status,
-      projectId: taskProject?.id ?? task.projectId,
-      projectName: task.projectName || taskProject?.name || "",
-      projectPath: task.projectPath ?? taskProject?.path ?? null,
-      projectColorHex: taskProject?.colorHex ?? "#6366F1",
-    });
-  };
-
-  const handleUpdateTaskStatus = (taskId: string, status: AgentTaskStatus) => {
-    void window.conductor.updateTaskStatus(taskId, status);
-  };
 
   const handleWindowDragOver = (e: React.DragEvent) => {
     if (e.dataTransfer?.types?.includes("Files")) {
@@ -1475,28 +1971,23 @@ export const App: React.FC = () => {
               tasks={snapshot.tasks}
               questions={questions}
               defaultIntegrationMode={snapshot.defaultIntegrationMode}
+              locale={uiLocale}
               selectedProjectId={selectedProjectId}
               selectedTaskId={selectedTaskId}
               onSelectProjectFilter={setSelectedProjectId}
-              onAddProject={() => void window.conductor.addProjectDialog()}
-              onScanDirectory={() => void window.conductor.scanDirectoryDialog()}
-              onRescanProjects={() => void window.conductor.rescanProjects()}
-              onRemoveProject={(id) => {
-                if (selectedProjectId === id) setSelectedProjectId(null);
-                void window.conductor.removeProject(id);
-              }}
+              onAddProject={handleAddProjectDialog}
+              onScanDirectory={handleScanDirectoryDialog}
+              onRescanProjects={handleRescanProjects}
+              onRemoveProject={handleRemoveProject}
               onMentionProject={handleMentionProject}
               onSelectTask={setSelectedTaskId}
               onSelectQuestion={handleSelectQuestion}
-              onOpenPreviewUrl={(url, task) => void handleOpenUrlInBrowser(url, { task })}
+              onOpenPreviewUrl={handleOpenPreviewUrl}
               onMentionTask={handleMentionTask}
               onUpdateTaskStatus={handleUpdateTaskStatus}
-              onStopWorker={(id) => void window.conductor.stopTaskWorker(id)}
-              onDeleteTask={(id) => {
-                if (selectedTaskId === id) setSelectedTaskId(null);
-                void window.conductor.deleteTask(id);
-              }}
-              onLandTask={(id, opts) => void window.conductor.landTask(id, opts)}
+              onStopWorker={handleStopWorker}
+              onDeleteTask={handleDeleteTask}
+              onLandTask={handleLandTask}
             />
           </div>
           <div
@@ -1510,6 +2001,7 @@ export const App: React.FC = () => {
       <div className="flex-1 min-w-[360px] h-full">
         <UnifiedChat
           snapshot={snapshot}
+          locale={uiLocale}
           composerText={composerText}
           attachments={attachments}
           selectedMentions={selectedMentions}
@@ -1520,56 +2012,47 @@ export const App: React.FC = () => {
           onComposerTextChange={updateComposerText}
           onAddMention={handleAddMention}
           onRemoveMention={handleRemoveMention}
-          onRemoveAttachment={(id) => updateAttachments((prev) => prev.filter((a) => a.id !== id))}
-          onAddAttachment={(att) => updateAttachments((prev) => [...prev, att])}
+          onRemoveAttachment={handleRemoveAttachment}
+          onAddAttachment={handleAddAttachment}
           onSend={handleSend}
-          onStopMessage={(id) => void window.conductor.stopMessage(id)}
-          onStopAll={() => void window.conductor.stopAllResponders()}
-          onNewChat={() => {
-            updateSelectedMentions([]);
-            void window.conductor.startFreshChat();
-          }}
-          onSelectChatSession={(id) => void window.conductor.selectChatSession(id)}
-          onDeleteChatSession={(id) => void window.conductor.deleteChatSession(id)}
+          onStopMessage={handleStopMessage}
+          onStopAll={handleStopAllResponders}
+          onNewChat={handleNewChat}
+          onSelectChatSession={handleSelectChatSession}
+          onDeleteChatSession={handleDeleteChatSession}
           newChatConfirmTrigger={newChatConfirmTrigger}
-          onToggleSidebar={() =>
-            void window.conductor.setLayout({ showTaskSidebar: !snapshot.showTaskSidebar })
-          }
-          onToggleBrowser={() => {
-            if (snapshot.showBrowserPane) {
-              handleCloseRightPane();
-            } else {
-              void window.conductor.setLayout({ showBrowserPane: true });
-            }
-          }}
+          onToggleSidebar={handleToggleSidebar}
+          onToggleBrowser={handleToggleBrowserPane}
           rightPaneMode={derivedRightPaneMode}
+          isBrowserTabActive={isBrowserTabActive}
           onToggleMarkdownViewer={handleToggleMarkdownViewer}
-          onAddProject={() => void window.conductor.addProjectDialog()}
-          onOpenUrl={(url, ctx) => void handleOpenUrlInBrowser(url, { message: ctx?.message })}
+          onAddProject={handleAddProjectDialog}
+          onOpenUrl={handleOpenChatUrl}
           onOpenMarkdownFile={handleOpenMarkdownFile}
           onOpenImageAttachment={handleOpenImageAttachment}
           onOpenTask={setSelectedTaskId}
           onUpdateTaskStatus={handleUpdateTaskStatus}
-          onLandTask={(id, opts) => void window.conductor.landTask(id, opts)}
+          onLandTask={handleLandTask}
           onToggleElementPicker={handleToggleElementPicker}
-          onCaptureScreenshot={() => void captureScreenshot()}
+          onCaptureScreenshot={handleCaptureScreenshotClick}
           onAttachCurrentUrl={handleAttachCurrentUrl}
-          onAttachConsoleErrors={() => void attachConsoleErrors()}
-          onPickLocalImages={async () => {
-            const imgs = await window.conductor.pickLocalImages();
-            if (imgs.length > 0) updateAttachments((prev) => [...prev, ...imgs]);
-          }}
-          onPasteImage={async (base64) => {
-            const att = await window.conductor.savePastedImage(base64);
-            if (att) updateAttachments((prev) => [...prev, att]);
-          }}
-          onReconnect={() => void window.conductor.reconnect()}
-          onDismissError={() => void window.conductor.dismissError()}
-          onSetChatProvider={(p) => void window.conductor.setChatProvider(p)}
-          onSetWorkerProvider={(p) => void window.conductor.setWorkerProvider(p)}
-          onSetChatModel={(m, e) => void window.conductor.setChatModel(m, e)}
-          onSetWorkerModel={(m, e) => void window.conductor.setWorkerModel(m, e)}
-          onOpenSettings={() => setShowSettings(true)}
+          onAttachConsoleErrors={handleAttachConsoleErrorsClick}
+          onPickLocalImages={handlePickLocalImages}
+          onPasteImage={handlePasteImage}
+          onReconnect={handleReconnect}
+          onDismissError={handleDismissError}
+          onSetChatProvider={handleSetChatProvider}
+          onSetWorkerProvider={handleSetWorkerProvider}
+          onSetChatModel={handleSetChatModel}
+          onSetWorkerModel={handleSetWorkerModel}
+          onOpenUsage={handleOpenUsage}
+          onOpenSettings={handleOpenSettings}
+          voiceReadbackEnabled={Boolean(snapshot.voiceReadbackEnabled)}
+          isSpeaking={isSpeaking}
+          voiceAutoSend={voiceAutoSend}
+          onToggleVoiceReadback={handleToggleVoiceReadback}
+          onStopSpeaking={handleStopSpeaking}
+          onToggleVoiceAutoSend={handleToggleVoiceAutoSend}
         />
       </div>
 
@@ -1588,36 +2071,38 @@ export const App: React.FC = () => {
               tabs={activeProjectTabs}
               activeTab={activeUnifiedTab}
               projectRecentMdFiles={projectRecentMdFiles}
+              locale={uiLocale}
               isPickingElement={snapshot.isPickingElement}
-              hideNativeView={Boolean(selectedTask || showSettings)}
-              onNavigateBrowser={(url, newTab) => void handleNavigateActiveBrowser(url, newTab)}
-              onNewBrowserTab={() => void handleNewBrowserTab()}
-              onBrowserBack={() => void window.conductor.browserBack()}
-              onBrowserForward={() => void window.conductor.browserForward()}
-              onBrowserReload={() => void window.conductor.browserReload()}
-              onBrowserToggleDevTools={() => void window.conductor.browserToggleDevTools()}
+              hideNativeView={Boolean(selectedTask || settingsModalTab !== null)}
+              onNavigateBrowser={handleNavigateBrowserProp}
+              onNewBrowserTab={handleNewBrowserTabClick}
+              onBrowserBack={handleBrowserBack}
+              onBrowserForward={handleBrowserForward}
+              onBrowserReload={handleBrowserReload}
+              onBrowserToggleDevTools={handleBrowserToggleDevTools}
               onBrowserTogglePicker={handleToggleElementPicker}
-              onBrowserCaptureScreenshot={() => void captureScreenshot()}
-              onBrowserAttachErrors={() => void attachConsoleErrors()}
-              onBrowserOpenExternal={() => void window.conductor.browserOpenExternal()}
+              onBrowserCaptureScreenshot={handleCaptureScreenshotClick}
+              onBrowserAttachUrl={handleAttachCurrentUrl}
+              onBrowserAttachErrors={handleAttachConsoleErrorsClick}
+              onBrowserOpenExternal={handleBrowserOpenExternal}
               mdAutoReload={mdAutoReload}
               mdIsWatching={mdIsWatching}
               mdJustReloadedAt={mdJustReloadedAt}
               mdPendingAnchor={mdPendingAnchor}
-              onClearMdPendingAnchor={() => setMdPendingAnchor(null)}
-              onToggleMdAutoReload={() => setMdAutoReload((v) => !v)}
-              onOpenMarkdownDialog={() => void handleOpenMarkdownDialog()}
+              onClearMdPendingAnchor={handleClearMdPendingAnchor}
+              onToggleMdAutoReload={handleToggleMdAutoReload}
+              onOpenMarkdownDialog={handleOpenMarkdownDialogClick}
               onOpenMarkdownFile={handleOpenMarkdownFile}
               onRefreshActiveMd={handleRefreshActiveMd}
-              onRemoveRecentMd={(fp) => {
-                setRecentMdFiles((prev) => {
-                  const next = prev.filter((p) => p !== fp);
-                  saveRecentMarkdownFiles(next);
-                  return next;
-                });
-              }}
+              onRemoveRecentMd={handleRemoveRecentMd}
               onAttachMdFileToChat={handleAttachMarkdownFile}
               onOpenMarkdownImage={handleOpenMarkdownImage}
+              onMarkdownDraftChange={handleMarkdownDraftChange}
+              onSaveActiveMd={handleSaveActiveMarkdown}
+              onDiscardActiveMd={handleDiscardActiveMarkdown}
+              onReloadExternalMdChange={handleReloadExternalMarkdownChange}
+              onDismissExternalMdChange={handleDismissExternalMarkdownChange}
+              onChangeMdViewMode={handleChangeMarkdownViewMode}
               onRetryImageTab={handleRetryImageTab}
               onImageLoadError={handleImageLoadError}
               onOpenProjectFile={handleOpenProjectFile}
@@ -1627,8 +2112,8 @@ export const App: React.FC = () => {
               onSelectProjectScope={handleSelectProjectScope}
               onSelectTab={handleSelectUnifiedTab}
               onCloseTab={handleCloseUnifiedTab}
-              onOpenUrl={(url) => void handleOpenUrlInBrowser(url)}
-              onRevealInFinder={(fp) => void window.conductor.openPathInFinder(fp)}
+              onOpenUrl={handleOpenRightPaneUrl}
+              onRevealInFinder={handleRevealInFinder}
             />
           </div>
         </>
@@ -1641,6 +2126,7 @@ export const App: React.FC = () => {
           project={selectedTaskProject}
           projectColorHex={selectedTaskColor}
           defaultIntegrationMode={snapshot.defaultIntegrationMode}
+          locale={uiLocale}
           onClose={() => setSelectedTaskId(null)}
           onUpdateStatus={(st) => handleUpdateTaskStatus(selectedTask.id, st)}
           onOpenPreviewUrl={(url) => void handleOpenUrlInBrowser(url, { task: selectedTask })}
@@ -1663,14 +2149,21 @@ export const App: React.FC = () => {
         />
       )}
 
-      {/* Conductor Settings Modal */}
-      {showSettings && (
+      {/* Conductor Settings & Usage Modal */}
+      {settingsModalTab !== null && (
         <SettingsModal
           defaultIntegrationMode={snapshot.defaultIntegrationMode}
           autoLandOnComplete={snapshot.autoLandOnComplete}
           preferredLanguage={snapshot.preferredLanguage}
+          voiceReadbackEnabled={Boolean(snapshot.voiceReadbackEnabled)}
+          voiceAutoSend={voiceAutoSend}
+          remoteAccess={snapshot.remoteAccess}
+          locale={uiLocale}
           projects={snapshot.projects}
-          onClose={() => setShowSettings(false)}
+          initialTab={settingsModalTab}
+          usageRecords={snapshot.usageRecords ?? []}
+          onClearUsage={() => void window.conductor.clearUsageRecords()}
+          onClose={() => setSettingsModalTab(null)}
           onSetDefaultIntegrationMode={(mode) =>
             void window.conductor.setDefaultIntegrationMode(mode)
           }
@@ -1682,6 +2175,25 @@ export const App: React.FC = () => {
           }
           onChangePreferredLanguage={(lang) =>
             void window.conductor.setPreferredLanguage(lang)
+          }
+          onSetVoiceReadbackEnabled={(enabled) => {
+            if (!enabled) {
+              handleStopSpeaking();
+            }
+            void window.conductor.setVoiceReadbackEnabled(enabled);
+          }}
+          onSetVoiceAutoSend={updateVoiceAutoSend}
+          onSetRemoteAccessEnabled={(enabled) =>
+            void window.conductor.setRemoteAccessEnabled(enabled)
+          }
+          onSetRemoteAccessPort={(port) =>
+            void window.conductor.setRemoteAccessPort(port)
+          }
+          onRegenerateRemoteAccessToken={() =>
+            void window.conductor.regenerateRemoteAccessToken()
+          }
+          onRefreshRemoteAccessStatus={() =>
+            void window.conductor.refreshRemoteAccessStatus()
           }
         />
       )}

@@ -10,6 +10,7 @@ import type {
   MarkdownWatchEvent,
   PreferredLanguage,
   SendMessagePayload,
+  VoiceSpeakRequest,
 } from "../shared/types.js";
 
 const api: ConductorAPI = {
@@ -64,6 +65,21 @@ const api: ConductorAPI = {
     ipcRenderer.invoke("conductor:setProjectIntegrationMode", projectId, mode),
   setPreferredLanguage: (language: PreferredLanguage) =>
     ipcRenderer.invoke("conductor:setPreferredLanguage", language),
+  setVoiceReadbackEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke("conductor:setVoiceReadbackEnabled", enabled),
+  setRemoteAccessEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke("conductor:setRemoteAccessEnabled", enabled),
+  setRemoteAccessPort: (port: number) =>
+    ipcRenderer.invoke("conductor:setRemoteAccessPort", port),
+  regenerateRemoteAccessToken: () =>
+    ipcRenderer.invoke("conductor:regenerateRemoteAccessToken"),
+  refreshRemoteAccessStatus: () =>
+    ipcRenderer.invoke("conductor:refreshRemoteAccessStatus"),
+  clearUsageRecords: () => ipcRenderer.invoke("conductor:clearUsageRecords"),
+
+  voiceSpeak: (request: VoiceSpeakRequest) => ipcRenderer.invoke("voice:speak", request),
+  voiceStop: () => ipcRenderer.invoke("voice:stop"),
+  voiceRequestMicPermission: () => ipcRenderer.invoke("voice:requestMicPermission"),
 
   updateTaskStatus: (taskId: string, status: AgentTaskStatus) =>
     ipcRenderer.invoke("conductor:updateTaskStatus", taskId, status),
@@ -94,6 +110,8 @@ const api: ConductorAPI = {
   markdownOpenDialog: () => ipcRenderer.invoke("markdown:openDialog"),
   markdownReadFile: (filePathOrUrl, baseFilePath) =>
     ipcRenderer.invoke("markdown:readFile", filePathOrUrl, baseFilePath),
+  markdownWriteFile: (filePath, content) =>
+    ipcRenderer.invoke("markdown:write-file", filePath, content),
   markdownWatchFile: (filePathOrUrl) => ipcRenderer.invoke("markdown:watchFile", filePathOrUrl),
   markdownUnwatch: () => ipcRenderer.invoke("markdown:unwatch"),
   onMarkdownFileChanged: (listener) => {

@@ -1,4 +1,5 @@
 import type { IntegrationMode, Project } from "../../shared/types.js";
+import { getLocalizedIntegrationModeMeta, type UiLocale } from "../../shared/i18n.js";
 
 export interface IntegrationModeOption {
   id: IntegrationMode;
@@ -8,37 +9,30 @@ export interface IntegrationModeOption {
   description: string;
 }
 
-export const INTEGRATION_MODE_OPTIONS: readonly IntegrationModeOption[] = [
-  {
-    id: "feature-branch",
-    label: "Feature Branch（既定）",
-    shortLabel: "Feature Branch",
-    badgeText: "Branch",
-    description:
-      "親リポジトリが main / master の場合は自動で conductor/<slug> ブランチを作成し、後続タスクも同じブランチへリベースして順次統合します。",
-  },
-  {
-    id: "per-task-pr",
-    label: "Per-Task PR",
-    shortLabel: "Per-Task PR",
-    badgeText: "PR",
-    description:
-      "親リポジトリへマージせずタスク専用ブランチを保持し、リモートへの Push や PR 作成を行います。",
-  },
-  {
-    id: "direct",
-    label: "Direct",
-    shortLabel: "Direct",
-    badgeText: "Direct",
-    description:
-      "main / master を含む現在の親ブランチへ直接リベース＆取り込みを行い、完了後に Worktree を削除します。",
-  },
+const INTEGRATION_MODE_IDS: readonly IntegrationMode[] = [
+  "feature-branch",
+  "per-task-pr",
+  "direct",
 ] as const;
 
-export function getIntegrationModeOption(mode: IntegrationMode): IntegrationModeOption {
-  return (
-    INTEGRATION_MODE_OPTIONS.find((opt) => opt.id === mode) ?? INTEGRATION_MODE_OPTIONS[0]!
-  );
+export function getIntegrationModeOptions(locale: UiLocale = "ja"): IntegrationModeOption[] {
+  return INTEGRATION_MODE_IDS.map((id) => ({
+    id,
+    ...getLocalizedIntegrationModeMeta(id, locale),
+  }));
+}
+
+export const INTEGRATION_MODE_OPTIONS: readonly IntegrationModeOption[] =
+  getIntegrationModeOptions("ja");
+
+export function getIntegrationModeOption(
+  mode: IntegrationMode,
+  locale: UiLocale = "ja",
+): IntegrationModeOption {
+  return {
+    id: mode,
+    ...getLocalizedIntegrationModeMeta(mode, locale),
+  };
 }
 
 export function getEffectiveProjectMode(

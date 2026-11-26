@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -27,24 +27,31 @@ import {
   XCircle,
 } from "lucide-react";
 import type { AgentTask, AgentTaskStatus, IntegrationMode, Project } from "../../shared/types.js";
+import { t, type UiLocale } from "../../shared/i18n.js";
 import { formatTaskCode } from "../../shared/mentions.js";
 import {
-  getMarkTaskDoneBlockedReason,
+  getLocalizedMarkTaskDoneBlockedReason,
   requiresLandBeforeDone,
   validateManualTaskStatusTransition,
 } from "../../shared/task-status.js";
 import { getEffectiveProjectMode, getIntegrationModeOption } from "../lib/integration-mode.js";
 import {
+  filterQuestions,
   formatQuestionTime,
   summarizeQuestions,
   type QuestionItem,
 } from "../lib/questions.js";
 import {
+  QUESTIONS_SECTION_MAX_HEIGHT_RATIO,
+  QUESTIONS_SECTION_MIN_HEIGHT,
+  clampQuestionsSectionHeight,
   filterCompletedTasks,
   formatCompletedCountBadge,
   getQuickStatusTransition,
   getTaskCardSubtitle,
+  loadQuestionsSectionHeight,
   partitionSidebarTasks,
+  saveQuestionsSectionHeight,
 } from "../lib/task-sidebar.js";
 
 export interface TaskSidebarProps {
@@ -52,9 +59,12 @@ export interface TaskSidebarProps {
   tasks: AgentTask[];
   questions?: QuestionItem[];
   defaultIntegrationMode?: IntegrationMode;
+  locale?: UiLocale;
   selectedProjectId: string | null;
   selectedTaskId: string | null;
   defaultCompletedExpanded?: boolean;
+  defaultQuestionsExpanded?: boolean;
+  defaultQuestionsSearch?: string;
   onSelectProjectFilter: (id: string | null) => void;
   onAddProject: () => void;
   onScanDirectory: () => void;
@@ -96,14 +106,17 @@ function TaskStatusIcon({ status }: { status: AgentTask["status"] }) {
   }
 }
 
-export const TaskSidebar: React.FC<TaskSidebarProps> = ({
+export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
   projects,
   tasks,
   questions = [],
   defaultIntegrationMode = "feature-branch",
+  locale = "ja",
   selectedProjectId,
   selectedTaskId,
   defaultCompletedExpanded = false,
+  defaultQuestionsExpanded = true,
+  defaultQuestionsSearch = "",
   onSelectProjectFilter,
   onAddProject,
   onScanDirectory,
@@ -123,9 +136,154 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
   const [projectSearch, setProjectSearch] = useState("");
   const [completedExpanded, setCompletedExpanded] = useState(defaultCompletedExpanded);
   const [completedSearch, setCompletedSearch] = useState("");
-  const [questionsExpanded, setQuestionsExpanded] = useState(true);
+  const [questionsExpanded, setQuestionsExpanded] = useState(defaultQuestionsExpanded);
+  const [questionsSearch, setQuestionsSearch] = useState(defaultQuestionsSearch);
+  const [questionsHeight, setQuestionsHeight] = useState<number | null>(() =>
+    loadQuestionsSectionHeight(),
+  );
+  const [sidebarHeight, setSidebarHeight] = useState<number | null>(null);
+  const [isResizingQuestions, setIsResizingQuestions] = useState(false);
+
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const questionsSectionRef = useRef<HTMLDivElement | null>(null);
+  const cleanupResizeRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    const el = sidebarRef.current;
+    if (!el) return;
+
+    const updateSidebarHeight = () => {
+      const nextHeight = Math.round(el.getBoundingClientRect().height);
+      if (nextHeight > 0) {
+        setSidebarHeight((prev) => (prev === nextHeight ? prev : nextHeight));
+      }
+    };
+
+    updateSidebarHeight();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(updateSidebarHeight);
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
+
+    window.addEventListener("resize", updateSidebarHeight);
+    return () => window.removeEventListener("resize", updateSidebarHeight);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      cleanupResizeRef.current?.();
+    };
+  }, []);
+
+  const resolvedQuestionsHeight =
+    questionsExpanded && questionsHeight !== null
+      ? clampQuestionsSectionHeight(questionsHeight, sidebarHeight)
+      : null;
+
+  const startQuestionsResize = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || !questionsExpanded) return;
+    e.preventDefault();
+    cleanupResizeRef.current?.();
+
+    const startY = e.clientY;
+    const measuredSidebarHeight =
+      sidebarRef.current?.getBoundingClientRect().height || sidebarHeight || undefined;
+    const measuredQuestionsHeight =
+      questionsSectionRef.current?.getBoundingClientRect().height ||
+      resolvedQuestionsHeight ||
+      QUESTIONS_SECTION_MIN_HEIGHT;
+
+    let latestHeight: number | null = null;
+    let didMove = false;
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    setIsResizingQuestions(true);
+
+    const onMove = (ev: MouseEvent) => {
+      const dy = startY - ev.clientY;
+      if (!didMove && Math.abs(dy) < 2) return;
+      didMove = true;
+      const currentSidebarHeight =
+        sidebarRef.current?.getBoundingClientRect().height || measuredSidebarHeight;
+      const nextHeight = clampQuestionsSectionHeight(
+        measuredQuestionsHeight + dy,
+        currentSidebarHeight,
+      );
+      latestHeight = nextHeight;
+      setQuestionsHeight(nextHeight);
+    };
+
+    const cleanup = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevUserSelect;
+      setIsResizingQuestions(false);
+      cleanupResizeRef.current = null;
+    };
+
+    const onUp = () => {
+      cleanup();
+      if (didMove && latestHeight !== null) {
+        const currentSidebarHeight =
+          sidebarRef.current?.getBoundingClientRect().height || measuredSidebarHeight;
+        saveQuestionsSectionHeight(latestHeight, undefined, currentSidebarHeight);
+      }
+    };
+
+    cleanupResizeRef.current = cleanup;
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", onUp);
+  };
+
+  const resetQuestionsHeight = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setQuestionsHeight(null);
+    saveQuestionsSectionHeight(null);
+  };
+
+  const handleQuestionsResizeKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!questionsExpanded) return;
+    const currentSidebarHeight =
+      sidebarRef.current?.getBoundingClientRect().height || sidebarHeight || undefined;
+    const baseHeight =
+      questionsSectionRef.current?.getBoundingClientRect().height ||
+      resolvedQuestionsHeight ||
+      QUESTIONS_SECTION_MIN_HEIGHT;
+
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const delta = e.key === "ArrowUp" ? 20 : -20;
+      const nextHeight = clampQuestionsSectionHeight(baseHeight + delta, currentSidebarHeight);
+      setQuestionsHeight(nextHeight);
+      saveQuestionsSectionHeight(nextHeight, undefined, currentSidebarHeight);
+    } else if (e.key === "Home" || e.key === "Escape") {
+      e.preventDefault();
+      setQuestionsHeight(null);
+      saveQuestionsSectionHeight(null);
+    }
+  };
 
   const questionSummary = useMemo(() => summarizeQuestions(questions), [questions]);
+  const hasQuestionsQuery = questionsSearch.trim().length > 0;
+  const filteredQuestions = useMemo(
+    () =>
+      hasQuestionsQuery
+        ? filterQuestions(questions, questionsSearch, { projects, tasks })
+        : questions,
+    [questions, questionsSearch, hasQuestionsQuery, projects, tasks],
+  );
+  const questionsBadgeText = formatCompletedCountBadge(
+    filteredQuestions.length,
+    questionSummary.totalCount,
+    hasQuestionsQuery,
+  );
 
   // Show only projects that currently have tasks (or are actively selected) as quick filter pills
   const taskProjectIds = useMemo(() => {
@@ -169,12 +327,15 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
   const runningCount = tasks.filter((t) => t.status === "running").length;
 
   return (
-    <aside className="flex flex-col h-full bg-zinc-50 dark:bg-[#13161c] border-r border-zinc-200/80 dark:border-zinc-800/90">
+    <aside
+      ref={sidebarRef}
+      className="flex flex-col h-full bg-zinc-50 dark:bg-[#13161c] border-r border-zinc-200/80 dark:border-zinc-800/90"
+    >
       {/* Header with space for macOS traffic lights */}
       <div className="drag-region h-11 flex items-center justify-between pl-[78px] pr-3 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0">
         <div className="flex items-center gap-1.5 min-w-0">
           <ListTodo className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-          <span className="text-[12.5px] font-semibold truncate">Tasks</span>
+          <span className="text-[12.5px] font-semibold truncate">{t(locale, "sidebar.tasks")}</span>
           {runningCount > 0 && (
             <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-400">
               {runningCount}
@@ -184,7 +345,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
         <button
           type="button"
           onClick={onAddProject}
-          title="別のプロジェクトフォルダを追加 (⌘O)"
+          title={t(locale, "sidebar.addProjectTitle")}
           className="no-drag p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
         >
           <FolderPlus className="w-3.5 h-3.5" />
@@ -204,9 +365,9 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
             ) : (
               <ChevronRight className="w-3 h-3" />
             )}
-            Projects ({projects.length})
+            {t(locale, "sidebar.projectsCount", { count: projects.length })}
           </span>
-          <span className="text-[10px] text-zinc-400">自動認識済み</span>
+          <span className="text-[10px] text-zinc-400">{t(locale, "sidebar.autoDetected")}</span>
         </button>
 
         {/* Quick filter pills only when tasks exist */}
@@ -221,7 +382,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                   : "bg-zinc-200/60 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
               }`}
             >
-              すべて
+              {t(locale, "common.all")}
             </button>
             {quickFilterProjects.map((p) => {
               const active = selectedProjectId === p.id;
@@ -255,25 +416,25 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                 type="button"
                 onClick={onAddProject}
                 className="flex-1 inline-flex items-center justify-center gap-1 py-1 px-1.5 rounded-md text-[10.5px] font-medium bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-200 transition-colors cursor-pointer"
-                title="単体のプロジェクトフォルダを追加 (⌘O)"
+                title={t(locale, "sidebar.addOneTitle")}
               >
                 <FolderPlus className="w-3 h-3 text-indigo-500" />
-                <span>1件追加</span>
+                <span>{t(locale, "sidebar.addOne")}</span>
               </button>
               <button
                 type="button"
                 onClick={onScanDirectory}
                 className="flex-1 inline-flex items-center justify-center gap-1 py-1 px-1.5 rounded-md text-[10.5px] font-medium bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-200 transition-colors cursor-pointer"
-                title="親ディレクトリ配下のプロジェクトを一括登録 (⌘⇧O)"
+                title={t(locale, "sidebar.scanDirTitle")}
               >
                 <FolderSearch className="w-3 h-3 text-indigo-500" />
-                <span>配下を一括</span>
+                <span>{t(locale, "sidebar.scanDir")}</span>
               </button>
               <button
                 type="button"
                 onClick={onRescanProjects}
                 className="p-1 rounded-md bg-zinc-200/70 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
-                title="プロジェクトを再スキャン"
+                title={t(locale, "sidebar.rescanTitle")}
               >
                 <RefreshCw className="w-3 h-3" />
               </button>
@@ -285,7 +446,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                 type="text"
                 value={projectSearch}
                 onChange={(e) => setProjectSearch(e.target.value)}
-                placeholder="プロジェクトを検索..."
+                placeholder={t(locale, "sidebar.searchProjectsPlaceholder")}
                 className="w-full pl-7 pr-2 py-1 rounded-md text-[11.5px] bg-white dark:bg-[#0f1115] border border-zinc-200 dark:border-zinc-800 outline-none focus:border-indigo-500/60 select-text"
               />
             </div>
@@ -293,6 +454,9 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
             <div className="max-h-48 overflow-y-auto space-y-0.5 pr-0.5">
               {searchedProjects.map((p) => {
                 const active = selectedProjectId === p.id;
+                const projModeOpt = p.integrationMode
+                  ? getIntegrationModeOption(p.integrationMode, locale)
+                  : null;
                 return (
                   <div
                     key={p.id}
@@ -309,12 +473,14 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                       style={{ backgroundColor: p.colorHex }}
                     />
                     <span className="truncate flex-1">{p.name}</span>
-                    {p.integrationMode && (
+                    {projModeOpt && (
                       <span
                         className="px-1 py-0.2 rounded text-[9px] font-medium bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 shrink-0"
-                        title={`個別設定: ${getIntegrationModeOption(p.integrationMode).shortLabel}`}
+                        title={t(locale, "sidebar.customModeTitle", {
+                          mode: projModeOpt.shortLabel,
+                        })}
                       >
-                        {getIntegrationModeOption(p.integrationMode).badgeText}
+                        {projModeOpt.badgeText}
                       </span>
                     )}
                     {p.gitBranch && (
@@ -329,7 +495,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                         onMentionProject(p);
                       }}
                       className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-zinc-300/70 dark:hover:bg-zinc-700 cursor-pointer"
-                      title="チャットで言及"
+                      title={t(locale, "sidebar.mentionInChat")}
                     >
                       <MessageSquare className="w-2.5 h-2.5" />
                     </button>
@@ -340,7 +506,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                         onRemoveProject(p.id);
                       }}
                       className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-zinc-300/70 dark:hover:bg-zinc-700 cursor-pointer"
-                      title="リストから除外"
+                      title={t(locale, "sidebar.removeFromList")}
                     >
                       <X className="w-2.5 h-2.5" />
                     </button>
@@ -349,7 +515,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
               })}
               {searchedProjects.length === 0 && (
                 <div className="text-[11px] text-zinc-400 text-center py-2">
-                  一致するプロジェクトがありません
+                  {t(locale, "sidebar.noMatchingProjects")}
                 </div>
               )}
             </div>
@@ -363,10 +529,10 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
           <div className="flex flex-col items-center justify-center text-center px-4 pt-12 gap-2">
             <Sparkles className="w-6 h-6 text-zinc-300 dark:text-zinc-700" />
             <div className="text-[12.5px] font-medium text-zinc-500 dark:text-zinc-400">
-              タスクはまだありません
+              {t(locale, "sidebar.noTasksTitle")}
             </div>
             <p className="text-[11.5px] text-zinc-400 dark:text-zinc-500 leading-relaxed">
-              チャットでプロジェクト名を出して依頼すると、エージェントが裏でワーカーを起動しここにタスクを表示します。
+              {t(locale, "sidebar.noTasksDescription")}
             </p>
           </div>
         ) : (
@@ -375,7 +541,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between px-1">
                   <span className="text-[10px] font-semibold tracking-wider text-zinc-400 uppercase">
-                    Active & Review
+                    {t(locale, "sidebar.activeAndReview")}
                   </span>
                   <span className="text-[10px] text-zinc-400 tabular-nums">{activeTasks.length}</span>
                 </div>
@@ -388,6 +554,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                       colorHex={projectColor(projects, task)}
                       effectiveMode={getEffectiveProjectMode(proj, defaultIntegrationMode)}
                       parentBranch={proj?.gitBranch ?? null}
+                      locale={locale}
                       isSelected={selectedTaskId === task.id}
                       onSelect={() => onSelectTask(task.id)}
                       onOpenPreview={(url) => onOpenPreviewUrl(url, task)}
@@ -416,7 +583,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                     ) : (
                       <ChevronRight className="w-3 h-3 shrink-0" />
                     )}
-                    <span>Completed</span>
+                    <span>{t(locale, "sidebar.completed")}</span>
                   </span>
                   <span
                     data-testid="completed-count-badge"
@@ -434,17 +601,17 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                         type="text"
                         value={completedSearch}
                         onChange={(e) => setCompletedSearch(e.target.value)}
-                        placeholder="完了タスクを検索..."
-                        aria-label="完了タスクをタイトル・プロジェクト名・概要で検索"
-                        title="タイトル・プロジェクト名・概要で絞り込み"
+                        placeholder={t(locale, "sidebar.searchCompletedPlaceholder")}
+                        aria-label={t(locale, "sidebar.searchCompletedAria")}
+                        title={t(locale, "sidebar.searchCompletedTitle")}
                         className="w-full pl-7 pr-7 py-1 rounded-md text-[11.5px] bg-white dark:bg-[#0f1115] border border-zinc-200 dark:border-zinc-800 outline-none focus:border-indigo-500/60 select-text"
                       />
                       {hasCompletedQuery && (
                         <button
                           type="button"
                           onClick={() => setCompletedSearch("")}
-                          aria-label="検索フィルタをクリア"
-                          title="検索フィルタをクリア"
+                          aria-label={t(locale, "sidebar.clearFilter")}
+                          title={t(locale, "sidebar.clearFilter")}
                           className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
                         >
                           <X className="w-3 h-3" />
@@ -455,7 +622,10 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                     {hasCompletedQuery && (
                       <div className="flex items-center justify-between px-1 text-[10.5px] text-zinc-400 tabular-nums">
                         <span>
-                          {filteredCompletedTasks.length} / {completedTasks.length} 件表示
+                          {t(locale, "sidebar.showingCount", {
+                            filtered: filteredCompletedTasks.length,
+                            total: completedTasks.length,
+                          })}
                         </span>
                       </div>
                     )}
@@ -463,7 +633,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                     {filteredCompletedTasks.length === 0 ? (
                       <div className="rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 px-3 py-3 text-center space-y-1">
                         <div className="text-[11px] text-zinc-400 dark:text-zinc-500">
-                          一致する完了タスクがありません
+                          {t(locale, "sidebar.noMatchingCompleted")}
                         </div>
                         {hasCompletedQuery && (
                           <button
@@ -471,7 +641,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                             onClick={() => setCompletedSearch("")}
                             className="text-[10.5px] font-medium text-indigo-500 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer"
                           >
-                            フィルタをクリア
+                            {t(locale, "sidebar.clearFilterBtn")}
                           </button>
                         )}
                       </div>
@@ -485,6 +655,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                             colorHex={projectColor(projects, task)}
                             effectiveMode={getEffectiveProjectMode(proj, defaultIntegrationMode)}
                             parentBranch={proj?.gitBranch ?? null}
+                            locale={locale}
                             isSelected={selectedTaskId === task.id}
                             onSelect={() => onSelectTask(task.id)}
                             onOpenPreview={(url) => onOpenPreviewUrl(url, task)}
@@ -506,11 +677,53 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
       </div>
 
       {/* Bottom Questions History & Progress Section */}
-      <div className="shrink-0 border-t border-zinc-200/80 dark:border-zinc-800/90 bg-zinc-50/90 dark:bg-[#11141a] flex flex-col">
+      <div
+        ref={questionsSectionRef}
+        data-testid="questions-section"
+        style={
+          resolvedQuestionsHeight !== null
+            ? {
+                height: `${resolvedQuestionsHeight}px`,
+                maxHeight: `${Math.round(QUESTIONS_SECTION_MAX_HEIGHT_RATIO * 100)}%`,
+              }
+            : undefined
+        }
+        className="shrink-0 min-h-0 border-t border-zinc-200/80 dark:border-zinc-800/90 bg-zinc-50/90 dark:bg-[#11141a] flex flex-col"
+      >
+        {questionsExpanded && (
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label={t(locale, "sidebar.questionsResizeAria")}
+            tabIndex={0}
+            data-testid="questions-resize-handle"
+            onMouseDown={startQuestionsResize}
+            onDoubleClick={resetQuestionsHeight}
+            onKeyDown={handleQuestionsResizeKeyDown}
+            title={t(locale, "sidebar.questionsResizeTitle")}
+            className={`group h-1.5 shrink-0 cursor-row-resize select-none transition-colors flex items-center justify-center focus-visible:outline-none focus-visible:bg-indigo-500/35 ${
+              isResizingQuestions
+                ? "bg-indigo-500/35"
+                : "hover:bg-indigo-500/25"
+            }`}
+          >
+            <div
+              className={`h-[2px] w-8 rounded-full transition-colors ${
+                isResizingQuestions
+                  ? "bg-indigo-500/80"
+                  : "bg-zinc-300/60 dark:bg-zinc-700/70 group-hover:bg-indigo-500/70"
+              }`}
+            />
+          </div>
+        )}
         <button
           type="button"
+          aria-expanded={questionsExpanded}
+          data-testid="questions-toggle-button"
           onClick={() => setQuestionsExpanded((v) => !v)}
-          className="px-3 py-2 flex items-center justify-between gap-1.5 text-left hover:bg-zinc-200/40 dark:hover:bg-zinc-800/40 transition-colors cursor-pointer"
+          className={`shrink-0 px-3 ${
+            questionsExpanded ? "pt-1 pb-2" : "py-2"
+          } flex items-center justify-between gap-1.5 text-left hover:bg-zinc-200/40 dark:hover:bg-zinc-800/40 transition-colors cursor-pointer`}
         >
           <span className="inline-flex items-center gap-1.5 min-w-0">
             {questionsExpanded ? (
@@ -520,18 +733,23 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
             )}
             <MessagesSquare className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
             <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200 truncate">
-              Questions
+              {t(locale, "sidebar.questions")}
             </span>
             {questionSummary.totalCount > 0 && (
-              <span className="text-[10.5px] text-zinc-400 tabular-nums">
-                {questionSummary.totalCount}
+              <span
+                data-testid="questions-count-badge"
+                className="text-[10.5px] text-zinc-400 tabular-nums"
+              >
+                {questionsBadgeText}
               </span>
             )}
           </span>
           <span className="inline-flex items-center gap-1 shrink-0">
             {questionSummary.activeCount > 0 && (
               <span
-                title={`${questionSummary.activeCount}件 応答中`}
+                title={t(locale, "sidebar.questionsActiveTitle", {
+                  count: questionSummary.activeCount,
+                })}
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 tabular-nums"
               >
                 <Loader2 className="w-2.5 h-2.5 animate-spin" />
@@ -540,27 +758,104 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
             )}
             {questionSummary.unreadCount > 0 && (
               <span
-                title={`${questionSummary.unreadCount}件 未読の完了回答`}
+                title={t(locale, "sidebar.questionsUnreadTitle", {
+                  count: questionSummary.unreadCount,
+                })}
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 tabular-nums"
               >
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                 {questionSummary.unreadCount}
               </span>
             )}
           </span>
         </button>
 
+        {questionsExpanded && (questions.length > 0 || hasQuestionsQuery) && (
+          <div className="shrink-0 px-2.5 pb-1.5 space-y-1">
+            <div className="relative">
+              <Search className="w-3 h-3 text-zinc-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                data-testid="questions-search-input"
+                value={questionsSearch}
+                onChange={(e) => setQuestionsSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && questionsSearch) {
+                    e.preventDefault();
+                    setQuestionsSearch("");
+                  }
+                }}
+                placeholder={t(locale, "sidebar.searchQuestionsPlaceholder")}
+                aria-label={t(locale, "sidebar.searchQuestionsAria")}
+                title={t(locale, "sidebar.searchQuestionsTitle")}
+                className="w-full pl-7 pr-7 py-1 rounded-md text-[11.5px] bg-white dark:bg-[#0f1115] border border-zinc-200 dark:border-zinc-800 outline-none focus:border-indigo-500/60 select-text"
+              />
+              {hasQuestionsQuery && (
+                <button
+                  type="button"
+                  data-testid="questions-search-clear"
+                  onClick={() => setQuestionsSearch("")}
+                  aria-label={t(locale, "sidebar.clearFilter")}
+                  title={t(locale, "sidebar.clearFilter")}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+
+            {hasQuestionsQuery && (
+              <div
+                data-testid="questions-search-count"
+                className="flex items-center justify-between px-1 text-[10.5px] text-zinc-400 tabular-nums"
+              >
+                <span>
+                  {t(locale, "sidebar.showingCount", {
+                    filtered: filteredQuestions.length,
+                    total: questions.length,
+                  })}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
         {questionsExpanded && (
-          <div className="max-h-[38vh] overflow-y-auto px-2.5 pb-2.5 pt-0.5 space-y-1.5">
+          <div
+            data-testid="questions-list-container"
+            className={`${
+              resolvedQuestionsHeight !== null ? "flex-1 min-h-0" : "max-h-[38vh]"
+            } overflow-y-auto px-2.5 pb-2.5 pt-0.5 space-y-1.5`}
+          >
             {questions.length === 0 ? (
               <div className="px-2 py-2 text-[11px] text-zinc-400 dark:text-zinc-500 text-center">
-                チャットで質問すると履歴と進捗がここに表示されます
+                {t(locale, "sidebar.questionsEmpty")}
+              </div>
+            ) : filteredQuestions.length === 0 ? (
+              <div
+                data-testid="questions-search-empty"
+                className="rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 px-3 py-3 text-center space-y-1"
+              >
+                <div className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                  {t(locale, "sidebar.noMatchingQuestions")}
+                </div>
+                {hasQuestionsQuery && (
+                  <button
+                    type="button"
+                    data-testid="questions-search-clear-empty"
+                    onClick={() => setQuestionsSearch("")}
+                    className="text-[10.5px] font-medium text-indigo-500 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer"
+                  >
+                    {t(locale, "sidebar.clearFilterBtn")}
+                  </button>
+                )}
               </div>
             ) : (
-              questions.map((item) => (
+              filteredQuestions.map((item) => (
                 <QuestionCard
                   key={item.id}
                   item={item}
+                  locale={locale}
                   onSelect={() => onSelectQuestion?.(item)}
                 />
               ))
@@ -570,13 +865,14 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
       </div>
     </aside>
   );
-};
+});
 
 export interface TaskCardProps {
   task: AgentTask;
   colorHex: string;
   effectiveMode?: IntegrationMode;
   parentBranch?: string | null;
+  locale?: UiLocale;
   isSelected: boolean;
   onSelect: () => void;
   onOpenPreview: (url: string) => void;
@@ -592,6 +888,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   colorHex,
   effectiveMode = "feature-branch",
   parentBranch = null,
+  locale = "ja",
   isSelected,
   onSelect,
   onOpenPreview,
@@ -601,14 +898,16 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   onDelete,
   onLand,
 }) => {
-  const quickTransition = getQuickStatusTransition(task.status);
+  const quickTransition = getQuickStatusTransition(task.status, locale);
   const subtitle = getTaskCardSubtitle(task);
   const isDone = task.status === "done";
   const hasActiveWorktree = Boolean(task.worktreePath && task.worktreeBranch);
   const isLanding = task.landStatus === "landing";
   const needsLand = requiresLandBeforeDone(task);
   const doneBlockedReason =
-    quickTransition?.action === "done" ? getMarkTaskDoneBlockedReason(task) : null;
+    quickTransition?.action === "done"
+      ? getLocalizedMarkTaskDoneBlockedReason(task, locale)
+      : null;
   const isQuickDoneBlocked = Boolean(doneBlockedReason);
   const canQuickLand =
     Boolean(onLand) &&
@@ -620,7 +919,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   return (
     <div
       onClick={onSelect}
-      className={`group rounded-xl p-2.5 border transition-all cursor-pointer ${
+      className={`group rounded-xl p-2.5 border transition-colors cursor-pointer ${
         isSelected
           ? "bg-indigo-500/10 border-indigo-500/50"
           : isDone
@@ -656,7 +955,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                 e.stopPropagation();
                 onOpenPreview(task.previewURL!);
               }}
-              title="右ブラウザで開く"
+              title={t(locale, "sidebar.openInBrowserTitle")}
               className="p-1 rounded hover:bg-zinc-200/70 dark:hover:bg-zinc-700 text-zinc-500 cursor-pointer"
             >
               <Globe className="w-3 h-3" />
@@ -670,8 +969,8 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                 e.stopPropagation();
                 onStop();
               }}
-              title="ワーカーを停止"
-              aria-label={`${task.title}: ワーカーを停止`}
+              title={t(locale, "sidebar.stopWorker")}
+              aria-label={`${task.title}: ${t(locale, "sidebar.stopWorker")}`}
               className="p-1 rounded hover:bg-rose-500/15 text-rose-500 cursor-pointer"
             >
               <Square className="w-3 h-3 fill-current" />
@@ -683,7 +982,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                 e.stopPropagation();
                 onMention();
               }}
-              title="チャットで言及"
+              title={t(locale, "sidebar.mentionInChat")}
               className="p-1 rounded hover:bg-zinc-200/70 dark:hover:bg-zinc-700 text-zinc-500 cursor-pointer"
             >
               <MessageSquare className="w-3 h-3" />
@@ -695,7 +994,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
               e.stopPropagation();
               onDelete();
             }}
-            title="削除"
+            title={t(locale, "common.delete")}
             className="p-1 rounded hover:bg-rose-500/15 text-zinc-400 hover:text-rose-500 cursor-pointer"
           >
             <Trash2 className="w-3 h-3" />
@@ -753,8 +1052,11 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                   }`}
                   title={
                     parentBranch
-                      ? `Worktree: ${task.worktreeBranch} (親: ${parentBranch})`
-                      : `Worktree: ${task.worktreeBranch}`
+                      ? t(locale, "sidebar.worktreeTitleParent", {
+                          branch: task.worktreeBranch,
+                          parent: parentBranch,
+                        })
+                      : t(locale, "sidebar.worktreeTitle", { branch: task.worktreeBranch })
                   }
                 >
                   <GitBranch className="w-2.5 h-2.5 shrink-0" />
@@ -766,7 +1068,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
                     className="inline-flex items-center px-1.5 py-0.5 rounded text-[9.5px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 shrink-0"
                     title={doneBlockedReason ?? undefined}
                   >
-                    未Land
+                    {t(locale, "task.unlandedBadge")}
                   </span>
                 )}
               </>
@@ -806,10 +1108,13 @@ export const TaskCard: React.FC<TaskCardProps> = ({
               }}
               title={
                 isPrMode
-                  ? `ブランチ ${task.worktreeBranch} を Push / PR 作成`
+                  ? t(locale, "sidebar.pushPrTitle", { branch: task.worktreeBranch ?? "" })
                   : parentBranch
-                    ? `${parentBranch} へ変更を Land (${effectiveMode})`
-                    : `変更を Land (${effectiveMode})`
+                    ? t(locale, "sidebar.landToBranchTitle", {
+                        branch: parentBranch,
+                        mode: effectiveMode,
+                      })
+                    : t(locale, "sidebar.landChangesTitle", { mode: effectiveMode })
               }
               aria-label={`${task.title}: ${isPrMode ? "Push / PR" : "Land"}`}
               className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10.5px] font-medium border transition-colors shrink-0 ${
@@ -871,7 +1176,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   );
 };
 
-function QuestionStatusIcon({ item }: { item: QuestionItem }) {
+function QuestionStatusIcon({ item, locale }: { item: QuestionItem; locale: UiLocale }) {
   if (item.status === "streaming") {
     return <Loader2 className="w-3.5 h-3.5 text-indigo-500 animate-spin shrink-0" />;
   }
@@ -891,7 +1196,7 @@ function QuestionStatusIcon({ item }: { item: QuestionItem }) {
   if (item.isUnread) {
     return (
       <span
-        title="未読の完了回答"
+        title={t(locale, "sidebar.questionUnreadTooltip")}
         className="w-2.5 h-2.5 mx-0.5 rounded-full bg-emerald-500 ring-2 ring-emerald-500/25 shrink-0"
       />
     );
@@ -901,8 +1206,9 @@ function QuestionStatusIcon({ item }: { item: QuestionItem }) {
 
 const QuestionCard: React.FC<{
   item: QuestionItem;
+  locale: UiLocale;
   onSelect: () => void;
-}> = ({ item, onSelect }) => {
+}> = React.memo(({ item, locale, onSelect }) => {
   const timeLabel = formatQuestionTime(item.updatedAt);
   const providerLabel =
     item.provider === "agy" ? "AGY" : item.provider === "claude" ? "Claude" : item.provider === "codex" ? "Codex" : null;
@@ -919,13 +1225,13 @@ const QuestionCard: React.FC<{
     <button
       type="button"
       onClick={onSelect}
-      className={`w-full text-left group rounded-xl p-2 border transition-all cursor-pointer ${cardSurface}`}
+      className={`w-full text-left group rounded-xl p-2 border transition-colors cursor-pointer ${cardSurface}`}
     >
       <div className="flex items-center gap-1.5 mb-1">
-        <QuestionStatusIcon item={item} />
+        <QuestionStatusIcon item={item} locale={locale} />
         {item.status === "streaming" ? (
           <span className="text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 shrink-0">
-            応答中
+            {t(locale, "sidebar.questionStreaming")}
           </span>
         ) : item.isUnread ? (
           <span
@@ -935,10 +1241,12 @@ const QuestionCard: React.FC<{
                 : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
             }`}
           >
-            未読
+            {t(locale, "sidebar.questionUnread")}
           </span>
         ) : item.status === "error" ? (
-          <span className="text-[10px] font-medium text-rose-500 shrink-0">エラー</span>
+          <span className="text-[10px] font-medium text-rose-500 shrink-0">
+            {t(locale, "common.error")}
+          </span>
         ) : null}
         {providerLabel && (
           <span className="px-1 py-0.2 rounded text-[9px] font-medium bg-zinc-200/70 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0">
@@ -955,6 +1263,73 @@ const QuestionCard: React.FC<{
         {item.questionSnippet}
       </div>
 
+      {((item.relatedTasks && item.relatedTasks.length > 0) ||
+        (item.relatedProjects && item.relatedProjects.length > 0)) && (() => {
+        const relatedTasks = item.relatedTasks ?? [];
+        const coveredProjectIds = new Set(
+          relatedTasks.map((rt) => rt.projectId).filter((id): id is string => Boolean(id)),
+        );
+        const coveredProjectNames = new Set(
+          relatedTasks
+            .map((rt) => rt.projectName.trim().toLowerCase())
+            .filter(Boolean),
+        );
+        const standaloneProjects = (item.relatedProjects ?? []).filter((rp) => {
+          if (rp.projectId && coveredProjectIds.has(rp.projectId)) return false;
+          if (coveredProjectNames.has(rp.projectName.trim().toLowerCase())) return false;
+          return true;
+        });
+
+        return (
+          <div
+            data-testid="question-relation-badges"
+            className="mt-1 flex flex-wrap items-center gap-1 min-w-0"
+          >
+            {relatedTasks.map((rt) => {
+              const colorHex = rt.projectColorHex || "#6366F1";
+              const tooltip = [
+                rt.projectName ? `${rt.taskCode} · ${rt.projectName}` : rt.taskCode,
+                rt.taskTitle,
+              ]
+                .filter(Boolean)
+                .join(": ");
+              return (
+                <span
+                  key={`task:${rt.taskId || rt.taskNumber}`}
+                  title={tooltip}
+                  className="inline-flex items-center gap-1 max-w-full min-w-0"
+                >
+                  <span className="px-1 py-0.2 rounded font-mono text-[9.5px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 border border-indigo-500/20 shrink-0">
+                    {rt.taskCode}
+                  </span>
+                  {rt.projectName && (
+                    <span
+                      className="px-1 py-0.2 rounded text-[9.5px] font-semibold truncate max-w-[96px]"
+                      style={{ backgroundColor: `${colorHex}22`, color: colorHex }}
+                    >
+                      {rt.projectName}
+                    </span>
+                  )}
+                </span>
+              );
+            })}
+            {standaloneProjects.map((rp) => {
+              const colorHex = rp.projectColorHex || "#6366F1";
+              return (
+                <span
+                  key={`project:${rp.projectId ?? rp.projectName.toLowerCase()}`}
+                  title={rp.projectName}
+                  className="px-1 py-0.2 rounded text-[9.5px] font-semibold truncate max-w-[110px]"
+                  style={{ backgroundColor: `${colorHex}22`, color: colorHex }}
+                >
+                  {rp.projectName}
+                </span>
+              );
+            })}
+          </div>
+        );
+      })()}
+
       <div className="mt-1 flex items-center gap-1 text-[10.5px] text-zinc-500 dark:text-zinc-400 min-w-0">
         {item.status === "streaming" && item.hasRunningTool && (
           <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse shrink-0" />
@@ -963,4 +1338,4 @@ const QuestionCard: React.FC<{
       </div>
     </button>
   );
-};
+});
