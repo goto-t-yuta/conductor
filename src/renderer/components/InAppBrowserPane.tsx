@@ -8,6 +8,7 @@ import {
   Crosshair,
   ExternalLink,
   Globe,
+  Link2,
   RotateCw,
   X,
 } from "lucide-react";
@@ -26,6 +27,7 @@ export interface InAppBrowserPaneProps {
   onToggleDevTools: () => void;
   onTogglePicker: () => void;
   onCaptureScreenshot: () => void;
+  onAttachUrl?: () => void;
   onAttachErrors: () => void;
   onOpenExternal: () => void;
 }
@@ -42,6 +44,7 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
   onToggleDevTools,
   onTogglePicker,
   onCaptureScreenshot,
+  onAttachUrl,
   onAttachErrors,
   onOpenExternal,
 }) => {
@@ -115,12 +118,14 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      {/* Navigation & Automation Toolbar */}
+      {/* Navigation Toolbar */}
       <div className="flex items-center gap-1 px-2 py-1.5 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0">
         <button
           type="button"
           onClick={onBack}
           disabled={!activeTab?.canGoBack}
+          title="戻る"
+          aria-label="戻る"
           className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-30 cursor-pointer"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
@@ -129,6 +134,8 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
           type="button"
           onClick={onForward}
           disabled={!activeTab?.canGoForward}
+          title="進む"
+          aria-label="進む"
           className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 disabled:opacity-30 cursor-pointer"
         >
           <ArrowRight className="w-3.5 h-3.5" />
@@ -136,6 +143,8 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
         <button
           type="button"
           onClick={onReload}
+          title={activeTab?.isLoading ? "読み込みを中止" : "再読み込み"}
+          aria-label={activeTab?.isLoading ? "読み込みを中止" : "再読み込み"}
           className="p-1.5 rounded-md text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
         >
           {activeTab?.isLoading ? <X className="w-3.5 h-3.5" /> : <RotateCw className="w-3.5 h-3.5" />}
@@ -157,44 +166,11 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
           />
         </form>
 
-        {totalErrors > 0 && (
-          <button
-            type="button"
-            onClick={onAttachErrors}
-            title="コンソール/通信エラーをチャットへ送る"
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 cursor-pointer"
-          >
-            <AlertTriangle className="w-3 h-3" />
-            <span>{totalErrors}</span>
-          </button>
-        )}
-
-        <button
-          type="button"
-          onClick={onTogglePicker}
-          title="要素選択モード (⌘⇧P)"
-          className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-            isPickingElement
-              ? "bg-indigo-600 text-white"
-              : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
-          }`}
-        >
-          <Crosshair className="w-3.5 h-3.5" />
-        </button>
-
-        <button
-          type="button"
-          onClick={onCaptureScreenshot}
-          title="画面スクショをチャットに添付 (⌘⇧S)"
-          className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
-        >
-          <Camera className="w-3.5 h-3.5" />
-        </button>
-
         <button
           type="button"
           onClick={onToggleDevTools}
           title="Chrome DevTools を開閉 (⌘⌥I)"
+          aria-label="Chrome DevTools を開閉"
           className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
         >
           <Code2 className="w-3.5 h-3.5" />
@@ -204,9 +180,90 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
           type="button"
           onClick={onOpenExternal}
           title="外部ブラウザで開く"
+          aria-label="外部ブラウザで開く"
           className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
         >
           <ExternalLink className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      {/* Browser Inspection & Chat-Attach Toolbar */}
+      <div
+        data-testid="browser-inspection-toolbar"
+        className="flex items-center gap-1 px-2 py-1 bg-zinc-100/70 dark:bg-[#171b24] border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 overflow-x-auto"
+      >
+        <button
+          type="button"
+          data-testid="browser-toolbar-screenshot-btn"
+          onClick={onCaptureScreenshot}
+          title="画面スクショをチャットに添付 (⌘⇧S)"
+          aria-label="画面スクショをチャットに添付"
+          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
+        >
+          <Camera className="w-3.5 h-3.5" />
+          <span>スクショ</span>
+        </button>
+
+        <button
+          type="button"
+          data-testid="browser-toolbar-element-picker-btn"
+          onClick={onTogglePicker}
+          title="ページ上の要素を選択してチャットに添付 (⌘⇧P)"
+          aria-label="要素選択モード"
+          aria-pressed={isPickingElement}
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer shrink-0 ${
+            isPickingElement
+              ? "bg-indigo-600 text-white"
+              : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800"
+          }`}
+        >
+          <Crosshair className="w-3.5 h-3.5" />
+          <span>要素選択</span>
+        </button>
+
+        {onAttachUrl && (
+          <button
+            type="button"
+            data-testid="browser-toolbar-attach-url-btn"
+            onClick={onAttachUrl}
+            disabled={!activeTab?.url}
+            title={
+              activeTab?.url
+                ? "現在のブラウザURLをチャットに添付"
+                : "URL を開くとチャットに添付できます"
+            }
+            aria-label="現在のブラウザURLをチャットに添付"
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer shrink-0"
+          >
+            <Link2 className="w-3.5 h-3.5" />
+            <span>URL添付</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          data-testid="browser-toolbar-attach-errors-btn"
+          onClick={onAttachErrors}
+          disabled={totalErrors === 0}
+          title={
+            totalErrors > 0
+              ? `コンソール/通信エラー (${totalErrors}件) をチャットへ添付`
+              : "コンソール/通信エラーをチャットへ添付（現在エラーはありません）"
+          }
+          aria-label="コンソール/通信エラーをチャットへ添付"
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors shrink-0 ${
+            totalErrors > 0
+              ? "bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 cursor-pointer font-semibold"
+              : "text-zinc-400 dark:text-zinc-500 opacity-55 cursor-not-allowed"
+          }`}
+        >
+          <AlertTriangle className="w-3.5 h-3.5" />
+          <span>エラー添付</span>
+          {totalErrors > 0 && (
+            <span className="px-1 py-0.5 rounded-full text-[10px] leading-none bg-rose-500/20 text-rose-700 dark:text-rose-300">
+              {totalErrors}
+            </span>
+          )}
         </button>
       </div>
 

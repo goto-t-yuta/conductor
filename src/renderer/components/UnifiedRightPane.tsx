@@ -45,6 +45,7 @@ export interface UnifiedRightPaneProps {
   onBrowserToggleDevTools: () => void;
   onBrowserTogglePicker: () => void;
   onBrowserCaptureScreenshot: () => void;
+  onBrowserAttachUrl?: () => void;
   onBrowserAttachErrors: () => void;
   onBrowserOpenExternal: () => void;
   // Markdown props
@@ -101,6 +102,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
   onBrowserToggleDevTools,
   onBrowserTogglePicker,
   onBrowserCaptureScreenshot,
+  onBrowserAttachUrl,
   onBrowserAttachErrors,
   onBrowserOpenExternal,
   mdAutoReload,
@@ -570,6 +572,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
               onToggleDevTools={onBrowserToggleDevTools}
               onTogglePicker={onBrowserTogglePicker}
               onCaptureScreenshot={onBrowserCaptureScreenshot}
+              onAttachUrl={onBrowserAttachUrl}
               onAttachErrors={onBrowserAttachErrors}
               onOpenExternal={onBrowserOpenExternal}
             />

@@ -120,6 +120,7 @@ interface UnifiedChatProps {
   onToggleSidebar: () => void;
   onToggleBrowser: () => void;
   rightPaneMode?: RightPaneMode;
+  isBrowserTabActive?: boolean;
   onToggleMarkdownViewer: () => void;
   onAddProject: () => void;
   onOpenUrl: (url: string, context?: { message?: ChatMessage }) => void;
@@ -177,6 +178,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   onToggleSidebar,
   onToggleBrowser,
   rightPaneMode,
+  isBrowserTabActive = false,
   onToggleMarkdownViewer,
   onAddProject,
   onOpenUrl,
@@ -1121,57 +1123,67 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             <div className="flex items-center gap-0.5">
               <button
                 type="button"
+                data-testid="composer-attach-image-btn"
                 onClick={onPickLocalImages}
                 title="画像を添付"
+                aria-label="画像を添付"
                 className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
               >
                 <Paperclip className="w-4 h-4" />
               </button>
 
-              <button
-                type="button"
-                onClick={onCaptureScreenshot}
-                title="右ブラウザのスクショを添付 (⌘⇧S)"
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-              >
-                <Camera className="w-3.5 h-3.5" />
-                <span>スクショ</span>
-              </button>
+              {isBrowserTabActive && (
+                <>
+                  <button
+                    type="button"
+                    data-testid="composer-screenshot-btn"
+                    onClick={onCaptureScreenshot}
+                    title="右ブラウザのスクショを添付 (⌘⇧S)"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>スクショ</span>
+                  </button>
 
-              <button
-                type="button"
-                onClick={onToggleElementPicker}
-                title="右ブラウザ上の要素を選択してチャットへ送る (⌘⇧P)"
-                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] transition-colors cursor-pointer ${
-                  snapshot.isPickingElement
-                    ? "bg-indigo-500 text-white"
-                    : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
-                }`}
-              >
-                <Crosshair className="w-3.5 h-3.5" />
-                <span>要素選択</span>
-              </button>
+                  <button
+                    type="button"
+                    data-testid="composer-element-picker-btn"
+                    onClick={onToggleElementPicker}
+                    title="右ブラウザ上の要素を選択してチャットへ送る (⌘⇧P)"
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] transition-colors cursor-pointer ${
+                      snapshot.isPickingElement
+                        ? "bg-indigo-500 text-white"
+                        : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
+                    }`}
+                  >
+                    <Crosshair className="w-3.5 h-3.5" />
+                    <span>要素選択</span>
+                  </button>
 
-              <button
-                type="button"
-                onClick={onAttachCurrentUrl}
-                title="現在のブラウザURLを添付"
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-              >
-                <Link2 className="w-3.5 h-3.5" />
-                <span>URL</span>
-              </button>
+                  <button
+                    type="button"
+                    data-testid="composer-attach-url-btn"
+                    onClick={onAttachCurrentUrl}
+                    title="現在のブラウザURLを添付"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                  >
+                    <Link2 className="w-3.5 h-3.5" />
+                    <span>URL</span>
+                  </button>
 
-              {browserErrorCount > 0 && (
-                <button
-                  type="button"
-                  onClick={onAttachConsoleErrors}
-                  title="右ブラウザのコンソール/通信エラーをチャットへ添付"
-                  className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] font-medium bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 transition-colors cursor-pointer"
-                >
-                  <AlertTriangle className="w-3.5 h-3.5" />
-                  <span>エラー ({browserErrorCount})</span>
-                </button>
+                  {browserErrorCount > 0 && (
+                    <button
+                      type="button"
+                      data-testid="composer-attach-errors-btn"
+                      onClick={onAttachConsoleErrors}
+                      title="右ブラウザのコンソール/通信エラーをチャットへ添付"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] font-medium bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 transition-colors cursor-pointer"
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      <span>エラー ({browserErrorCount})</span>
+                    </button>
+                  )}
+                </>
               )}
             </div>
 

@@ -863,6 +863,13 @@ export function getActiveUnifiedTab(
   return tabs.find((t) => t.id === activeId) ?? tabs[0] ?? null;
 }
 
+export function isRightPaneBrowserTabActive(
+  showRightPane: boolean | undefined,
+  activeTab: UnifiedRightPaneTab | null | undefined,
+): boolean {
+  return Boolean(showRightPane) && activeTab?.kind === "browser";
+}
+
 export function buildProjectSwitcherItems(
   state: RightPaneWorkspaceState,
   sources: Pick<RightPaneTabSources, "browserTabs" | "mdTabs" | "imageTabs" | "codeTabs" | "projects">,

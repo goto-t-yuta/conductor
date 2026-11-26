@@ -59,6 +59,7 @@ import {
   inferProjectFromFilePath,
   inferProjectFromMessage,
   inferProjectFromTask,
+  isRightPaneBrowserTabActive,
   loadRightPaneWorkspaceFromStorage,
   makeBrowserUnifiedTabId,
   makeCodeUnifiedTabId,
@@ -456,6 +457,10 @@ export const App: React.FC = () => {
     activeUnifiedTab?.kind === "code" ? activeUnifiedTab.codeTab.filePath : null;
   const isMarkdownPaneVisible =
     Boolean(snapshot?.showBrowserPane) && activeUnifiedTab?.kind === "markdown";
+  const isBrowserTabActive = isRightPaneBrowserTabActive(
+    snapshot?.showBrowserPane,
+    activeUnifiedTab,
+  );
   const derivedRightPaneMode: RightPaneMode = activeUnifiedTab?.kind ?? "browser";
 
   // Keep native Electron BrowserManager active tab & WebContentsView visibility in sync
@@ -1673,6 +1678,7 @@ export const App: React.FC = () => {
             }
           }}
           rightPaneMode={derivedRightPaneMode}
+          isBrowserTabActive={isBrowserTabActive}
           onToggleMarkdownViewer={handleToggleMarkdownViewer}
           onAddProject={() => void window.conductor.addProjectDialog()}
           onOpenUrl={(url, ctx) => void handleOpenUrlInBrowser(url, { message: ctx?.message })}
@@ -1728,6 +1734,7 @@ export const App: React.FC = () => {
               onBrowserToggleDevTools={() => void window.conductor.browserToggleDevTools()}
               onBrowserTogglePicker={handleToggleElementPicker}
               onBrowserCaptureScreenshot={() => void captureScreenshot()}
+              onBrowserAttachUrl={handleAttachCurrentUrl}
               onBrowserAttachErrors={() => void attachConsoleErrors()}
               onBrowserOpenExternal={() => void window.conductor.browserOpenExternal()}
               mdAutoReload={mdAutoReload}
