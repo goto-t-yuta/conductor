@@ -36,6 +36,7 @@ import {
 } from "../../shared/task-status.js";
 import { getEffectiveProjectMode, getIntegrationModeOption } from "../lib/integration-mode.js";
 import {
+  filterQuestions,
   formatQuestionTime,
   summarizeQuestions,
   type QuestionItem,
@@ -63,6 +64,7 @@ export interface TaskSidebarProps {
   selectedTaskId: string | null;
   defaultCompletedExpanded?: boolean;
   defaultQuestionsExpanded?: boolean;
+  defaultQuestionsSearch?: string;
   onSelectProjectFilter: (id: string | null) => void;
   onAddProject: () => void;
   onScanDirectory: () => void;
@@ -114,6 +116,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
   selectedTaskId,
   defaultCompletedExpanded = false,
   defaultQuestionsExpanded = true,
+  defaultQuestionsSearch = "",
   onSelectProjectFilter,
   onAddProject,
   onScanDirectory,
@@ -134,6 +137,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
   const [completedExpanded, setCompletedExpanded] = useState(defaultCompletedExpanded);
   const [completedSearch, setCompletedSearch] = useState("");
   const [questionsExpanded, setQuestionsExpanded] = useState(defaultQuestionsExpanded);
+  const [questionsSearch, setQuestionsSearch] = useState(defaultQuestionsSearch);
   const [questionsHeight, setQuestionsHeight] = useState<number | null>(() =>
     loadQuestionsSectionHeight(),
   );
@@ -267,6 +271,19 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
   };
 
   const questionSummary = useMemo(() => summarizeQuestions(questions), [questions]);
+  const hasQuestionsQuery = questionsSearch.trim().length > 0;
+  const filteredQuestions = useMemo(
+    () =>
+      hasQuestionsQuery
+        ? filterQuestions(questions, questionsSearch, { projects, tasks })
+        : questions,
+    [questions, questionsSearch, hasQuestionsQuery, projects, tasks],
+  );
+  const questionsBadgeText = formatCompletedCountBadge(
+    filteredQuestions.length,
+    questionSummary.totalCount,
+    hasQuestionsQuery,
+  );
 
   // Show only projects that currently have tasks (or are actively selected) as quick filter pills
   const taskProjectIds = useMemo(() => {
@@ -719,8 +736,11 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
               {t(locale, "sidebar.questions")}
             </span>
             {questionSummary.totalCount > 0 && (
-              <span className="text-[10.5px] text-zinc-400 tabular-nums">
-                {questionSummary.totalCount}
+              <span
+                data-testid="questions-count-badge"
+                className="text-[10.5px] text-zinc-400 tabular-nums"
+              >
+                {questionsBadgeText}
               </span>
             )}
           </span>
@@ -750,6 +770,56 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
           </span>
         </button>
 
+        {questionsExpanded && (questions.length > 0 || hasQuestionsQuery) && (
+          <div className="shrink-0 px-2.5 pb-1.5 space-y-1">
+            <div className="relative">
+              <Search className="w-3 h-3 text-zinc-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                data-testid="questions-search-input"
+                value={questionsSearch}
+                onChange={(e) => setQuestionsSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && questionsSearch) {
+                    e.preventDefault();
+                    setQuestionsSearch("");
+                  }
+                }}
+                placeholder={t(locale, "sidebar.searchQuestionsPlaceholder")}
+                aria-label={t(locale, "sidebar.searchQuestionsAria")}
+                title={t(locale, "sidebar.searchQuestionsTitle")}
+                className="w-full pl-7 pr-7 py-1 rounded-md text-[11.5px] bg-white dark:bg-[#0f1115] border border-zinc-200 dark:border-zinc-800 outline-none focus:border-indigo-500/60 select-text"
+              />
+              {hasQuestionsQuery && (
+                <button
+                  type="button"
+                  data-testid="questions-search-clear"
+                  onClick={() => setQuestionsSearch("")}
+                  aria-label={t(locale, "sidebar.clearFilter")}
+                  title={t(locale, "sidebar.clearFilter")}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+
+            {hasQuestionsQuery && (
+              <div
+                data-testid="questions-search-count"
+                className="flex items-center justify-between px-1 text-[10.5px] text-zinc-400 tabular-nums"
+              >
+                <span>
+                  {t(locale, "sidebar.showingCount", {
+                    filtered: filteredQuestions.length,
+                    total: questions.length,
+                  })}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
         {questionsExpanded && (
           <div
             data-testid="questions-list-container"
@@ -761,8 +831,27 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
               <div className="px-2 py-2 text-[11px] text-zinc-400 dark:text-zinc-500 text-center">
                 {t(locale, "sidebar.questionsEmpty")}
               </div>
+            ) : filteredQuestions.length === 0 ? (
+              <div
+                data-testid="questions-search-empty"
+                className="rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 px-3 py-3 text-center space-y-1"
+              >
+                <div className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                  {t(locale, "sidebar.noMatchingQuestions")}
+                </div>
+                {hasQuestionsQuery && (
+                  <button
+                    type="button"
+                    data-testid="questions-search-clear-empty"
+                    onClick={() => setQuestionsSearch("")}
+                    className="text-[10.5px] font-medium text-indigo-500 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer"
+                  >
+                    {t(locale, "sidebar.clearFilterBtn")}
+                  </button>
+                )}
+              </div>
             ) : (
-              questions.map((item) => (
+              filteredQuestions.map((item) => (
                 <QuestionCard
                   key={item.id}
                   item={item}
@@ -1173,6 +1262,73 @@ const QuestionCard: React.FC<{
       <div className="text-[12px] font-medium leading-snug text-zinc-900 dark:text-zinc-100 line-clamp-2">
         {item.questionSnippet}
       </div>
+
+      {((item.relatedTasks && item.relatedTasks.length > 0) ||
+        (item.relatedProjects && item.relatedProjects.length > 0)) && (() => {
+        const relatedTasks = item.relatedTasks ?? [];
+        const coveredProjectIds = new Set(
+          relatedTasks.map((rt) => rt.projectId).filter((id): id is string => Boolean(id)),
+        );
+        const coveredProjectNames = new Set(
+          relatedTasks
+            .map((rt) => rt.projectName.trim().toLowerCase())
+            .filter(Boolean),
+        );
+        const standaloneProjects = (item.relatedProjects ?? []).filter((rp) => {
+          if (rp.projectId && coveredProjectIds.has(rp.projectId)) return false;
+          if (coveredProjectNames.has(rp.projectName.trim().toLowerCase())) return false;
+          return true;
+        });
+
+        return (
+          <div
+            data-testid="question-relation-badges"
+            className="mt-1 flex flex-wrap items-center gap-1 min-w-0"
+          >
+            {relatedTasks.map((rt) => {
+              const colorHex = rt.projectColorHex || "#6366F1";
+              const tooltip = [
+                rt.projectName ? `${rt.taskCode} · ${rt.projectName}` : rt.taskCode,
+                rt.taskTitle,
+              ]
+                .filter(Boolean)
+                .join(": ");
+              return (
+                <span
+                  key={`task:${rt.taskId || rt.taskNumber}`}
+                  title={tooltip}
+                  className="inline-flex items-center gap-1 max-w-full min-w-0"
+                >
+                  <span className="px-1 py-0.2 rounded font-mono text-[9.5px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 border border-indigo-500/20 shrink-0">
+                    {rt.taskCode}
+                  </span>
+                  {rt.projectName && (
+                    <span
+                      className="px-1 py-0.2 rounded text-[9.5px] font-semibold truncate max-w-[96px]"
+                      style={{ backgroundColor: `${colorHex}22`, color: colorHex }}
+                    >
+                      {rt.projectName}
+                    </span>
+                  )}
+                </span>
+              );
+            })}
+            {standaloneProjects.map((rp) => {
+              const colorHex = rp.projectColorHex || "#6366F1";
+              return (
+                <span
+                  key={`project:${rp.projectId ?? rp.projectName.toLowerCase()}`}
+                  title={rp.projectName}
+                  className="px-1 py-0.2 rounded text-[9.5px] font-semibold truncate max-w-[110px]"
+                  style={{ backgroundColor: `${colorHex}22`, color: colorHex }}
+                >
+                  {rp.projectName}
+                </span>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       <div className="mt-1 flex items-center gap-1 text-[10.5px] text-zinc-500 dark:text-zinc-400 min-w-0">
         {item.status === "streaming" && item.hasRunningTool && (

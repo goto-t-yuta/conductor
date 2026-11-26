@@ -389,8 +389,12 @@ export const App: React.FC = () => {
   uiLocaleRef.current = uiLocale;
 
   const questions = useMemo(
-    () => deriveQuestionItems(snapshot?.messages ?? [], unreadReplyIds, uiLocale),
-    [snapshot?.messages, unreadReplyIds, uiLocale],
+    () =>
+      deriveQuestionItems(snapshot?.messages ?? [], unreadReplyIds, uiLocale, {
+        projects: snapshot?.projects ?? [],
+        tasks: snapshot?.tasks ?? [],
+      }),
+    [snapshot?.messages, snapshot?.projects, snapshot?.tasks, unreadReplyIds, uiLocale],
   );
 
   useEffect(() => {

@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { ChatMessage, ToolActivityChip } from "../src/shared/types.js";
+import type { AgentTask, ChatMessage, Project, ToolActivityChip } from "../src/shared/types.js";
 import {
   deriveQuestionItems,
+  filterQuestions,
   formatQuestionTime,
   getLatestToolActivity,
   isAssistantReplyError,
   isWorkerActionToolChip,
   isWorkerDispatchReply,
+  matchesQuestionQuery,
   reconcileUnreadReplies,
   stripMarkdownForPreview,
   summarizeQuestions,
@@ -911,5 +913,228 @@ describe("worker-dispatch filtering in Questions", () => {
     expect(step2.newlyCompletedIds).toEqual(["a-qa", "a-fail"]);
     expect([...step2.nextUnreadIds]).toEqual(["a-qa", "a-fail"]);
     expect([...step2.nextStreamingIds]).toEqual([]);
+  });
+});
+
+describe("Question search & filtering (matchesQuestionQuery / filterQuestions)", () => {
+  const sampleProjects: Project[] = [
+    {
+      id: "proj-billing",
+      name: "billing-portal",
+      path: "/workspace/billing-portal",
+      colorHex: "#10B981",
+      gitBranch: "main",
+      addedAt: "2026-11-26T00:00:00.000Z",
+    },
+    {
+      id: "proj-docs",
+      name: "docs-site",
+      path: "/workspace/docs-site",
+      colorHex: "#3B82F6",
+      gitBranch: "main",
+      addedAt: "2026-11-26T00:00:00.000Z",
+    },
+  ];
+
+  const sampleTasks: AgentTask[] = [
+    {
+      id: "task-12",
+      taskNumber: 12,
+      title: "Fix OAuth callback redirect",
+      summary: "Adjusted state validation",
+      projectId: "proj-billing",
+      projectName: "billing-portal",
+      projectPath: "/workspace/billing-portal",
+      status: "needs_review",
+      currentStep: "完了・確認待ち",
+      workerThreadId: null,
+      activeTurnId: null,
+      previewURL: null,
+      latestOutput: "",
+      activities: [],
+      createdAt: "2026-11-26T00:00:00.000Z",
+      updatedAt: "2026-11-26T00:00:00.000Z",
+    },
+    {
+      id: "task-25",
+      taskNumber: 25,
+      title: "Upgrade Vite markdown plugin",
+      summary: "Migrated plugin API",
+      projectId: "proj-docs",
+      projectName: "docs-site",
+      projectPath: "/workspace/docs-site",
+      status: "done",
+      currentStep: null,
+      workerThreadId: null,
+      activeTurnId: null,
+      previewURL: null,
+      latestOutput: "",
+      activities: [],
+      createdAt: "2026-11-26T00:00:00.000Z",
+      updatedAt: "2026-11-26T00:00:00.000Z",
+    },
+  ];
+
+  it("extracts relatedProjects, relatedTasks, and full questionText from mentions, inferredMentions, and relatedTaskId", () => {
+    const longSuffix = "PostgreSQL connection pool timeout investigation";
+    const longQuestion = `${"a".repeat(160)} ${longSuffix}`;
+    const messages: ChatMessage[] = [
+      makeMessage({
+        id: "u-inline-task",
+        role: "user",
+        text: "@T12 の進捗と懸念点を教えて",
+        createdAt: "2026-11-26T01:00:00.000Z",
+      }),
+      makeMessage({
+        id: "a-inline-task",
+        role: "assistant",
+        provider: "claude",
+        replyToMessageId: "u-inline-task",
+        text: "リダイレクト先の検証が完了しています。",
+        createdAt: "2026-11-26T01:00:05.000Z",
+      }),
+      makeMessage({
+        id: "u-inferred-proj",
+        role: "user",
+        text: "ビルド時間の内訳を確認したい",
+        inferredMentions: [
+          {
+            kind: "project",
+            projectId: "proj-docs",
+            projectName: "docs-site",
+            projectPath: "/workspace/docs-site",
+            projectColorHex: "#3B82F6",
+          },
+        ],
+        createdAt: "2026-11-26T01:01:00.000Z",
+      }),
+      makeMessage({
+        id: "a-inferred-proj",
+        role: "assistant",
+        provider: "codex",
+        replyToMessageId: "u-inferred-proj",
+        text: "バンドル解析の結果をまとめました。",
+        relatedTaskId: "task-25",
+        createdAt: "2026-11-26T01:01:05.000Z",
+      }),
+      makeMessage({
+        id: "u-long",
+        role: "user",
+        text: longQuestion,
+        createdAt: "2026-11-26T01:02:00.000Z",
+      }),
+      makeMessage({
+        id: "a-long",
+        role: "assistant",
+        provider: "agy",
+        replyToMessageId: "u-long",
+        text: "プール上限を見直す必要があります。",
+        createdAt: "2026-11-26T01:02:05.000Z",
+      }),
+    ];
+
+    const items = deriveQuestionItems(messages, new Set(), "ja", {
+      projects: sampleProjects,
+      tasks: sampleTasks,
+    });
+
+    const inlineTaskItem = items.find((i) => i.id === "u-inline-task")!;
+    expect(inlineTaskItem.relatedTasks).toEqual([
+      expect.objectContaining({
+        taskId: "task-12",
+        taskNumber: 12,
+        taskCode: "T12",
+        taskTitle: "Fix OAuth callback redirect",
+        projectId: "proj-billing",
+        projectName: "billing-portal",
+      }),
+    ]);
+    expect(inlineTaskItem.relatedProjects).toEqual([
+      expect.objectContaining({
+        projectId: "proj-billing",
+        projectName: "billing-portal",
+      }),
+    ]);
+
+    const inferredItem = items.find((i) => i.id === "u-inferred-proj")!;
+    expect(inferredItem.relatedProjects).toEqual([
+      expect.objectContaining({ projectId: "proj-docs", projectName: "docs-site" }),
+    ]);
+    expect(inferredItem.relatedTasks).toEqual([
+      expect.objectContaining({
+        taskId: "task-25",
+        taskCode: "T25",
+        taskTitle: "Upgrade Vite markdown plugin",
+      }),
+    ]);
+
+    const longItem = items.find((i) => i.id === "u-long")!;
+    expect(longItem.questionSnippet.length).toBeLessThanOrEqual(140);
+    expect(longItem.questionText).toContain(longSuffix);
+
+    // Empty / whitespace query preserves all items & order
+    expect(filterQuestions(items, "").map((i) => i.id)).toEqual(items.map((i) => i.id));
+    expect(filterQuestions(items, "   ").map((i) => i.id)).toEqual(items.map((i) => i.id));
+
+    // Match by question text (case-insensitive & past 140-char truncation)
+    expect(filterQuestions(items, "postgresql").map((i) => i.id)).toEqual(["u-long"]);
+    expect(filterQuestions(items, "ビルド時間").map((i) => i.id)).toEqual(["u-inferred-proj"]);
+
+    // Match by related task code (case-insensitive, with or without @ / project prefix)
+    expect(filterQuestions(items, "t12").map((i) => i.id)).toEqual(["u-inline-task"]);
+    expect(filterQuestions(items, "@T12").map((i) => i.id)).toEqual(["u-inline-task"]);
+    expect(filterQuestions(items, "billing-portal/t12").map((i) => i.id)).toEqual(["u-inline-task"]);
+
+    // Match by related task title even though the title is not in the user question text
+    expect(filterQuestions(items, "OAUTH").map((i) => i.id)).toEqual(["u-inline-task"]);
+    expect(filterQuestions(items, "vite markdown").map((i) => i.id)).toEqual(["u-inferred-proj"]);
+
+    // Match by related project name (including inferred mention)
+    expect(filterQuestions(items, "BILLING-PORTAL").map((i) => i.id)).toEqual(["u-inline-task"]);
+    expect(filterQuestions(items, "docs-site").map((i) => i.id)).toEqual(["u-inferred-proj"]);
+
+    // Multi-token AND query combining project name + Japanese question text
+    expect(filterQuestions(items, "billing 懸念点").map((i) => i.id)).toEqual(["u-inline-task"]);
+    expect(filterQuestions(items, "docs-site バンドル").map((i) => i.id)).toEqual(["u-inferred-proj"]);
+
+    // No match
+    expect(filterQuestions(items, "nonexistent-keyword")).toEqual([]);
+    expect(matchesQuestionQuery(inlineTaskItem, "t12 oauth")).toBe(true);
+    expect(matchesQuestionQuery(inlineTaskItem, "t12 docs-site")).toBe(false);
+  });
+
+  it("supports fallback context resolution when QuestionItems were derived without projects/tasks options", () => {
+    const messages: ChatMessage[] = [
+      makeMessage({
+        id: "u-legacy-derive",
+        role: "user",
+        text: "@T12 はもうマージして大丈夫？",
+        createdAt: "2026-11-26T02:00:00.000Z",
+      }),
+      makeMessage({
+        id: "a-legacy-derive",
+        role: "assistant",
+        replyToMessageId: "u-legacy-derive",
+        text: "テストが通っているので問題ありません。",
+        createdAt: "2026-11-26T02:00:03.000Z",
+      }),
+    ];
+
+    // Derived without options
+    const items = deriveQuestionItems(messages);
+    expect(items[0]?.relatedTasks).toEqual([]);
+
+    // Filtering with fallback context resolves @T12 -> task title & project name
+    expect(
+      filterQuestions(items, "oauth", { projects: sampleProjects, tasks: sampleTasks }).map(
+        (i) => i.id,
+      ),
+    ).toEqual(["u-legacy-derive"]);
+    expect(
+      filterQuestions(items, "billing-portal", {
+        projects: sampleProjects,
+        tasks: sampleTasks,
+      }).map((i) => i.id),
+    ).toEqual(["u-legacy-derive"]);
   });
 });

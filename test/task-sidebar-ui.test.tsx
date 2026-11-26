@@ -1,8 +1,9 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentTask, AgentTaskStatus, Project } from "../src/shared/types.js";
+import type { AgentTask, AgentTaskStatus, ChatMessage, Project } from "../src/shared/types.js";
 import { RUNNING_TASK_DONE_BLOCKED_REASON } from "../src/shared/task-status.js";
+import { deriveQuestionItems } from "../src/renderer/lib/questions.js";
 import {
   QUESTIONS_SECTION_HEIGHT_STORAGE_KEY,
   REOPEN_TARGET_STATUS,
@@ -409,5 +410,170 @@ describe("TaskCard & TaskSidebar rendering and click isolation", () => {
         g.localStorage = originalStorage;
       }
     }
+  });
+
+  it("renders Questions search input, filters by text/project/task, shows clear button and 0-hit empty state in JA/EN", () => {
+    const secondProject = makeProject({
+      id: "proj-2",
+      name: "billing-portal",
+      colorHex: "#10B981",
+    });
+    const allProjects = [...baseProjects, secondProject];
+    const extraTask = makeTask({
+      id: "task-9",
+      taskNumber: 9,
+      title: "Fix OAuth redirect loop",
+      projectId: "proj-2",
+      projectName: "billing-portal",
+      status: "needs_review",
+    });
+    const allTasks = [...baseTasks, extraTask];
+
+    const chatMessages: ChatMessage[] = [
+      {
+        id: "q-u1",
+        role: "user",
+        text: "@T9 の原因と修正方針を教えて",
+        attachments: [],
+        toolChips: [],
+        isStreaming: false,
+        createdAt: "2026-11-26T01:00:00.000Z",
+      },
+      {
+        id: "q-a1",
+        role: "assistant",
+        provider: "claude",
+        replyToMessageId: "q-u1",
+        text: "リダイレクトURIの正規化漏れが原因です。",
+        attachments: [],
+        toolChips: [],
+        isStreaming: false,
+        createdAt: "2026-11-26T01:00:05.000Z",
+      },
+      {
+        id: "q-u2",
+        role: "user",
+        text: "サイドバーのパフォーマンス最適化について",
+        attachments: [],
+        mentions: [
+          {
+            kind: "project",
+            projectId: "proj-1",
+            projectName: "agent_terminal_2",
+            projectPath: "/tmp/agent_terminal_2",
+            projectColorHex: "#3B82F6",
+          },
+        ],
+        toolChips: [],
+        isStreaming: false,
+        createdAt: "2026-11-26T01:05:00.000Z",
+      },
+      {
+        id: "q-a2",
+        role: "assistant",
+        provider: "codex",
+        replyToMessageId: "q-u2",
+        text: "React.memo と useMemo で再描画を抑えます。",
+        attachments: [],
+        toolChips: [],
+        isStreaming: false,
+        createdAt: "2026-11-26T01:05:05.000Z",
+      },
+    ];
+
+    const questions = deriveQuestionItems(chatMessages, new Set(), "ja", {
+      projects: allProjects,
+      tasks: allTasks,
+    });
+
+    // 1. Default expanded with questions: search input shown, no clear button yet, count badge = 2
+    const defaultHtml = renderToStaticMarkup(
+      <TaskSidebar
+        {...makeSidebarProps({
+          projects: allProjects,
+          tasks: allTasks,
+          questions,
+        })}
+      />,
+    );
+    expect(defaultHtml).toContain('data-testid="questions-search-input"');
+    expect(defaultHtml).toContain("質問を検索...");
+    expect(defaultHtml).not.toContain('data-testid="questions-search-clear"');
+    expect(defaultHtml).not.toContain('data-testid="questions-search-count"');
+    expect(defaultHtml).toMatch(/data-testid="questions-count-badge"[^>]*>2<\/span>/);
+    expect(defaultHtml).toContain("@T9 の原因と修正方針を教えて");
+    expect(defaultHtml).toContain("サイドバーのパフォーマンス最適化について");
+    expect(defaultHtml).toContain('data-testid="question-relation-badges"');
+    expect(defaultHtml).toContain("T9");
+    expect(defaultHtml).toContain("billing-portal");
+
+    // 2. Filtering by related task title ("OAuth") narrows to 1/2, shows clear button & showing count,
+    //    and works cleanly even while Tasks project filter is active
+    const filteredHtml = renderToStaticMarkup(
+      <TaskSidebar
+        {...makeSidebarProps({
+          projects: allProjects,
+          tasks: allTasks,
+          questions,
+          selectedProjectId: "proj-1",
+          defaultQuestionsSearch: "oauth",
+        })}
+      />,
+    );
+    expect(filteredHtml).toMatch(/data-testid="questions-count-badge"[^>]*>1\/2<\/span>/);
+    expect(filteredHtml).toContain('data-testid="questions-search-clear"');
+    expect(filteredHtml).toContain('data-testid="questions-search-count"');
+    expect(filteredHtml).toContain("1 / 2 件表示");
+    expect(filteredHtml).toContain("@T9 の原因と修正方針を教えて");
+    expect(filteredHtml).not.toContain("サイドバーのパフォーマンス最適化について");
+
+    // 3. 0-hit empty state in JA
+    const emptyJaHtml = renderToStaticMarkup(
+      <TaskSidebar
+        {...makeSidebarProps({
+          projects: allProjects,
+          tasks: allTasks,
+          questions,
+          defaultQuestionsSearch: "does-not-exist",
+        })}
+      />,
+    );
+    expect(emptyJaHtml).toMatch(/data-testid="questions-count-badge"[^>]*>0\/2<\/span>/);
+    expect(emptyJaHtml).toContain('data-testid="questions-search-empty"');
+    expect(emptyJaHtml).toContain("一致する質問がありません");
+    expect(emptyJaHtml).toContain('data-testid="questions-search-clear-empty"');
+    expect(emptyJaHtml).toContain("フィルタをクリア");
+
+    // 4. 0-hit empty state & search labels in EN
+    const emptyEnHtml = renderToStaticMarkup(
+      <TaskSidebar
+        {...makeSidebarProps({
+          projects: allProjects,
+          tasks: allTasks,
+          questions,
+          locale: "en",
+          defaultQuestionsSearch: "does-not-exist",
+        })}
+      />,
+    );
+    expect(emptyEnHtml).toContain("Search questions...");
+    expect(emptyEnHtml).toContain("Showing 0 of 2");
+    expect(emptyEnHtml).toContain("No matching questions");
+    expect(emptyEnHtml).toContain("Clear filter");
+
+    // 5. Collapsed Questions section hides search input
+    const collapsedHtml = renderToStaticMarkup(
+      <TaskSidebar
+        {...makeSidebarProps({
+          projects: allProjects,
+          tasks: allTasks,
+          questions,
+          defaultQuestionsExpanded: false,
+          defaultQuestionsSearch: "oauth",
+        })}
+      />,
+    );
+    expect(collapsedHtml).not.toContain('data-testid="questions-search-input"');
+    expect(collapsedHtml).not.toContain('data-testid="questions-list-container"');
   });
 });

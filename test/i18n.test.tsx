@@ -291,7 +291,35 @@ describe("English UI rendering has zero leaked Japanese strings across all major
     expect(sidebarHtml).toContain("Active &amp; Review");
     expect(sidebarHtml).toContain("Completed");
     expect(sidebarHtml).toContain("Questions");
+    expect(sidebarHtml).toContain("Search questions...");
     expect(sidebarHtml).not.toMatch(JAPANESE_CHAR_RE);
+
+    const sidebarEmptyQuestionsSearchHtml = renderToStaticMarkup(
+      <TaskSidebar
+        projects={[SAMPLE_PROJECT]}
+        tasks={[SAMPLE_TASK]}
+        questions={questions}
+        locale="en"
+        defaultQuestionsSearch="unmatched-query"
+        selectedProjectId={null}
+        selectedTaskId={null}
+        onSelectProjectFilter={vi.fn()}
+        onAddProject={vi.fn()}
+        onScanDirectory={vi.fn()}
+        onRescanProjects={vi.fn()}
+        onRemoveProject={vi.fn()}
+        onMentionProject={vi.fn()}
+        onSelectTask={vi.fn()}
+        onOpenPreviewUrl={vi.fn()}
+        onMentionTask={vi.fn()}
+        onUpdateTaskStatus={vi.fn()}
+        onStopWorker={vi.fn()}
+        onDeleteTask={vi.fn()}
+      />,
+    );
+    expect(sidebarEmptyQuestionsSearchHtml).toContain("No matching questions");
+    expect(sidebarEmptyQuestionsSearchHtml).toContain("Clear filter");
+    expect(sidebarEmptyQuestionsSearchHtml).not.toMatch(JAPANESE_CHAR_RE);
 
     const chatHtml = renderToStaticMarkup(
       <UnifiedChat
