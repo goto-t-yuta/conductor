@@ -45,7 +45,7 @@ interface FitAddonLike {
   fit(): void;
 }
 
-export const TerminalPane: React.FC<TerminalPaneProps> = ({
+export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
   tab,
   isVisible,
   locale = "ja",
@@ -538,4 +538,4 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       </div>
     </div>
   );
-};
+});

@@ -715,9 +715,12 @@ export const UI_STRINGS = {
     "update.downloadingProgress": "ダウンロード中… {percent}% ({downloaded} / {total})",
     "update.downloadingProgressIndeterminate": "ダウンロード中… {downloaded}",
     "update.downloadedOpenedHint":
-      "インストーラーを開きました。macOS で未署名アプリの警告が出た場合は、フォルダ内のファイルを右クリック→「開く」で起動してください。",
+      "インストーラーを開きました。案内に従ってインストールを完了してください。",
     "update.downloadedManualHint":
       "ダウンロードが完了しました。下のボタンからインストーラーを開くか、フォルダで表示してください。",
+    "update.macosGatekeeperHint":
+      "macOS で「壊れているため開けません」と表示される場合は、/Applications へ移動後にターミナルで以下を実行してください:",
+    "update.copyCommandAria": "macOS Gatekeeper 解除コマンドをコピー",
     "update.errorNetwork":
       "GitHub Releases への接続に失敗しました。ネットワーク接続を確認するか、リリースページを直接開いてください。",
     "update.errorRateLimit":
@@ -1366,9 +1369,12 @@ export const UI_STRINGS = {
     "update.downloadingProgress": "Downloading… {percent}% ({downloaded} / {total})",
     "update.downloadingProgressIndeterminate": "Downloading… {downloaded}",
     "update.downloadedOpenedHint":
-      "Installer opened. On macOS, if Gatekeeper warns about an unsigned build, right-click the app in Finder and choose Open.",
+      "Installer opened. Follow the prompts to finish installing the update.",
     "update.downloadedManualHint":
       "Download complete. Open the installer below or reveal it in your folder.",
+    "update.macosGatekeeperHint":
+      "On macOS, if Gatekeeper says the app \"is damaged\", move Conductor.app to /Applications and run:",
+    "update.copyCommandAria": "Copy macOS Gatekeeper fix command",
     "update.errorNetwork":
       "Could not connect to GitHub Releases. Check your network connection or open the release page directly.",
     "update.errorRateLimit":

@@ -3,6 +3,7 @@ productName: Conductor
 copyright: Copyright © 2026 Conductor Contributors
 
 directories:
+  buildResources: build
   output: release
 
 asar: true
@@ -12,12 +13,14 @@ forceCodeSigning: false
 
 files:
   - dist/**/*
+  - build/icon.png
   - "!dist/**/*.map"
   - "!node_modules/**/*"
 
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 
 mac:
+  icon: build/icon.icns
   category: public.app-category.developer-tools
   darkModeSupport: true
   hardenedRuntime: false
@@ -38,6 +41,7 @@ dmg:
   sign: false
 
 win:
+  icon: build/icon.ico
   target:
     - target: nsis
       arch:
@@ -57,6 +61,7 @@ portable:
   artifactName: ${productName}-${version}-win-${arch}-portable.${ext}
 
 linux:
+  icon: build/icon.png
   category: Development
   maintainer: Conductor Maintainers <noreply@users.noreply.github.com>
   target:

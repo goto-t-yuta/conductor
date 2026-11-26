@@ -617,7 +617,7 @@ describe("English UI rendering has zero leaked Japanese strings across all major
         usageRecords={[
           {
             id: "u-en-1",
-            timestamp: "2026-11-26T02:00:00.000Z",
+            timestamp: new Date().toISOString(),
             source: "chat",
             provider: "codex",
             model: "gpt-5.4",

@@ -2,31 +2,22 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import {
   AlertTriangle,
   ArrowDown,
-  ArrowUp,
   BarChart3,
   Bell,
   BookOpen,
-  Camera,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Crosshair,
   Download,
   ExternalLink,
   FolderOpen,
-  FolderPlus,
   GitMerge,
   GitPullRequest,
-  Globe,
   Image as ImageIcon,
-  Link2,
   Loader2,
-  Mic,
-  MicOff,
   PanelLeft,
   PanelRight,
-  Paperclip,
   RefreshCw,
   RotateCcw,
   Settings,
@@ -46,24 +37,21 @@ import type {
   AppUpdateState,
   ChatAttachment,
   ChatMessage,
+  ChatSessionSummary,
   ExplicitMentionTarget,
   IntegrationMode,
   Project,
+  ProviderStatus,
   RightPaneMode,
   ToolActivityChip,
+  UsageBudgetSettings,
+  UsageRecord,
 } from "../../shared/types.js";
 import {
-  detectActiveMention,
-  extractResolvedMentionChips,
+  findProjectForTask,
   formatTaskCode,
-  getMentionSuggestions,
-  removeActiveMentionQuery,
-  removeResolvedMentionChip,
   resolveMessageMentionBadges,
-  suggestionToExplicitMentionTarget,
   type MentionChipRemovalTarget,
-  type MentionSuggestion,
-  type ResolvedMentionChip,
 } from "../../shared/mentions.js";
 import {
   getLocalizedMarkTaskDoneBlockedReason,
@@ -78,30 +66,21 @@ import {
   summarizeAllUsagePeriods,
 } from "../../shared/usage.js";
 import { resolveUiLocale, t, type UiLocale } from "../../shared/i18n.js";
-import {
-  appendVoiceTranscript,
-  formatSpeechRecognitionError,
-  resolveSpeechLocale,
-} from "../../shared/voice.js";
 import { getEffectiveProjectMode } from "../lib/integration-mode.js";
 import {
   buildToolChipDisplayPlan,
   formatToolChipsSummary,
 } from "../lib/activity-log.js";
+import { stabilizeMentionTasks } from "../lib/composer-perf.js";
 import { isViewableImageAttachment } from "../lib/image-viewer.js";
 import type { MarkdownImageCache } from "../lib/markdown-image-cache.js";
 import type { MarkdownVideoCache } from "../lib/markdown-video-cache.js";
 import { buildTaskMarkdownBasePath, resolveTaskForTaskEvent } from "../lib/task-event.js";
 import { getQuickStatusTransition } from "../lib/task-sidebar.js";
-import {
-  getSpeechRecognitionConstructor,
-  type BrowserSpeechRecognition,
-} from "../lib/voice-client.js";
+import { ChatComposer, type ChatComposerHandle } from "./ChatComposer.js";
 import { ChatSessionControls } from "./ChatHistoryMenu.js";
 import { MarkdownView, type MarkdownOpenedImage } from "./MarkdownView.js";
 import { UserMessageMentionBadges } from "./MentionBadges.js";
-import { DraftMentionContextBar } from "./MentionChips.js";
-import { MentionPopover } from "./MentionPopover.js";
 import {
   classifyMessagesUpdate,
   clearPendingProgrammaticScroll,
@@ -120,6 +99,9 @@ import {
 
 const EMPTY_PROJECTS: Project[] = [];
 const EMPTY_TASKS: AgentTask[] = [];
+const EMPTY_MENTIONS: ExplicitMentionTarget[] = [];
+const EMPTY_USAGE_RECORDS: UsageRecord[] = [];
+const ALL_PROVIDERS: AgentProvider[] = ["codex", "agy", "claude"];
 
 function readScrollMetrics(el: HTMLElement): ScrollMetrics {
   return {
@@ -137,19 +119,19 @@ export interface ChatJumpRequest {
 interface UnifiedChatProps {
   snapshot: AppSnapshot;
   locale?: UiLocale;
-  composerText: string;
+  composerText?: string;
   attachments: ChatAttachment[];
   selectedMentions?: ExplicitMentionTarget[];
   jumpRequest?: ChatJumpRequest | null;
   unreadReplyIds?: ReadonlySet<string>;
   onMarkMessagesRead?: (messageIds: string[]) => void;
   isMessageVisibleRef?: React.MutableRefObject<((messageId: string) => boolean) | null>;
-  onComposerTextChange: (text: string) => void;
+  onComposerTextChange?: (text: string) => void;
   onAddMention?: (target: ExplicitMentionTarget) => void;
   onRemoveMention?: (target: MentionChipRemovalTarget) => void;
   onRemoveAttachment: (id: string) => void;
   onAddAttachment: (att: ChatAttachment) => void;
-  onSend: () => void;
+  onSend: (text?: string) => void;
   onStopMessage: (id: string) => void;
   onStopAll: () => void;
   onNewChat: () => void;
@@ -209,12 +191,12 @@ interface UnifiedChatProps {
   onOpenUpdateReleasePage?: (url?: string) => void;
 }
 
-export const UnifiedChat: React.FC<UnifiedChatProps> = ({
+export const UnifiedChat: React.FC<UnifiedChatProps> = React.memo(({
   snapshot,
   locale,
   composerText,
   attachments,
-  selectedMentions = [],
+  selectedMentions = EMPTY_MENTIONS,
   jumpRequest,
   unreadReplyIds,
   onMarkMessagesRead,
@@ -278,262 +260,18 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   const prevMessagesRef = useRef<readonly ChatMessage[] | null>(null);
   const prevChatSessionIdRef = useRef<string>(snapshot.activeChatSessionId);
   const lastTouchYRef = useRef<number | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const composerWrapperRef = useRef<HTMLDivElement>(null);
-  const isComposingRef = useRef(false);
-  const pendingCaretRef = useRef<number | null>(null);
-  const [showModelMenu, setShowModelMenu] = useState(false);
-  const [caretPos, setCaretPos] = useState(0);
-  const [activeMentionIndex, setActiveMentionIndex] = useState(0);
-  const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
+  const composerHandleRef = useRef<ChatComposerHandle | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const hasMessagesRef = useRef(snapshot.messages.length > 0);
   hasMessagesRef.current = snapshot.messages.length > 0;
   const activeLocale = locale ?? resolveUiLocale(snapshot.preferredLanguage);
 
-  // Voice Input (Web Speech API STT) state
-  const [isListening, setIsListening] = useState(false);
-  const [interimTranscript, setInterimTranscript] = useState("");
-  const [voiceError, setVoiceError] = useState<string | null>(null);
-  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
-  const latestComposerTextRef = useRef(composerText);
-  latestComposerTextRef.current = composerText;
-  const interimTranscriptRef = useRef(interimTranscript);
-  interimTranscriptRef.current = interimTranscript;
-  const voiceAutoSendRef = useRef(voiceAutoSend);
-  voiceAutoSendRef.current = voiceAutoSend;
-  const preferredLanguageRef = useRef(snapshot.preferredLanguage);
-  preferredLanguageRef.current = snapshot.preferredLanguage;
-  const onComposerTextChangeRef = useRef(onComposerTextChange);
-  onComposerTextChangeRef.current = onComposerTextChange;
-  const onSendRef = useRef(onSend);
-  onSendRef.current = onSend;
-  const onStopSpeakingRef = useRef(onStopSpeaking);
-  onStopSpeakingRef.current = onStopSpeaking;
-  const voiceRecognizedAnyRef = useRef(false);
-  const voiceAbortedByUserRef = useRef(false);
-  const voiceHadErrorRef = useRef(false);
-
-  const speechLocale = useMemo(
-    () =>
-      resolveSpeechLocale(
-        snapshot.preferredLanguage,
-        typeof navigator !== "undefined" ? navigator.language : undefined,
-      ),
-    [snapshot.preferredLanguage],
-  );
-
-  const stopVoiceInput = useCallback((options?: { cancel?: boolean }) => {
-    const rec = recognitionRef.current;
-    if (!rec) {
-      setIsListening(false);
-      setInterimTranscript("");
-      interimTranscriptRef.current = "";
-      return;
-    }
-    if (options?.cancel) {
-      voiceAbortedByUserRef.current = true;
-      setInterimTranscript("");
-      interimTranscriptRef.current = "";
-      try {
-        rec.abort();
-      } catch {
-        // ignore
-      }
-    } else {
-      try {
-        rec.stop();
-      } catch {
-        // ignore
-      }
-    }
-  }, []);
-
-  const startVoiceInput = useCallback(async () => {
-    // Stop TTS readback before opening the microphone so Conductor doesn't hear itself
-    onStopSpeakingRef.current?.();
-    setVoiceError(null);
-
-    const RecognitionCtor = getSpeechRecognitionConstructor();
-    if (!RecognitionCtor) {
-      setVoiceError(
-        formatSpeechRecognitionError("unsupported", preferredLanguageRef.current),
-      );
-      return;
-    }
-
-    if (typeof window !== "undefined" && window.conductor?.voiceRequestMicPermission) {
-      try {
-        const perm = await window.conductor.voiceRequestMicPermission();
-        if (!perm.granted) {
-          setVoiceError(
-            formatSpeechRecognitionError("not-allowed", preferredLanguageRef.current),
-          );
-          return;
-        }
-      } catch {
-        // Continue and let Chromium handle permission if IPC is unavailable
-      }
-    }
-
-    // Ensure any stale recognition session is cleaned up
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.abort();
-      } catch {
-        // ignore
-      }
-      recognitionRef.current = null;
-    }
-
-    const recognition = new RecognitionCtor();
-    recognition.lang = speechLocale;
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
-
-    voiceRecognizedAnyRef.current = false;
-    voiceAbortedByUserRef.current = false;
-    voiceHadErrorRef.current = false;
-    interimTranscriptRef.current = "";
-    setInterimTranscript("");
-    recognitionRef.current = recognition;
-
-    recognition.onstart = () => {
-      if (recognitionRef.current !== recognition) return;
-      setIsListening(true);
-      textareaRef.current?.focus();
-    };
-
-    recognition.onresult = (event) => {
-      if (recognitionRef.current !== recognition) return;
-      let finalChunk = "";
-      let interimChunk = "";
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const result = event.results[i];
-        const transcript = result?.[0]?.transcript ?? "";
-        if (!transcript) continue;
-        if (result.isFinal) {
-          finalChunk = appendVoiceTranscript(finalChunk, transcript);
-        } else {
-          interimChunk = appendVoiceTranscript(interimChunk, transcript);
-        }
-      }
-
-      if (finalChunk) {
-        const nextText = appendVoiceTranscript(latestComposerTextRef.current, finalChunk);
-        latestComposerTextRef.current = nextText;
-        voiceRecognizedAnyRef.current = true;
-        onComposerTextChangeRef.current(nextText);
-        setCaretPos(nextText.length);
-      }
-
-      interimTranscriptRef.current = interimChunk;
-      setInterimTranscript(interimChunk);
-    };
-
-    recognition.onerror = (event) => {
-      if (recognitionRef.current !== recognition) return;
-      voiceHadErrorRef.current = true;
-      if (voiceAbortedByUserRef.current || event.error === "aborted") {
-        return;
-      }
-      const friendly = formatSpeechRecognitionError(
-        event.error || "unknown",
-        preferredLanguageRef.current,
-      );
-      if (friendly) {
-        setVoiceError(friendly);
-      }
-    };
-
-    recognition.onend = () => {
-      if (recognitionRef.current === recognition) {
-        recognitionRef.current = null;
-      }
-      setIsListening(false);
-
-      const leftoverInterim = interimTranscriptRef.current.trim();
-      interimTranscriptRef.current = "";
-      setInterimTranscript("");
-
-      if (!voiceAbortedByUserRef.current && leftoverInterim) {
-        const nextText = appendVoiceTranscript(latestComposerTextRef.current, leftoverInterim);
-        latestComposerTextRef.current = nextText;
-        voiceRecognizedAnyRef.current = true;
-        onComposerTextChangeRef.current(nextText);
-        setCaretPos(nextText.length);
-      }
-
-      if (
-        voiceAutoSendRef.current &&
-        voiceRecognizedAnyRef.current &&
-        !voiceAbortedByUserRef.current &&
-        !voiceHadErrorRef.current &&
-        latestComposerTextRef.current.trim().length > 0
-      ) {
-        setDismissedMentionKey(null);
-        setCaretPos(0);
-        onSendRef.current();
-      }
-    };
-
-    try {
-      recognition.start();
-    } catch {
-      recognitionRef.current = null;
-      setIsListening(false);
-      setVoiceError(
-        formatSpeechRecognitionError("service-not-allowed", preferredLanguageRef.current),
-      );
-    }
-  }, [speechLocale]);
-
-  const toggleVoiceInput = useCallback(() => {
-    if (isListening || recognitionRef.current) {
-      stopVoiceInput();
-    } else {
-      void startVoiceInput();
-    }
-  }, [isListening, startVoiceInput, stopVoiceInput]);
-
-  useEffect(() => {
-    return () => {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.abort();
-        } catch {
-          // ignore
-        }
-        recognitionRef.current = null;
-      }
-    };
-  }, []);
-
-  // Global Option+Space / Alt+Space shortcut inside Conductor window to toggle voice input
-  useEffect(() => {
-    const onWindowKeyDown = (e: KeyboardEvent) => {
-      if (
-        e.altKey &&
-        !e.metaKey &&
-        !e.ctrlKey &&
-        !e.shiftKey &&
-        (e.code === "Space" || e.key === " " || e.key === "\u00a0")
-      ) {
-        // Avoid hijacking inputs inside modals
-        const target = e.target as HTMLElement | null;
-        if (target && target !== textareaRef.current && target.closest("input, textarea, select")) {
-          return;
-        }
-        e.preventDefault();
-        textareaRef.current?.focus();
-        toggleVoiceInput();
-      }
-    };
-    window.addEventListener("keydown", onWindowKeyDown);
-    return () => window.removeEventListener("keydown", onWindowKeyDown);
-  }, [toggleVoiceInput]);
+  // Stabilize task references for mention badges / autocomplete so high-frequency
+  // background worker log ticks never force user messages or the composer to re-render.
+  const stableMentionTasksRef = useRef<AgentTask[]>(snapshot.tasks);
+  const mentionTasks = stabilizeMentionTasks(stableMentionTasksRef.current, snapshot.tasks);
+  stableMentionTasksRef.current = mentionTasks;
 
   const registerMessageEl = useCallback((messageId: string, el: HTMLDivElement | null) => {
     if (el) {
@@ -807,119 +545,6 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   const activeTab = snapshot.browserTabs.find((t) => t.id === snapshot.activeBrowserTabId);
   const browserErrorCount = (activeTab?.consoleErrorCount ?? 0) + (activeTab?.networkErrorCount ?? 0);
 
-  const draftMentionChips = useMemo(
-    () =>
-      extractResolvedMentionChips(
-        composerText,
-        snapshot.projects,
-        snapshot.tasks,
-        selectedMentions,
-      ),
-    [composerText, snapshot.projects, snapshot.tasks, selectedMentions],
-  );
-
-  const activeMention = useMemo(
-    () => detectActiveMention(composerText, caretPos),
-    [composerText, caretPos],
-  );
-  const mentionKey = activeMention ? `${activeMention.start}:${activeMention.rawQuery}` : null;
-
-  const { suggestions: mentionSuggestions, scopedProject } = useMemo(() => {
-    if (!activeMention) return { suggestions: [] as MentionSuggestion[], scopedProject: null };
-    return getMentionSuggestions(activeMention, snapshot.projects, snapshot.tasks);
-  }, [activeMention, snapshot.projects, snapshot.tasks]);
-
-  const showMentionPopover =
-    activeMention !== null &&
-    mentionKey !== dismissedMentionKey &&
-    (mentionSuggestions.length > 0 || activeMention.mode === "project_tasks");
-
-  const clampedMentionIndex =
-    mentionSuggestions.length > 0
-      ? Math.min(activeMentionIndex, mentionSuggestions.length - 1)
-      : 0;
-
-  useEffect(() => {
-    setActiveMentionIndex(0);
-  }, [activeMention?.start, activeMention?.rawQuery]);
-
-  useEffect(() => {
-    if (!showMentionPopover) return;
-    const handlePointerDown = (ev: MouseEvent) => {
-      if (
-        composerWrapperRef.current &&
-        !composerWrapperRef.current.contains(ev.target as Node)
-      ) {
-        setDismissedMentionKey(mentionKey);
-      }
-    };
-    document.addEventListener("mousedown", handlePointerDown);
-    return () => document.removeEventListener("mousedown", handlePointerDown);
-  }, [showMentionPopover, mentionKey]);
-
-  useLayoutEffect(() => {
-    if (pendingCaretRef.current === null) return;
-    const targetCaret = pendingCaretRef.current;
-    pendingCaretRef.current = null;
-    const el = textareaRef.current;
-    if (el) {
-      el.focus();
-      const clamped = Math.max(0, Math.min(targetCaret, el.value.length));
-      el.setSelectionRange(clamped, clamped);
-    }
-  }, [composerText, caretPos]);
-
-  const handleSelectMention = (suggestion: MentionSuggestion) => {
-    if (!activeMention) return;
-    onAddMention?.(suggestionToExplicitMentionTarget(suggestion));
-
-    const { nextText, nextCaret } = removeActiveMentionQuery(composerText, activeMention);
-    const postSelectionMention = detectActiveMention(nextText, nextCaret);
-    setDismissedMentionKey(
-      postSelectionMention
-        ? `${postSelectionMention.start}:${postSelectionMention.rawQuery}`
-        : null,
-    );
-    setActiveMentionIndex(0);
-    pendingCaretRef.current = nextCaret;
-    onComposerTextChange(nextText);
-    setCaretPos(nextCaret);
-  };
-
-  const handleRemoveDraftMention = useCallback(
-    (chip: ResolvedMentionChip) => {
-      const target: MentionChipRemovalTarget =
-        chip.kind === "task"
-          ? { kind: "task", taskId: chip.task.id, taskNumber: chip.task.taskNumber }
-          : { kind: "project", projectId: chip.project.id, projectName: chip.project.name };
-      onRemoveMention?.(target);
-
-      const { nextText, nextCaret, removedCount } = removeResolvedMentionChip(
-        composerText,
-        target,
-        snapshot.projects,
-        snapshot.tasks,
-        caretPos,
-      );
-      setDismissedMentionKey(null);
-      if (removedCount > 0) {
-        pendingCaretRef.current = nextCaret;
-        onComposerTextChange(nextText);
-        setCaretPos(nextCaret);
-      } else {
-        textareaRef.current?.focus();
-      }
-    },
-    [
-      composerText,
-      snapshot.projects,
-      snapshot.tasks,
-      caretPos,
-      onComposerTextChange,
-      onRemoveMention,
-    ],
-  );
-
   useLayoutEffect(() => {
     const container = scrollContainerRef.current;
     if (prevChatSessionIdRef.current !== snapshot.activeChatSessionId) {
@@ -956,22 +581,13 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     syncScrollToBottomVisibility,
   ]);
 
-  const displayComposerText =
-    isListening && interimTranscript
-      ? appendVoiceTranscript(composerText, interimTranscript)
-      : composerText;
-
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(160, Math.max(44, el.scrollHeight))}px`;
-  }, [displayComposerText]);
-
   const handlePickWelcomePrompt = useCallback(
     (prompt: string) => {
-      onComposerTextChange(prompt);
-      textareaRef.current?.focus();
+      if (composerHandleRef.current) {
+        composerHandleRef.current.setDraftText(prompt);
+      } else {
+        onComposerTextChange?.(prompt);
+      }
     },
     [onComposerTextChange],
   );
@@ -981,474 +597,50 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     [snapshot.projects],
   );
 
-  const canSend = composerText.trim().length > 0 || attachments.length > 0;
-  const handleTriggerSend = useCallback(() => {
-    if (isListening || recognitionRef.current) {
-      stopVoiceInput({ cancel: true });
-    }
-    if (!canSend) return;
-    setDismissedMentionKey(null);
-    setCaretPos(0);
-    onSend();
-  }, [canSend, isListening, onSend, stopVoiceInput]);
-  const chatProviderInfo = snapshot.providers[snapshot.chatProvider];
-  const workerProviderInfo = snapshot.providers[snapshot.workerProvider];
-  const activeChatModel = chatProviderInfo?.models.find((m) => m.model === snapshot.chatModel);
-  const activeWorkerModel = workerProviderInfo?.models.find((m) => m.model === snapshot.workerModel);
-  const allProviders: AgentProvider[] = ["codex", "agy", "claude"];
-  const usageSummaries = useMemo(
-    () => summarizeAllUsagePeriods(snapshot.usageRecords ?? []),
-    [snapshot.usageRecords],
-  );
-  const todayUsage = usageSummaries.today;
-  const allTimeUsage = usageSummaries.all;
-  const usageAlertSeverity = useMemo(() => {
-    const budgets = normalizeUsageBudgetSettings(snapshot.usageBudgets);
-    const w = evaluateUsageBudget(
-      usageSummaries.week.costUsd,
-      usageSummaries.week.totalTokens,
-      budgets.weekly,
-    );
-    const m = evaluateUsageBudget(
-      usageSummaries.month.costUsd,
-      usageSummaries.month.totalTokens,
-      budgets.monthly,
-    );
-    if (w.severity === "exceeded" || m.severity === "exceeded") return "exceeded";
-    if (w.severity === "warning" || m.severity === "warning") return "warning";
-    return "ok";
-  }, [usageSummaries.week, usageSummaries.month, snapshot.usageBudgets]);
-
-  const chatModelDisplayName = activeChatModel?.displayName ?? snapshot.chatModel ?? "Default";
-  const chatModelFullTitle = [
-    chatProviderInfo?.label ?? snapshot.chatProvider,
-    chatModelDisplayName,
-    snapshot.chatEffort,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
   return (
     <section className="@container flex flex-col h-full min-w-0 bg-white dark:bg-[#0f1115]">
-      {/* Top Bar */}
-      <header
-        data-testid="chat-header"
-        className="drag-region relative z-20 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 bg-white dark:bg-[#0f1115]"
-      >
-        <div className="flex flex-wrap @[840px]:flex-nowrap items-center justify-between gap-x-2 @[840px]:px-3">
-          {/* Row 1 Left: Sidebar toggle + Brand + Connection status */}
-          <div
-            className={`no-drag order-1 h-11 flex items-center gap-2 min-w-0 flex-1 @[840px]:flex-initial pr-1 @[840px]:pr-0 ${
-              snapshot.showTaskSidebar
-                ? "pl-3 @[840px]:pl-0"
-                : "pl-[78px] @[840px]:pl-[66px]"
-            }`}
-          >
-            <button
-              type="button"
-              onClick={onToggleSidebar}
-              title={t(activeLocale, "chat.toggleSidebarTitle")}
-              className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
-            >
-              <PanelLeft className="w-4 h-4" />
-            </button>
-
-            <div className="flex items-center gap-1.5 min-w-0">
-              <span
-                title={snapshot.connectionStatus}
-                className={`w-2 h-2 rounded-full shrink-0 ${
-                  snapshot.isConnected ? "bg-emerald-500" : "bg-amber-500"
-                }`}
-              />
-              <span className="text-[13px] font-semibold truncate whitespace-nowrap">
-                Conductor
-              </span>
-              {!snapshot.isConnected && (
-                <span
-                  title={snapshot.connectionStatus}
-                  className="text-[11px] text-zinc-400 truncate hidden @[520px]:inline @[840px]:max-w-[140px]"
-                >
-                  {snapshot.connectionStatus}
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Context & Status Pills: neat sub-toolbar below 840px, inline before icons at 840px+ */}
-          <div
-            data-testid="chat-header-controls"
-            className="no-drag order-3 basis-full flex flex-wrap items-center gap-1.5 min-w-0 px-3 py-1.5 border-t border-zinc-200/60 dark:border-zinc-800/70 bg-zinc-50/60 dark:bg-[#12151c]/70 @[840px]:order-2 @[840px]:basis-auto @[840px]:ml-auto @[840px]:flex-nowrap @[840px]:justify-end @[840px]:h-11 @[840px]:px-0 @[840px]:py-0 @[840px]:border-t-0 @[840px]:bg-transparent"
-          >
-            {!snapshot.isConnected && (
-              <button
-                type="button"
-                data-testid="chat-reconnect-btn"
-                onClick={onReconnect}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <RefreshCw className="w-3 h-3 shrink-0" />
-                <span>{t(activeLocale, "chat.reconnect")}</span>
-              </button>
-            )}
-
-            {snapshot.activeResponderCount > 0 && (
-              <div
-                data-testid="chat-parallel-responding-pill"
-                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-[11px] font-medium whitespace-nowrap shrink-0"
-              >
-                <Loader2 className="w-3 h-3 animate-spin shrink-0" />
-                <span className="whitespace-nowrap">
-                  {t(activeLocale, "chat.parallelResponding", {
-                    count: snapshot.activeResponderCount,
-                  })}
-                </span>
-                <button
-                  type="button"
-                  data-testid="chat-stop-all-btn"
-                  onClick={onStopAll}
-                  className="text-rose-500 hover:underline ml-0.5 cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  {t(activeLocale, "chat.stopAll")}
-                </button>
-              </div>
-            )}
-
-            {isSpeaking && onStopSpeaking && (
-              <button
-                type="button"
-                data-testid="voice-stop-speaking-btn"
-                onClick={onStopSpeaking}
-                title={t(activeLocale, "voice.stopSpeakingTitle")}
-                aria-label={t(activeLocale, "voice.stopSpeakingTitle")}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 hover:bg-rose-500/15 hover:text-rose-600 dark:hover:text-rose-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-ping shrink-0" />
-                <Square className="w-2.5 h-2.5 fill-current shrink-0" />
-                <span className="whitespace-nowrap">{t(activeLocale, "voice.stopSpeaking")}</span>
-              </button>
-            )}
-
-            {/* Provider & Model Split Menu (Codex / AGY / Claude) */}
-            <div className="relative min-w-0 max-w-full">
-              <button
-                type="button"
-                data-testid="chat-model-selector-btn"
-                onClick={() => setShowModelMenu((v) => !v)}
-                title={chatModelFullTitle}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium bg-zinc-100 dark:bg-zinc-800/90 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 transition-colors cursor-pointer whitespace-nowrap max-w-full min-w-0"
-              >
-                <Zap className="w-3 h-3 text-amber-500 shrink-0" />
-                <span className="font-semibold text-indigo-600 dark:text-indigo-400 shrink-0 whitespace-nowrap">
-                  {chatProviderInfo?.label ?? snapshot.chatProvider}
-                </span>
-                <span className="min-w-0 max-w-[116px] @[520px]:max-w-[148px] @[840px]:max-w-[110px] @[1020px]:max-w-[148px] truncate">
-                  {chatModelDisplayName}
-                </span>
-                {snapshot.chatEffort && (
-                  <span className="hidden @[600px]:inline @[840px]:hidden @[1080px]:inline text-zinc-400 shrink-0 whitespace-nowrap">
-                    · {snapshot.chatEffort}
-                  </span>
-                )}
-                <ChevronDown className="w-3 h-3 text-zinc-400 shrink-0" />
-              </button>
-
-              {showModelMenu && (
-                <>
-                  <div
-                    className="fixed inset-0 z-30"
-                    onClick={() => setShowModelMenu(false)}
-                  />
-                  <div className="absolute left-0 @[840px]:left-auto @[840px]:right-0 mt-1.5 z-40 w-[min(20rem,calc(100vw-24px))] rounded-xl bg-white dark:bg-[#191d26] border border-zinc-200 dark:border-zinc-700 shadow-xl p-3 space-y-3">
-                    {/* Front-Desk Chat Provider & Model */}
-                    <div className="space-y-1.5">
-                      <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
-                        {t(activeLocale, "chat.frontDeskProvider")}
-                      </div>
-                      <div className="grid grid-cols-3 gap-1">
-                        {allProviders.map((pId) => {
-                          const info = snapshot.providers[pId];
-                          const active = snapshot.chatProvider === pId;
-                          return (
-                            <button
-                              key={pId}
-                              type="button"
-                              disabled={!info?.available}
-                              onClick={() => onSetChatProvider(pId)}
-                              title={info?.detail}
-                              className={`px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors whitespace-nowrap ${
-                                active
-                                  ? "bg-indigo-600 text-white border-indigo-600 cursor-pointer"
-                                  : info?.available
-                                    ? "bg-zinc-100 dark:bg-zinc-800 border-transparent hover:border-zinc-300 dark:hover:border-zinc-600 cursor-pointer"
-                                    : "bg-zinc-100/50 dark:bg-zinc-900/50 border-transparent text-zinc-400 opacity-50 cursor-not-allowed"
-                              }`}
-                            >
-                              {info?.label ?? pId}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      {chatProviderInfo && chatProviderInfo.models.length > 0 && (
-                        <select
-                          value={snapshot.chatModel ?? ""}
-                          onChange={(e) => onSetChatModel(e.target.value)}
-                          className="w-full text-[12px] rounded-lg px-2 py-1.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700"
-                        >
-                          {chatProviderInfo.models.map((m) => (
-                            <option key={m.id} value={m.model}>
-                              {m.displayName}
-                            </option>
-                          ))}
-                        </select>
-                      )}
-                      {activeChatModel && activeChatModel.supportedEfforts.length > 0 && (
-                        <div className="flex flex-wrap gap-1">
-                          {activeChatModel.supportedEfforts.map((eff) => (
-                            <button
-                              key={eff}
-                              type="button"
-                              onClick={() => onSetChatModel(activeChatModel.model, eff)}
-                              className={`px-2 py-0.5 rounded text-[11px] cursor-pointer whitespace-nowrap ${
-                                snapshot.chatEffort === eff
-                                  ? "bg-indigo-500 text-white"
-                                  : "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
-                              }`}
-                            >
-                              {eff}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Background Worker Provider & Model */}
-                    <div className="border-t border-zinc-200 dark:border-zinc-800 pt-2.5 space-y-1.5">
-                      <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
-                        {t(activeLocale, "chat.workerProvider")}
-                      </div>
-                      <div className="grid grid-cols-3 gap-1">
-                        {allProviders.map((pId) => {
-                          const info = snapshot.providers[pId];
-                          const active = snapshot.workerProvider === pId;
-                          return (
-                            <button
-                              key={pId}
-                              type="button"
-                              disabled={!info?.available}
-                              onClick={() => onSetWorkerProvider(pId)}
-                              title={info?.detail}
-                              className={`px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors whitespace-nowrap ${
-                                active
-                                  ? "bg-indigo-600 text-white border-indigo-600 cursor-pointer"
-                                  : info?.available
-                                    ? "bg-zinc-100 dark:bg-zinc-800 border-transparent hover:border-zinc-300 dark:hover:border-zinc-600 cursor-pointer"
-                                    : "bg-zinc-100/50 dark:bg-zinc-900/50 border-transparent text-zinc-400 opacity-50 cursor-not-allowed"
-                              }`}
-                            >
-                              {info?.label ?? pId}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      {workerProviderInfo && workerProviderInfo.models.length > 0 && (
-                        <select
-                          value={snapshot.workerModel ?? ""}
-                          onChange={(e) => onSetWorkerModel(e.target.value)}
-                          className="w-full text-[12px] rounded-lg px-2 py-1.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700"
-                        >
-                          {workerProviderInfo.models.map((m) => (
-                            <option key={m.id} value={m.model}>
-                              {m.displayName}
-                            </option>
-                          ))}
-                        </select>
-                      )}
-                      {activeWorkerModel && activeWorkerModel.supportedEfforts.length > 0 && (
-                        <div className="flex flex-wrap gap-1">
-                          {activeWorkerModel.supportedEfforts.map((eff) => (
-                            <button
-                              key={eff}
-                              type="button"
-                              onClick={() => onSetWorkerModel(activeWorkerModel.model, eff)}
-                              className={`px-2 py-0.5 rounded text-[11px] cursor-pointer whitespace-nowrap ${
-                                snapshot.workerEffort === eff
-                                  ? "bg-indigo-500 text-white"
-                                  : "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
-                              }`}
-                            >
-                              {eff}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-
-            {onOpenUsage && (
-              <button
-                type="button"
-                data-testid="open-usage-btn"
-                onClick={onOpenUsage}
-                title={
-                  allTimeUsage.totalTokens > 0
-                    ? t(activeLocale, "chat.usagePillTitle", {
-                        todayTokens: formatTokenCount(todayUsage.totalTokens),
-                        todayCost: formatUsdCost(todayUsage.costUsd, {
-                          estimated: todayUsage.hasEstimatedCost,
-                        }),
-                        allTokens: formatTokenCount(allTimeUsage.totalTokens),
-                        allCost: formatUsdCost(allTimeUsage.costUsd, {
-                          estimated: allTimeUsage.hasEstimatedCost,
-                        }),
-                      })
-                    : t(activeLocale, "chat.usagePillEmptyTitle")
-                }
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100/80 dark:bg-zinc-800/70 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer tabular-nums whitespace-nowrap shrink-0"
-              >
-                <BarChart3
-                  className={`w-3 h-3 shrink-0 ${
-                    usageAlertSeverity === "exceeded"
-                      ? "text-rose-500"
-                      : usageAlertSeverity === "warning"
-                        ? "text-amber-500"
-                        : "text-indigo-500"
-                  }`}
-                />
-                {usageAlertSeverity !== "ok" && (
-                  <span
-                    data-testid="usage-pill-alert-dot"
-                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                      usageAlertSeverity === "exceeded" ? "bg-rose-500" : "bg-amber-500"
-                    }`}
-                  />
-                )}
-                {todayUsage.totalTokens > 0 ? (
-                  <>
-                    <span className="hidden @[480px]:inline @[840px]:hidden @[980px]:inline">
-                      {formatTokenCount(todayUsage.totalTokens)}
-                    </span>
-                    <span className="hidden @[480px]:inline @[840px]:hidden @[980px]:inline text-zinc-400">
-                      ·
-                    </span>
-                    <span>
-                      {formatUsdCost(todayUsage.costUsd, {
-                        estimated: todayUsage.hasEstimatedCost,
-                        compact: true,
-                      })}
-                    </span>
-                  </>
-                ) : (
-                  <span className="hidden @[420px]:inline">Usage</span>
-                )}
-              </button>
-            )}
-          </div>
-
-          {/* Row 1 Right: Utility icon buttons */}
-          <div className="no-drag order-2 @[840px]:order-3 h-11 flex items-center gap-0.5 shrink-0 pr-3 @[840px]:pr-0">
-            {onToggleVoiceReadback && (
-              <button
-                type="button"
-                data-testid="voice-readback-toggle-btn"
-                aria-pressed={voiceReadbackEnabled}
-                onClick={onToggleVoiceReadback}
-                title={
-                  voiceReadbackEnabled
-                    ? t(activeLocale, "voice.readbackOnTitle")
-                    : t(activeLocale, "voice.readbackOffTitle")
-                }
-                aria-label={
-                  voiceReadbackEnabled
-                    ? t(activeLocale, "voice.readbackDisableAria")
-                    : t(activeLocale, "voice.readbackEnableAria")
-                }
-                className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
-                  voiceReadbackEnabled
-                    ? "text-indigo-500 bg-indigo-500/10 hover:bg-indigo-500/20"
-                    : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-                }`}
-              >
-                {voiceReadbackEnabled ? (
-                  <Volume2 className="w-4 h-4" />
-                ) : (
-                  <VolumeX className="w-4 h-4" />
-                )}
-              </button>
-            )}
-
-            {onOpenSettings && (
-              <button
-                type="button"
-                data-testid="open-settings-btn"
-                onClick={onOpenSettings}
-                title={
-                  appUpdate?.updateAvailable && appUpdate.latestRelease
-                    ? t(activeLocale, "chat.settingsTitleWithUpdate", {
-                        tag: appUpdate.latestRelease.tagName,
-                      })
-                    : t(activeLocale, "chat.settingsTitle")
-                }
-                className="relative p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
-              >
-                <Settings className="w-4 h-4" />
-                {appUpdate &&
-                  (appUpdate.updateAvailable ||
-                    appUpdate.status === "downloading" ||
-                    appUpdate.status === "downloaded") && (
-                    <span
-                      data-testid="settings-update-badge"
-                      aria-hidden="true"
-                      className={`absolute top-1 right-1 w-2 h-2 rounded-full ring-2 ring-white dark:ring-[#0f1115] ${
-                        appUpdate.status === "downloaded" ? "bg-emerald-500" : "bg-indigo-500"
-                      }`}
-                    />
-                  )}
-              </button>
-            )}
-
-            <ChatSessionControls
-              sessions={snapshot.chatSessions}
-              activeSessionId={snapshot.activeChatSessionId}
-              activeMessageCount={snapshot.messages.length}
-              activeResponderCount={snapshot.activeResponderCount}
-              locale={activeLocale}
-              newChatConfirmTrigger={newChatConfirmTrigger}
-              onSelectSession={onSelectChatSession}
-              onNewChat={onNewChat}
-              onDeleteSession={onDeleteChatSession}
-            />
-
-            <button
-              type="button"
-              onClick={onToggleMarkdownViewer}
-              title={t(activeLocale, "chat.toggleMarkdownTitle")}
-              className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
-                snapshot.showBrowserPane && rightPaneMode === "markdown"
-                  ? "text-indigo-500 bg-indigo-500/10"
-                  : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-              }`}
-            >
-              <BookOpen className="w-4 h-4" />
-            </button>
-
-            <button
-              type="button"
-              onClick={onToggleBrowser}
-              title={t(activeLocale, "chat.toggleRightPaneTitle")}
-              className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
-                snapshot.showBrowserPane
-                  ? "text-indigo-500 bg-indigo-500/10"
-                  : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-              }`}
-            >
-              <PanelRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      </header>
+      {/* Top Bar (memoized so typing, scrolling, and message streaming never re-render the header) */}
+      <UnifiedChatHeader
+        showTaskSidebar={snapshot.showTaskSidebar}
+        isConnected={snapshot.isConnected}
+        connectionStatus={snapshot.connectionStatus}
+        activeResponderCount={snapshot.activeResponderCount}
+        providers={snapshot.providers}
+        chatProvider={snapshot.chatProvider}
+        workerProvider={snapshot.workerProvider}
+        chatModel={snapshot.chatModel}
+        chatEffort={snapshot.chatEffort}
+        workerModel={snapshot.workerModel}
+        workerEffort={snapshot.workerEffort}
+        usageRecords={snapshot.usageRecords ?? EMPTY_USAGE_RECORDS}
+        usageBudgets={snapshot.usageBudgets}
+        chatSessions={snapshot.chatSessions}
+        activeChatSessionId={snapshot.activeChatSessionId}
+        activeMessageCount={snapshot.messages.length}
+        showBrowserPane={snapshot.showBrowserPane}
+        rightPaneMode={rightPaneMode}
+        locale={activeLocale}
+        newChatConfirmTrigger={newChatConfirmTrigger}
+        voiceReadbackEnabled={voiceReadbackEnabled}
+        isSpeaking={isSpeaking}
+        appUpdate={appUpdate}
+        onToggleSidebar={onToggleSidebar}
+        onReconnect={onReconnect}
+        onStopAll={onStopAll}
+        onStopSpeaking={onStopSpeaking}
+        onSetChatProvider={onSetChatProvider}
+        onSetWorkerProvider={onSetWorkerProvider}
+        onSetChatModel={onSetChatModel}
+        onSetWorkerModel={onSetWorkerModel}
+        onOpenUsage={onOpenUsage}
+        onToggleVoiceReadback={onToggleVoiceReadback}
+        onOpenSettings={onOpenSettings}
+        onSelectChatSession={onSelectChatSession}
+        onNewChat={onNewChat}
+        onDeleteChatSession={onDeleteChatSession}
+        onToggleMarkdownViewer={onToggleMarkdownViewer}
+        onToggleBrowser={onToggleBrowser}
+      />
 
       {/* Subtle App Update Banner */}
       {appUpdate &&
@@ -1603,6 +795,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                 messages={snapshot.messages}
                 projects={snapshot.projects}
                 tasks={snapshot.tasks}
+                mentionTasks={mentionTasks}
                 defaultIntegrationMode={snapshot.defaultIntegrationMode}
                 locale={activeLocale}
                 highlightedMessageId={highlightedMessageId}
@@ -1627,418 +820,582 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
         />
       </div>
 
-      {/* Non-Blocking Composer */}
-      <div className="px-4 pb-4 pt-1 shrink-0">
-        <div
-          ref={composerWrapperRef}
-          className="relative max-w-[740px] mx-auto rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/90 dark:bg-[#171b24] shadow-sm focus-within:border-indigo-500/60 transition-colors"
-        >
-          {showMentionPopover && activeMention && (
-            <MentionPopover
-              query={activeMention}
-              suggestions={mentionSuggestions}
-              scopedProject={scopedProject}
-              activeIndex={clampedMentionIndex}
-              locale={activeLocale}
-              onHoverIndex={setActiveMentionIndex}
-              onSelect={handleSelectMention}
-            />
-          )}
-
-          {attachments.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
-              {attachments.map((att) => {
-                const viewableImage =
-                  isViewableImageAttachment(att) && Boolean(onOpenImageAttachment);
-                return (
-                  <div
-                    key={att.id}
-                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11.5px] bg-zinc-200/70 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200 max-w-full min-w-0"
-                  >
-                    {viewableImage ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onOpenImageAttachment?.(att, {
-                            draftText: composerText,
-                            draftMentions: selectedMentions,
-                          })
-                        }
-                        title={t(activeLocale, "chat.openImageInRightPaneTitle", {
-                          label: att.label,
-                        })}
-                        aria-label={t(activeLocale, "chat.openImageInRightPaneAria", {
-                          label: att.label,
-                        })}
-                        className="group inline-flex items-center gap-1.5 min-w-0 rounded hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors cursor-pointer"
-                      >
-                        {att.imageDataUrl ? (
-                          <img
-                            src={att.imageDataUrl}
-                            alt={att.label}
-                            className="w-5 h-5 rounded object-cover ring-1 ring-transparent group-hover:ring-indigo-500/70 group-hover:scale-105 transition-all shrink-0"
-                          />
-                        ) : (
-                          <ImageIcon className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                        )}
-                        <span className="max-w-[180px] truncate">{att.label}</span>
-                      </button>
-                    ) : (
-                      <>
-                        {att.imageDataUrl && (
-                          <img
-                            src={att.imageDataUrl}
-                            alt={att.label}
-                            className="w-5 h-5 rounded object-cover"
-                          />
-                        )}
-                        <span className="max-w-[180px] truncate">{att.label}</span>
-                      </>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => onRemoveAttachment(att.id)}
-                      aria-label={t(activeLocale, "chat.removeAttachmentAria", {
-                        label: att.label,
-                      })}
-                      className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100 cursor-pointer"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          <DraftMentionContextBar
-            chips={draftMentionChips}
-            locale={activeLocale}
-            onRemoveChip={handleRemoveDraftMention}
-            hasAttachmentsAbove={attachments.length > 0}
-          />
-
-          {isListening && (
-            <div
-              data-testid="composer-voice-listening-bar"
-              className="flex items-center justify-between gap-2 px-3.5 pt-2 pb-0.5 text-[11.5px] text-rose-600 dark:text-rose-400"
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="relative flex h-2 w-2 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500" />
-                </span>
-                <span className="font-medium shrink-0 whitespace-nowrap">
-                  {t(activeLocale, "voice.listeningLabel", { locale: speechLocale })}
-                </span>
-                <span className="text-zinc-500 dark:text-zinc-400 truncate">
-                  {interimTranscript || t(activeLocale, "voice.listeningHint")}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => stopVoiceInput()}
-                className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-rose-500/12 hover:bg-rose-500/20 text-rose-600 dark:text-rose-300 cursor-pointer shrink-0 whitespace-nowrap"
-              >
-                {t(activeLocale, "common.stop")}
-              </button>
-            </div>
-          )}
-
-          {voiceError && (
-            <div
-              data-testid="composer-voice-error-banner"
-              className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11.5px] text-amber-800 dark:text-amber-200 flex items-start gap-2"
-            >
-              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
-              <span className="flex-1 leading-relaxed">{voiceError}</span>
-              <button
-                type="button"
-                onClick={() => setVoiceError(null)}
-                aria-label={t(activeLocale, "voice.dismissErrorAria")}
-                className="text-amber-600/80 hover:text-amber-800 dark:text-amber-300/80 dark:hover:text-amber-100 cursor-pointer shrink-0"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-
-          <textarea
-            ref={textareaRef}
-            value={displayComposerText}
-            onChange={(e) => {
-              if (interimTranscriptRef.current) {
-                interimTranscriptRef.current = "";
-                setInterimTranscript("");
-              }
-              onComposerTextChange(e.target.value);
-              setCaretPos(e.target.selectionStart ?? e.target.value.length);
-              setDismissedMentionKey(null);
-            }}
-            onClick={(e) => {
-              setCaretPos(e.currentTarget.selectionStart ?? e.currentTarget.value.length);
-            }}
-            onSelect={(e) => {
-              if (pendingCaretRef.current !== null) return;
-              setCaretPos(e.currentTarget.selectionStart ?? e.currentTarget.value.length);
-            }}
-            onCompositionStart={() => {
-              isComposingRef.current = true;
-            }}
-            onCompositionEnd={(e) => {
-              isComposingRef.current = false;
-              setCaretPos(e.currentTarget.selectionStart ?? e.currentTarget.value.length);
-            }}
-            onKeyUp={(e) => {
-              if (
-                pendingCaretRef.current !== null ||
-                (showMentionPopover &&
-                  (e.key === "ArrowUp" ||
-                    e.key === "ArrowDown" ||
-                    e.key === "Enter" ||
-                    e.key === "Tab" ||
-                    e.key === "Escape"))
-              ) {
-                return;
-              }
-              setCaretPos(e.currentTarget.selectionStart ?? e.currentTarget.value.length);
-            }}
-            onKeyDown={(e) => {
-              const composing =
-                e.nativeEvent.isComposing || isComposingRef.current || e.keyCode === 229;
-              if (composing) return;
-
-              if (
-                e.altKey &&
-                !e.metaKey &&
-                !e.ctrlKey &&
-                !e.shiftKey &&
-                (e.code === "Space" || e.key === " " || e.key === "\u00a0")
-              ) {
-                e.preventDefault();
-                toggleVoiceInput();
-                return;
-              }
-
-              if (isListening && e.key === "Escape") {
-                e.preventDefault();
-                stopVoiceInput({ cancel: true });
-                return;
-              }
-
-              if (showMentionPopover) {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  setDismissedMentionKey(mentionKey);
-                  return;
-                }
-                if (mentionSuggestions.length > 0) {
-                  if (e.key === "ArrowDown") {
-                    e.preventDefault();
-                    setActiveMentionIndex((prev) => (prev + 1) % mentionSuggestions.length);
-                    return;
-                  }
-                  if (e.key === "ArrowUp") {
-                    e.preventDefault();
-                    setActiveMentionIndex(
-                      (prev) => (prev - 1 + mentionSuggestions.length) % mentionSuggestions.length,
-                    );
-                    return;
-                  }
-                  if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
-                    e.preventDefault();
-                    handleSelectMention(mentionSuggestions[clampedMentionIndex]);
-                    return;
-                  }
-                }
-              }
-
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleTriggerSend();
-              }
-            }}
-            onPaste={(e) => {
-              const items = e.clipboardData?.items;
-              if (!items) return;
-              for (const item of Array.from(items)) {
-                if (item.type.startsWith("image/")) {
-                  const file = item.getAsFile();
-                  if (!file) continue;
-                  e.preventDefault();
-                  const reader = new FileReader();
-                  reader.onload = () => {
-                    if (typeof reader.result === "string") {
-                      onPasteImage(reader.result);
-                    }
-                  };
-                  reader.readAsDataURL(file);
-                  break;
-                }
-              }
-            }}
-            placeholder={t(activeLocale, "chat.composerPlaceholder")}
-            rows={1}
-            className="w-full resize-none bg-transparent px-3.5 pt-3 pb-1.5 text-[14px] leading-relaxed outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 select-text"
-          />
-
-          <div
-            data-testid="composer-toolbar"
-            className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 px-2.5 pb-2 pt-0.5"
-          >
-            <div className="flex flex-wrap items-center gap-0.5 min-w-0">
-              <button
-                type="button"
-                data-testid="composer-attach-image-btn"
-                onClick={onPickLocalImages}
-                title={t(activeLocale, "chat.attachImage")}
-                aria-label={t(activeLocale, "chat.attachImage")}
-                className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
-              >
-                <Paperclip className="w-4 h-4" />
-              </button>
-
-              {isBrowserTabActive && (
-                <>
-                  <button
-                    type="button"
-                    data-testid="composer-screenshot-btn"
-                    onClick={onCaptureScreenshot}
-                    title={t(activeLocale, "chat.screenshotTitle")}
-                    aria-label={t(activeLocale, "chat.screenshotTitle")}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    <Camera className="w-3.5 h-3.5 shrink-0" />
-                    <span className="hidden @[480px]:inline">
-                      {t(activeLocale, "chat.screenshotBtn")}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    data-testid="composer-element-picker-btn"
-                    onClick={onToggleElementPicker}
-                    title={t(activeLocale, "chat.elementPickerTitle")}
-                    aria-label={t(activeLocale, "chat.elementPickerTitle")}
-                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                      snapshot.isPickingElement
-                        ? "bg-indigo-500 text-white"
-                        : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
-                    }`}
-                  >
-                    <Crosshair className="w-3.5 h-3.5 shrink-0" />
-                    <span className="hidden @[480px]:inline">
-                      {t(activeLocale, "chat.elementPickerBtn")}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    data-testid="composer-attach-url-btn"
-                    onClick={onAttachCurrentUrl}
-                    title={t(activeLocale, "chat.attachUrlTitle")}
-                    aria-label={t(activeLocale, "chat.attachUrlTitle")}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    <Link2 className="w-3.5 h-3.5 shrink-0" />
-                    <span className="hidden @[480px]:inline">URL</span>
-                  </button>
-
-                  {browserErrorCount > 0 && (
-                    <button
-                      type="button"
-                      data-testid="composer-attach-errors-btn"
-                      onClick={onAttachConsoleErrors}
-                      title={t(activeLocale, "chat.attachErrorsTitle")}
-                      aria-label={t(activeLocale, "chat.attachErrorsTitle")}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11.5px] font-medium bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                    >
-                      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                      <span>
-                        {t(activeLocale, "chat.errorsCountBtn", { count: browserErrorCount })}
-                      </span>
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-
-            <div className="flex items-center gap-1.5 shrink-0 ml-auto">
-              {onToggleVoiceAutoSend && (
-                <button
-                  type="button"
-                  data-testid="composer-voice-autosend-btn"
-                  aria-pressed={voiceAutoSend}
-                  onClick={onToggleVoiceAutoSend}
-                  title={
-                    voiceAutoSend
-                      ? t(activeLocale, "voice.autoSendOnTitle")
-                      : t(activeLocale, "voice.autoSendOffTitle")
-                  }
-                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                    voiceAutoSend
-                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30"
-                      : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 border border-transparent"
-                  }`}
-                >
-                  <span>{t(activeLocale, "voice.autoSendShort")}</span>
-                </button>
-              )}
-
-              <button
-                type="button"
-                data-testid="composer-voice-mic-btn"
-                aria-pressed={isListening}
-                onClick={toggleVoiceInput}
-                title={
-                  isListening
-                    ? t(activeLocale, "voice.micStopTitle", { locale: speechLocale })
-                    : t(activeLocale, "voice.micStartTitle", { locale: speechLocale })
-                }
-                aria-label={
-                  isListening
-                    ? t(activeLocale, "voice.micStopAria")
-                    : t(activeLocale, "voice.micStartAria")
-                }
-                className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shrink-0 ${
-                  isListening
-                    ? "bg-rose-500 hover:bg-rose-600 text-white shadow-sm ring-2 ring-rose-500/35"
-                    : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800"
-                }`}
-              >
-                {isListening && (
-                  <span
-                    aria-hidden="true"
-                    className="absolute inset-0 rounded-full bg-rose-500/40 animate-ping pointer-events-none"
-                  />
-                )}
-                {isListening ? (
-                  <MicOff className="w-4 h-4 relative z-10" />
-                ) : (
-                  <Mic className="w-4 h-4" />
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={handleTriggerSend}
-                disabled={!canSend}
-                title={t(activeLocale, "chat.sendTitle")}
-                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all shrink-0 ${
-                  canSend
-                    ? "bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer shadow-sm"
-                    : "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 cursor-not-allowed"
-                }`}
-              >
-                <ArrowUp className="w-4 h-4 stroke-[2.5]" />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+      {/* Non-Blocking Isolated Composer */}
+      <ChatComposer
+        composerText={composerText}
+        onComposerTextChange={onComposerTextChange}
+        attachments={attachments}
+        selectedMentions={selectedMentions}
+        projects={snapshot.projects}
+        tasks={mentionTasks}
+        locale={activeLocale}
+        preferredLanguage={snapshot.preferredLanguage}
+        isBrowserTabActive={isBrowserTabActive}
+        isPickingElement={snapshot.isPickingElement}
+        browserErrorCount={browserErrorCount}
+        voiceAutoSend={voiceAutoSend}
+        composerHandleRef={composerHandleRef}
+        onAddMention={onAddMention}
+        onRemoveMention={onRemoveMention}
+        onRemoveAttachment={onRemoveAttachment}
+        onSend={onSend}
+        onOpenImageAttachment={onOpenImageAttachment}
+        onToggleElementPicker={onToggleElementPicker}
+        onCaptureScreenshot={onCaptureScreenshot}
+        onAttachCurrentUrl={onAttachCurrentUrl}
+        onAttachConsoleErrors={onAttachConsoleErrors}
+        onPickLocalImages={onPickLocalImages}
+        onPasteImage={onPasteImage}
+        onStopSpeaking={onStopSpeaking}
+        onToggleVoiceAutoSend={onToggleVoiceAutoSend}
+      />
     </section>
   );
-};
+});
+
+interface UnifiedChatHeaderProps {
+  showTaskSidebar: boolean;
+  isConnected: boolean;
+  connectionStatus: string;
+  activeResponderCount: number;
+  providers: Record<AgentProvider, ProviderStatus>;
+  chatProvider: AgentProvider;
+  workerProvider: AgentProvider;
+  chatModel: string | null;
+  chatEffort: string | null;
+  workerModel: string | null;
+  workerEffort: string | null;
+  usageRecords: UsageRecord[];
+  usageBudgets?: UsageBudgetSettings;
+  chatSessions: ChatSessionSummary[];
+  activeChatSessionId: string;
+  activeMessageCount: number;
+  showBrowserPane: boolean;
+  rightPaneMode?: RightPaneMode;
+  locale: UiLocale;
+  newChatConfirmTrigger?: number;
+  voiceReadbackEnabled: boolean;
+  isSpeaking: boolean;
+  appUpdate: AppUpdateState | null;
+  onToggleSidebar: () => void;
+  onReconnect: () => void;
+  onStopAll: () => void;
+  onStopSpeaking?: () => void;
+  onSetChatProvider: (provider: AgentProvider) => void;
+  onSetWorkerProvider: (provider: AgentProvider) => void;
+  onSetChatModel: (model: string, effort?: string) => void;
+  onSetWorkerModel: (model: string, effort?: string) => void;
+  onOpenUsage?: () => void;
+  onToggleVoiceReadback?: () => void;
+  onOpenSettings?: () => void;
+  onSelectChatSession: (sessionId: string) => void;
+  onNewChat: () => void;
+  onDeleteChatSession: (sessionId: string) => void;
+  onToggleMarkdownViewer: () => void;
+  onToggleBrowser: () => void;
+}
+
+const UnifiedChatHeader: React.FC<UnifiedChatHeaderProps> = React.memo(({
+  showTaskSidebar,
+  isConnected,
+  connectionStatus,
+  activeResponderCount,
+  providers,
+  chatProvider,
+  workerProvider,
+  chatModel,
+  chatEffort,
+  workerModel,
+  workerEffort,
+  usageRecords,
+  usageBudgets,
+  chatSessions,
+  activeChatSessionId,
+  activeMessageCount,
+  showBrowserPane,
+  rightPaneMode,
+  locale,
+  newChatConfirmTrigger,
+  voiceReadbackEnabled,
+  isSpeaking,
+  appUpdate,
+  onToggleSidebar,
+  onReconnect,
+  onStopAll,
+  onStopSpeaking,
+  onSetChatProvider,
+  onSetWorkerProvider,
+  onSetChatModel,
+  onSetWorkerModel,
+  onOpenUsage,
+  onToggleVoiceReadback,
+  onOpenSettings,
+  onSelectChatSession,
+  onNewChat,
+  onDeleteChatSession,
+  onToggleMarkdownViewer,
+  onToggleBrowser,
+}) => {
+  const [showModelMenu, setShowModelMenu] = useState(false);
+
+  const chatProviderInfo = providers[chatProvider];
+  const workerProviderInfo = providers[workerProvider];
+  const activeChatModel = chatProviderInfo?.models.find((m) => m.model === chatModel);
+  const activeWorkerModel = workerProviderInfo?.models.find((m) => m.model === workerModel);
+
+  const usageSummaries = useMemo(
+    () => summarizeAllUsagePeriods(usageRecords),
+    [usageRecords],
+  );
+  const todayUsage = usageSummaries.today;
+  const allTimeUsage = usageSummaries.all;
+  const usageAlertSeverity = useMemo(() => {
+    const budgets = normalizeUsageBudgetSettings(usageBudgets);
+    const w = evaluateUsageBudget(
+      usageSummaries.week.costUsd,
+      usageSummaries.week.totalTokens,
+      budgets.weekly,
+    );
+    const m = evaluateUsageBudget(
+      usageSummaries.month.costUsd,
+      usageSummaries.month.totalTokens,
+      budgets.monthly,
+    );
+    if (w.severity === "exceeded" || m.severity === "exceeded") return "exceeded";
+    if (w.severity === "warning" || m.severity === "warning") return "warning";
+    return "ok";
+  }, [usageSummaries.week, usageSummaries.month, usageBudgets]);
+
+  const chatModelDisplayName = activeChatModel?.displayName ?? chatModel ?? "Default";
+  const chatModelFullTitle = [
+    chatProviderInfo?.label ?? chatProvider,
+    chatModelDisplayName,
+    chatEffort,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <header
+      data-testid="chat-header"
+      className="drag-region relative z-20 border-b border-zinc-200/70 dark:border-zinc-800/80 shrink-0 bg-white dark:bg-[#0f1115]"
+    >
+      <div className="flex flex-wrap @[840px]:flex-nowrap items-center justify-between gap-x-2 @[840px]:px-3">
+        {/* Row 1 Left: Sidebar toggle + Brand + Connection status */}
+        <div
+          className={`no-drag order-1 h-11 flex items-center gap-2 min-w-0 flex-1 @[840px]:flex-initial pr-1 @[840px]:pr-0 ${
+            showTaskSidebar
+              ? "pl-3 @[840px]:pl-0"
+              : "pl-[78px] @[840px]:pl-[66px]"
+          }`}
+        >
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            title={t(locale, "chat.toggleSidebarTitle")}
+            className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
+          >
+            <PanelLeft className="w-4 h-4" />
+          </button>
+
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span
+              title={connectionStatus}
+              className={`w-2 h-2 rounded-full shrink-0 ${
+                isConnected ? "bg-emerald-500" : "bg-amber-500"
+              }`}
+            />
+            <span className="text-[13px] font-semibold truncate whitespace-nowrap">
+              Conductor
+            </span>
+            {!isConnected && (
+              <span
+                title={connectionStatus}
+                className="text-[11px] text-zinc-400 truncate hidden @[520px]:inline @[840px]:max-w-[140px]"
+              >
+                {connectionStatus}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Context & Status Pills: neat sub-toolbar below 840px, inline before icons at 840px+ */}
+        <div
+          data-testid="chat-header-controls"
+          className="no-drag order-3 basis-full flex flex-wrap items-center gap-1.5 min-w-0 px-3 py-1.5 border-t border-zinc-200/60 dark:border-zinc-800/70 bg-zinc-50/60 dark:bg-[#12151c]/70 @[840px]:order-2 @[840px]:basis-auto @[840px]:ml-auto @[840px]:flex-nowrap @[840px]:justify-end @[840px]:h-11 @[840px]:px-0 @[840px]:py-0 @[840px]:border-t-0 @[840px]:bg-transparent"
+        >
+          {!isConnected && (
+            <button
+              type="button"
+              data-testid="chat-reconnect-btn"
+              onClick={onReconnect}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <RefreshCw className="w-3 h-3 shrink-0" />
+              <span>{t(locale, "chat.reconnect")}</span>
+            </button>
+          )}
+
+          {activeResponderCount > 0 && (
+            <div
+              data-testid="chat-parallel-responding-pill"
+              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-[11px] font-medium whitespace-nowrap shrink-0"
+            >
+              <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+              <span className="whitespace-nowrap">
+                {t(locale, "chat.parallelResponding", {
+                  count: activeResponderCount,
+                })}
+              </span>
+              <button
+                type="button"
+                data-testid="chat-stop-all-btn"
+                onClick={onStopAll}
+                className="text-rose-500 hover:underline ml-0.5 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                {t(locale, "chat.stopAll")}
+              </button>
+            </div>
+          )}
+
+          {isSpeaking && onStopSpeaking && (
+            <button
+              type="button"
+              data-testid="voice-stop-speaking-btn"
+              onClick={onStopSpeaking}
+              title={t(locale, "voice.stopSpeakingTitle")}
+              aria-label={t(locale, "voice.stopSpeakingTitle")}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 hover:bg-rose-500/15 hover:text-rose-600 dark:hover:text-rose-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-ping shrink-0" />
+              <Square className="w-2.5 h-2.5 fill-current shrink-0" />
+              <span className="whitespace-nowrap">{t(locale, "voice.stopSpeaking")}</span>
+            </button>
+          )}
+
+          {/* Provider & Model Split Menu (Codex / AGY / Claude) */}
+          <div className="relative min-w-0 max-w-full">
+            <button
+              type="button"
+              data-testid="chat-model-selector-btn"
+              onClick={() => setShowModelMenu((v) => !v)}
+              title={chatModelFullTitle}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium bg-zinc-100 dark:bg-zinc-800/90 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 transition-colors cursor-pointer whitespace-nowrap max-w-full min-w-0"
+            >
+              <Zap className="w-3 h-3 text-amber-500 shrink-0" />
+              <span className="font-semibold text-indigo-600 dark:text-indigo-400 shrink-0 whitespace-nowrap">
+                {chatProviderInfo?.label ?? chatProvider}
+              </span>
+              <span className="min-w-0 max-w-[116px] @[520px]:max-w-[148px] @[840px]:max-w-[110px] @[1020px]:max-w-[148px] truncate">
+                {chatModelDisplayName}
+              </span>
+              {chatEffort && (
+                <span className="hidden @[600px]:inline @[840px]:hidden @[1080px]:inline text-zinc-400 shrink-0 whitespace-nowrap">
+                  · {chatEffort}
+                </span>
+              )}
+              <ChevronDown className="w-3 h-3 text-zinc-400 shrink-0" />
+            </button>
+
+            {showModelMenu && (
+              <>
+                <div
+                  className="fixed inset-0 z-30"
+                  onClick={() => setShowModelMenu(false)}
+                />
+                <div className="absolute left-0 @[840px]:left-auto @[840px]:right-0 mt-1.5 z-40 w-[min(20rem,calc(100vw-24px))] rounded-xl bg-white dark:bg-[#191d26] border border-zinc-200 dark:border-zinc-700 shadow-xl p-3 space-y-3">
+                  {/* Front-Desk Chat Provider & Model */}
+                  <div className="space-y-1.5">
+                    <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
+                      {t(locale, "chat.frontDeskProvider")}
+                    </div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {ALL_PROVIDERS.map((pId) => {
+                        const info = providers[pId];
+                        const active = chatProvider === pId;
+                        return (
+                          <button
+                            key={pId}
+                            type="button"
+                            disabled={!info?.available}
+                            onClick={() => onSetChatProvider(pId)}
+                            title={info?.detail}
+                            className={`px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors whitespace-nowrap ${
+                              active
+                                ? "bg-indigo-600 text-white border-indigo-600 cursor-pointer"
+                                : info?.available
+                                  ? "bg-zinc-100 dark:bg-zinc-800 border-transparent hover:border-zinc-300 dark:hover:border-zinc-600 cursor-pointer"
+                                  : "bg-zinc-100/50 dark:bg-zinc-900/50 border-transparent text-zinc-400 opacity-50 cursor-not-allowed"
+                            }`}
+                          >
+                            {info?.label ?? pId}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {chatProviderInfo && chatProviderInfo.models.length > 0 && (
+                      <select
+                        value={chatModel ?? ""}
+                        onChange={(e) => onSetChatModel(e.target.value)}
+                        className="w-full text-[12px] rounded-lg px-2 py-1.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700"
+                      >
+                        {chatProviderInfo.models.map((m) => (
+                          <option key={m.id} value={m.model}>
+                            {m.displayName}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {activeChatModel && activeChatModel.supportedEfforts.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {activeChatModel.supportedEfforts.map((eff) => (
+                          <button
+                            key={eff}
+                            type="button"
+                            onClick={() => onSetChatModel(activeChatModel.model, eff)}
+                            className={`px-2 py-0.5 rounded text-[11px] cursor-pointer whitespace-nowrap ${
+                              chatEffort === eff
+                                ? "bg-indigo-500 text-white"
+                                : "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
+                            }`}
+                          >
+                            {eff}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Background Worker Provider & Model */}
+                  <div className="border-t border-zinc-200 dark:border-zinc-800 pt-2.5 space-y-1.5">
+                    <div className="text-[10.5px] font-semibold text-zinc-400 uppercase tracking-wider">
+                      {t(locale, "chat.workerProvider")}
+                    </div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {ALL_PROVIDERS.map((pId) => {
+                        const info = providers[pId];
+                        const active = workerProvider === pId;
+                        return (
+                          <button
+                            key={pId}
+                            type="button"
+                            disabled={!info?.available}
+                            onClick={() => onSetWorkerProvider(pId)}
+                            title={info?.detail}
+                            className={`px-2 py-1 rounded-lg text-[11.5px] font-medium border transition-colors whitespace-nowrap ${
+                              active
+                                ? "bg-indigo-600 text-white border-indigo-600 cursor-pointer"
+                                : info?.available
+                                  ? "bg-zinc-100 dark:bg-zinc-800 border-transparent hover:border-zinc-300 dark:hover:border-zinc-600 cursor-pointer"
+                                  : "bg-zinc-100/50 dark:bg-zinc-900/50 border-transparent text-zinc-400 opacity-50 cursor-not-allowed"
+                            }`}
+                          >
+                            {info?.label ?? pId}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {workerProviderInfo && workerProviderInfo.models.length > 0 && (
+                      <select
+                        value={workerModel ?? ""}
+                        onChange={(e) => onSetWorkerModel(e.target.value)}
+                        className="w-full text-[12px] rounded-lg px-2 py-1.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700"
+                      >
+                        {workerProviderInfo.models.map((m) => (
+                          <option key={m.id} value={m.model}>
+                            {m.displayName}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {activeWorkerModel && activeWorkerModel.supportedEfforts.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {activeWorkerModel.supportedEfforts.map((eff) => (
+                          <button
+                            key={eff}
+                            type="button"
+                            onClick={() => onSetWorkerModel(activeWorkerModel.model, eff)}
+                            className={`px-2 py-0.5 rounded text-[11px] cursor-pointer whitespace-nowrap ${
+                              workerEffort === eff
+                                ? "bg-indigo-500 text-white"
+                                : "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
+                            }`}
+                          >
+                            {eff}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {onOpenUsage && (
+            <button
+              type="button"
+              data-testid="open-usage-btn"
+              onClick={onOpenUsage}
+              title={
+                allTimeUsage.totalTokens > 0
+                  ? t(locale, "chat.usagePillTitle", {
+                      todayTokens: formatTokenCount(todayUsage.totalTokens),
+                      todayCost: formatUsdCost(todayUsage.costUsd, {
+                        estimated: todayUsage.hasEstimatedCost,
+                      }),
+                      allTokens: formatTokenCount(allTimeUsage.totalTokens),
+                      allCost: formatUsdCost(allTimeUsage.costUsd, {
+                        estimated: allTimeUsage.hasEstimatedCost,
+                      }),
+                    })
+                  : t(locale, "chat.usagePillEmptyTitle")
+              }
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100/80 dark:bg-zinc-800/70 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer tabular-nums whitespace-nowrap shrink-0"
+            >
+              <BarChart3
+                className={`w-3 h-3 shrink-0 ${
+                  usageAlertSeverity === "exceeded"
+                    ? "text-rose-500"
+                    : usageAlertSeverity === "warning"
+                      ? "text-amber-500"
+                      : "text-indigo-500"
+                }`}
+              />
+              {usageAlertSeverity !== "ok" && (
+                <span
+                  data-testid="usage-pill-alert-dot"
+                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    usageAlertSeverity === "exceeded" ? "bg-rose-500" : "bg-amber-500"
+                  }`}
+                />
+              )}
+              {todayUsage.totalTokens > 0 ? (
+                <>
+                  <span className="hidden @[480px]:inline @[840px]:hidden @[980px]:inline">
+                    {formatTokenCount(todayUsage.totalTokens)}
+                  </span>
+                  <span className="hidden @[480px]:inline @[840px]:hidden @[980px]:inline text-zinc-400">
+                    ·
+                  </span>
+                  <span>
+                    {formatUsdCost(todayUsage.costUsd, {
+                      estimated: todayUsage.hasEstimatedCost,
+                      compact: true,
+                    })}
+                  </span>
+                </>
+              ) : (
+                <span className="hidden @[420px]:inline">Usage</span>
+              )}
+            </button>
+          )}
+        </div>
+
+        {/* Row 1 Right: Utility icon buttons */}
+        <div className="no-drag order-2 @[840px]:order-3 h-11 flex items-center gap-0.5 shrink-0 pr-3 @[840px]:pr-0">
+          {onToggleVoiceReadback && (
+            <button
+              type="button"
+              data-testid="voice-readback-toggle-btn"
+              aria-pressed={voiceReadbackEnabled}
+              onClick={onToggleVoiceReadback}
+              title={
+                voiceReadbackEnabled
+                  ? t(locale, "voice.readbackOnTitle")
+                  : t(locale, "voice.readbackOffTitle")
+              }
+              aria-label={
+                voiceReadbackEnabled
+                  ? t(locale, "voice.readbackDisableAria")
+                  : t(locale, "voice.readbackEnableAria")
+              }
+              className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
+                voiceReadbackEnabled
+                  ? "text-indigo-500 bg-indigo-500/10 hover:bg-indigo-500/20"
+                  : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              }`}
+            >
+              {voiceReadbackEnabled ? (
+                <Volume2 className="w-4 h-4" />
+              ) : (
+                <VolumeX className="w-4 h-4" />
+              )}
+            </button>
+          )}
+
+          {onOpenSettings && (
+            <button
+              type="button"
+              data-testid="open-settings-btn"
+              onClick={onOpenSettings}
+              title={
+                appUpdate?.updateAvailable && appUpdate.latestRelease
+                  ? t(locale, "chat.settingsTitleWithUpdate", {
+                      tag: appUpdate.latestRelease.tagName,
+                    })
+                  : t(locale, "chat.settingsTitle")
+              }
+              className="relative p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
+            >
+              <Settings className="w-4 h-4" />
+              {appUpdate &&
+                (appUpdate.updateAvailable ||
+                  appUpdate.status === "downloading" ||
+                  appUpdate.status === "downloaded") && (
+                  <span
+                    data-testid="settings-update-badge"
+                    aria-hidden="true"
+                    className={`absolute top-1 right-1 w-2 h-2 rounded-full ring-2 ring-white dark:ring-[#0f1115] ${
+                      appUpdate.status === "downloaded" ? "bg-emerald-500" : "bg-indigo-500"
+                    }`}
+                  />
+                )}
+            </button>
+          )}
+
+          <ChatSessionControls
+            sessions={chatSessions}
+            activeSessionId={activeChatSessionId}
+            activeMessageCount={activeMessageCount}
+            activeResponderCount={activeResponderCount}
+            locale={locale}
+            newChatConfirmTrigger={newChatConfirmTrigger}
+            onSelectSession={onSelectChatSession}
+            onNewChat={onNewChat}
+            onDeleteSession={onDeleteChatSession}
+          />
+
+          <button
+            type="button"
+            onClick={onToggleMarkdownViewer}
+            title={t(locale, "chat.toggleMarkdownTitle")}
+            className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
+              showBrowserPane && rightPaneMode === "markdown"
+                ? "text-indigo-500 bg-indigo-500/10"
+                : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            }`}
+          >
+            <BookOpen className="w-4 h-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={onToggleBrowser}
+            title={t(locale, "chat.toggleRightPaneTitle")}
+            className={`p-1.5 rounded-md transition-colors cursor-pointer shrink-0 ${
+              showBrowserPane
+                ? "text-indigo-500 bg-indigo-500/10"
+                : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            }`}
+          >
+            <PanelRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    </header>
+  );
+});
 
 export interface ScrollToBottomButtonProps {
   visible: boolean;
@@ -2072,6 +1429,8 @@ const ChatMessageItem: React.FC<{
   message: ChatMessage;
   projects: Project[];
   tasks: AgentTask[];
+  resolvedTask?: AgentTask | null;
+  resolvedProject?: Project | null;
   defaultIntegrationMode?: IntegrationMode;
   locale: UiLocale;
   isHighlighted: boolean;
@@ -2099,6 +1458,8 @@ const ChatMessageItem: React.FC<{
   message,
   projects,
   tasks,
+  resolvedTask,
+  resolvedProject,
   defaultIntegrationMode,
   locale,
   isHighlighted,
@@ -2158,6 +1519,8 @@ const ChatMessageItem: React.FC<{
         message={message}
         projects={projects}
         tasks={tasks}
+        resolvedTask={resolvedTask}
+        resolvedProject={resolvedProject}
         defaultIntegrationMode={defaultIntegrationMode}
         locale={locale}
         onOpenUrl={handleOpenUrl}
@@ -2177,6 +1540,7 @@ const ChatMessageList: React.FC<{
   messages: ChatMessage[];
   projects: Project[];
   tasks: AgentTask[];
+  mentionTasks: AgentTask[];
   defaultIntegrationMode?: IntegrationMode;
   locale: UiLocale;
   highlightedMessageId: string | null;
@@ -2204,6 +1568,7 @@ const ChatMessageList: React.FC<{
   messages,
   projects,
   tasks,
+  mentionTasks,
   defaultIntegrationMode,
   locale,
   highlightedMessageId,
@@ -2220,16 +1585,48 @@ const ChatMessageList: React.FC<{
   return (
     <>
       {messages.map((msg) => {
-        const needsWorkspaceRefs = msg.role !== "assistant";
+        if (msg.role === "taskEvent") {
+          const resolvedTask = resolveTaskForTaskEvent(msg, tasks) ?? null;
+          const resolvedProject = resolvedTask
+            ? (findProjectForTask(projects, resolvedTask) ?? null)
+            : null;
+          return (
+            <ChatMessageItem
+              key={msg.id}
+              message={msg}
+              projects={EMPTY_PROJECTS}
+              tasks={EMPTY_TASKS}
+              resolvedTask={resolvedTask}
+              resolvedProject={resolvedProject}
+              defaultIntegrationMode={defaultIntegrationMode}
+              locale={locale}
+              isHighlighted={highlightedMessageId === msg.id}
+              registerMessageEl={registerMessageEl}
+              onOpenUrl={onOpenUrl}
+              onOpenMarkdownFile={onOpenMarkdownFile}
+              onOpenImageAttachment={onOpenImageAttachment}
+              onOpenMarkdownImage={onOpenMarkdownImage}
+              onOpenTask={onOpenTask}
+              onUpdateTaskStatus={onUpdateTaskStatus}
+              onLandTask={onLandTask}
+              onStopMessage={onStopMessage}
+            />
+          );
+        }
+
+        const userNeedsMentionRefs =
+          msg.role === "user" &&
+          (msg.text.includes("@") ||
+            Boolean(msg.mentions?.length) ||
+            Boolean(msg.inferredMentions?.length));
+
         return (
           <ChatMessageItem
             key={msg.id}
             message={msg}
-            projects={needsWorkspaceRefs ? projects : EMPTY_PROJECTS}
-            tasks={needsWorkspaceRefs ? tasks : EMPTY_TASKS}
-            defaultIntegrationMode={
-              msg.role === "taskEvent" ? defaultIntegrationMode : undefined
-            }
+            projects={userNeedsMentionRefs ? projects : EMPTY_PROJECTS}
+            tasks={userNeedsMentionRefs ? mentionTasks : EMPTY_TASKS}
+            defaultIntegrationMode={undefined}
             locale={locale}
             isHighlighted={highlightedMessageId === msg.id}
             registerMessageEl={registerMessageEl}
@@ -2328,6 +1725,8 @@ export interface TaskEventCardProps {
   message: ChatMessage;
   tasks: AgentTask[];
   projects?: Project[];
+  resolvedTask?: AgentTask | null;
+  resolvedProject?: Project | null;
   defaultIntegrationMode?: IntegrationMode;
   locale?: UiLocale;
   onOpenUrl: (url: string) => void;
@@ -2343,7 +1742,9 @@ export interface TaskEventCardProps {
 export const TaskEventCard: React.FC<TaskEventCardProps> = ({
   message,
   tasks,
-  projects = [],
+  projects = EMPTY_PROJECTS,
+  resolvedTask: preResolvedTask,
+  resolvedProject: preResolvedProject,
   defaultIntegrationMode = "feature-branch",
   locale = "ja",
   onOpenUrl,
@@ -2355,7 +1756,10 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
   imageCache,
   videoCache,
 }) => {
-  const resolvedTask = resolveTaskForTaskEvent(message, tasks);
+  const resolvedTask =
+    preResolvedTask !== undefined
+      ? (preResolvedTask ?? undefined)
+      : resolveTaskForTaskEvent(message, tasks);
   const taskBaseFilePath = buildTaskMarkdownBasePath(resolvedTask);
   const targetTaskId = resolvedTask?.id ?? message.relatedTaskId;
   const quickTransition = resolvedTask ? getQuickStatusTransition(resolvedTask.status, locale) : null;
@@ -2376,12 +1780,12 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
       !isRunning &&
       resolvedTask.landStatus !== "landed",
   );
-  const resolvedProject = resolvedTask
-    ? (resolvedTask.projectId
-        ? projects.find((p) => p.id === resolvedTask.projectId)
-        : undefined) ??
-      projects.find((p) => p.name.toLowerCase() === resolvedTask.projectName.toLowerCase())
-    : undefined;
+  const resolvedProject =
+    preResolvedProject !== undefined
+      ? (preResolvedProject ?? undefined)
+      : resolvedTask
+        ? findProjectForTask(projects, resolvedTask)
+        : undefined;
   const effectiveMode = getEffectiveProjectMode(resolvedProject, defaultIntegrationMode);
   const isPrMode = effectiveMode === "per-task-pr";
 
@@ -2584,6 +1988,8 @@ const MessageRow: React.FC<{
   message: ChatMessage;
   projects: Project[];
   tasks: AgentTask[];
+  resolvedTask?: AgentTask | null;
+  resolvedProject?: Project | null;
   defaultIntegrationMode?: IntegrationMode;
   locale: UiLocale;
   onOpenUrl: (url: string) => void;
@@ -2598,6 +2004,8 @@ const MessageRow: React.FC<{
   message,
   projects,
   tasks,
+  resolvedTask,
+  resolvedProject,
   defaultIntegrationMode,
   locale,
   onOpenUrl,
@@ -2612,7 +2020,10 @@ const MessageRow: React.FC<{
   const [showReasoning, setShowReasoning] = useState(false);
   const mentionBadges = useMemo(
     () =>
-      message.role === "user"
+      message.role === "user" &&
+      (message.text.includes("@") ||
+        Boolean(message.mentions?.length) ||
+        Boolean(message.inferredMentions?.length))
         ? resolveMessageMentionBadges(
             message.text,
             projects,
@@ -2623,9 +2034,10 @@ const MessageRow: React.FC<{
         : [],
     [message.role, message.text, message.mentions, message.inferredMentions, projects, tasks],
   );
+  const hasInlineAt = message.role === "user" && message.text.includes("@");
   const userMentionContext = useMemo(
-    () => (message.role === "user" ? { projects, tasks, onOpenTask } : undefined),
-    [message.role, projects, tasks, onOpenTask],
+    () => (hasInlineAt ? { projects, tasks, onOpenTask } : undefined),
+    [hasInlineAt, projects, tasks, onOpenTask],
   );
 
   if (message.role === "user") {
@@ -2709,6 +2121,8 @@ const MessageRow: React.FC<{
         message={message}
         tasks={tasks}
         projects={projects}
+        resolvedTask={resolvedTask}
+        resolvedProject={resolvedProject}
         defaultIntegrationMode={defaultIntegrationMode}
         locale={locale}
         onOpenUrl={onOpenUrl}

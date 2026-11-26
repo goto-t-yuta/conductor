@@ -102,6 +102,19 @@ Prebuilt desktop binaries for **macOS**, **Windows**, and **Linux** — along wi
 
 > **Note**: Unless code-signing secrets (`CSC_LINK` / `WIN_CSC_LINK`) are configured in repository settings, desktop CI releases are unsigned and macOS Gatekeeper or Windows SmartScreen may prompt for confirmation on first launch. The Android APK is built with debug signing so it can be sideloaded directly onto Android devices without a release keystore.
 
+### Installing on macOS (Unsigned Builds)
+
+1. Download the `.dmg` for your Mac (`arm64` Apple Silicon or `x64` Intel) from [GitHub Releases](https://github.com/goto-t-yuta/conductor/releases) and drag `Conductor.app` into `/Applications`.
+2. Because CI builds are currently unsigned, macOS Gatekeeper may report **"Conductor is damaged and can't be opened"** on first launch. Clear the quarantine extended attribute in Terminal:
+
+```bash
+xattr -cr /Applications/Conductor.app
+```
+
+*(Alternatively, run `xattr -dr com.apple.quarantine /Applications/Conductor.app` to remove only the quarantine flag.)*
+
+3. Open **Conductor** normally from `/Applications` or Spotlight.
+
 ---
 
 ## Prerequisites
