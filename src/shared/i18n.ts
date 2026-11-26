@@ -224,6 +224,7 @@ export const UI_STRINGS = {
     "chat.toolChipsErrorSuffix": " · {count}件エラー",
     "chat.toolChipsExpandAria": "ツール実行の詳細を展開",
     "chat.toolChipsCollapseAria": "ツール実行の詳細を折りたたむ",
+    "chat.scrollToBottom": "最新メッセージへ",
 
     // ChatHistoryMenu
     "history.buttonTitle": "チャット履歴 — 過去のチャットをワンクリックで復元",
@@ -647,6 +648,7 @@ export const UI_STRINGS = {
     "chat.toolChipsErrorSuffix": " · {count} error(s)",
     "chat.toolChipsExpandAria": "Expand tool call details",
     "chat.toolChipsCollapseAria": "Collapse tool call details",
+    "chat.scrollToBottom": "Scroll to bottom",
 
     // ChatHistoryMenu
     "history.buttonTitle": "Chat history — restore previous conversations in one click",

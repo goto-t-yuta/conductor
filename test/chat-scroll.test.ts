@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CHAT_BOTTOM_THRESHOLD_PX,
+  SMOOTH_SCROLL_EXPIRY_MS,
   classifyMessagesUpdate,
   clearPendingProgrammaticScroll,
   computeJumpScrollTop,
@@ -11,6 +12,8 @@ import {
   handleUserScrollIntent,
   isAtChatBottom,
   recordProgrammaticScroll,
+  recordSmoothScrollToBottom,
+  shouldShowScrollToBottomButton,
   syncScrollStateAfterResize,
   type ScrollMetrics,
   type ScrollableChatMessage,
@@ -455,5 +458,140 @@ describe("computeJumpScrollTop", () => {
         targetHeight: 100,
       }),
     ).toBe(1400);
+  });
+});
+
+describe("floating scroll-to-bottom button visibility & smooth scroll-to-bottom", () => {
+  it("hides button when chat is empty, non-overflowing, or at/near the bottom, and shows it when scrolled up", () => {
+    const initial = createInitialChatScrollState();
+
+    // No messages or non-scrollable container -> hidden
+    expect(shouldShowScrollToBottomButton(initial, metrics(0, 2000), { hasMessages: false, now: 100 })).toBe(
+      false,
+    );
+    expect(shouldShowScrollToBottomButton(initial, metrics(0, 500, 600), { hasMessages: true, now: 100 })).toBe(
+      false,
+    );
+
+    // At or within 24px of bottom -> hidden
+    expect(
+      shouldShowScrollToBottomButton(initial, metrics(1400, 2000, 600), { hasMessages: true, now: 100 }),
+    ).toBe(false);
+    expect(
+      shouldShowScrollToBottomButton(initial, metrics(1376, 2000, 600), { hasMessages: true, now: 100 }),
+    ).toBe(false);
+
+    // Scrolled up > 24px above bottom -> visible
+    const scrolledUp = handleContainerScroll(initial, metrics(1375, 2000, 600), 100);
+    expect(scrolledUp.isStickyBottom).toBe(false);
+    expect(
+      shouldShowScrollToBottomButton(scrolledUp, metrics(1375, 2000, 600), {
+        hasMessages: true,
+        now: 100,
+      }),
+    ).toBe(true);
+
+    // Jumping up to an older message shows the button immediately
+    const jumped = recordProgrammaticScroll(initial, "jump", metrics(250, 2000, 600), true, 200);
+    expect(
+      shouldShowScrollToBottomButton(jumped, metrics(250, 2000, 600), { hasMessages: true, now: 200 }),
+    ).toBe(true);
+
+    // Scrolling back to bottom hides it again
+    const backAtBottom = handleContainerScroll(jumped, metrics(1400, 2000, 600), 300);
+    expect(backAtBottom.isStickyBottom).toBe(true);
+    expect(
+      shouldShowScrollToBottomButton(backAtBottom, metrics(1400, 2000, 600), {
+        hasMessages: true,
+        now: 300,
+      }),
+    ).toBe(false);
+  });
+
+  it("smoothly scrolls to bottom, hides the button immediately, preserves sticky-bottom across animation frames, and resumes auto-follow", () => {
+    // User is scrolled far up
+    let state = handleContainerScroll(createInitialChatScrollState(), metrics(300, 3000, 600), 100);
+    expect(state.isStickyBottom).toBe(false);
+    expect(shouldShowScrollToBottomButton(state, metrics(300, 3000, 600), { hasMessages: true, now: 100 })).toBe(
+      true,
+    );
+
+    // User clicks floating "Scroll to bottom" button
+    state = recordSmoothScrollToBottom(state, metrics(300, 3000, 600), 200);
+    expect(state.isStickyBottom).toBe(true);
+    expect(state.pendingProgrammatic?.kind).toBe("smooth-bottom");
+    expect(state.pendingProgrammatic?.expiresAt).toBe(200 + SMOOTH_SCROLL_EXPIRY_MS);
+    expect(shouldShowScrollToBottomButton(state, metrics(300, 3000, 600), { hasMessages: true, now: 200 })).toBe(
+      false,
+    );
+
+    // Intermediate downward smooth-scroll frames must NOT disable sticky-bottom or re-show button
+    state = handleContainerScroll(state, metrics(900, 3000, 600), 250);
+    expect(state.isStickyBottom).toBe(true);
+    expect(state.pendingProgrammatic?.kind).toBe("smooth-bottom");
+    expect(shouldShowScrollToBottomButton(state, metrics(900, 3000, 600), { hasMessages: true, now: 250 })).toBe(
+      false,
+    );
+
+    // ResizeObserver firing mid-smooth-scroll also preserves smooth-bottom state
+    state = syncScrollStateAfterResize(state, metrics(1500, 3050, 600), 300);
+    expect(state.isStickyBottom).toBe(true);
+    expect(state.pendingProgrammatic?.kind).toBe("smooth-bottom");
+    expect(state.pendingProgrammatic?.targetScrollTop).toBe(2450);
+
+    // Arrival at the bottom clears pendingProgrammatic and keeps sticky-bottom enabled
+    state = handleContainerScroll(state, metrics(2450, 3050, 600), 420);
+    expect(state.isStickyBottom).toBe(true);
+    expect(state.pendingProgrammatic).toBeNull();
+    expect(
+      shouldShowScrollToBottomButton(state, metrics(2450, 3050, 600), { hasMessages: true, now: 420 }),
+    ).toBe(false);
+
+    // Subsequent streaming message updates auto-follow to the bottom again
+    const decision = evaluateAutoScrollOnUpdate(state, {
+      updateKind: "tail-updated",
+      currentMetrics: metrics(2450, 3200, 600),
+      now: 500,
+    });
+    expect(decision.shouldScrollToBottom).toBe(true);
+    expect(decision.nextState.isStickyBottom).toBe(true);
+  });
+
+  it("cancels smooth scroll-to-bottom and re-shows button if the user scrolls upward mid-animation", () => {
+    let state = handleContainerScroll(createInitialChatScrollState(), metrics(300, 3000, 600), 100);
+    state = recordSmoothScrollToBottom(state, metrics(300, 3000, 600), 200);
+    state = handleContainerScroll(state, metrics(1100, 3000, 600), 260);
+    expect(state.isStickyBottom).toBe(true);
+
+    // User wheels up mid-animation
+    state = handleUserScrollIntent(state, "up", metrics(1050, 3000, 600));
+    expect(state.isStickyBottom).toBe(false);
+    expect(state.pendingProgrammatic).toBeNull();
+    expect(
+      shouldShowScrollToBottomButton(state, metrics(1050, 3000, 600), { hasMessages: true, now: 270 }),
+    ).toBe(true);
+
+    // Subsequent tail update must not yank user down
+    const decision = evaluateAutoScrollOnUpdate(state, {
+      updateKind: "tail-updated",
+      currentMetrics: metrics(1050, 3200, 600),
+      now: 300,
+    });
+    expect(decision.shouldScrollToBottom).toBe(false);
+  });
+
+  it("continues following to the bottom if a streaming tail update arrives during smooth scroll", () => {
+    let state = handleContainerScroll(createInitialChatScrollState(), metrics(300, 3000, 600), 100);
+    state = recordSmoothScrollToBottom(state, metrics(300, 3000, 600), 200);
+    state = handleContainerScroll(state, metrics(1000, 3000, 600), 240);
+
+    // Streaming token grows scrollHeight while still mid-smooth-scroll
+    const decision = evaluateAutoScrollOnUpdate(state, {
+      updateKind: "tail-updated",
+      currentMetrics: metrics(1000, 3180, 600),
+      now: 260,
+    });
+    expect(decision.shouldScrollToBottom).toBe(true);
+    expect(decision.nextState.isStickyBottom).toBe(true);
   });
 });

@@ -9,13 +9,16 @@ export const PROGRAMMATIC_SCROLL_TOLERANCE_PX = 2;
 /** Maximum lifetime (in ms) for a pending programmatic scroll marker. */
 export const PROGRAMMATIC_SCROLL_EXPIRY_MS = 250;
 
+/** Maximum lifetime (in ms) for an active smooth scroll-to-bottom animation. */
+export const SMOOTH_SCROLL_EXPIRY_MS = 1200;
+
 export interface ScrollMetrics {
   scrollTop: number;
   scrollHeight: number;
   clientHeight: number;
 }
 
-export type ProgrammaticScrollKind = "bottom" | "jump";
+export type ProgrammaticScrollKind = "bottom" | "smooth-bottom" | "jump";
 
 export interface ProgrammaticScrollIntent {
   kind: ProgrammaticScrollKind;
@@ -199,7 +202,8 @@ export function handleUserScrollIntent(
   return {
     isStickyBottom: isAtChatBottom(metrics, thresholdPx) ? true : state.isStickyBottom,
     lastMetrics: metrics,
-    pendingProgrammatic: null,
+    pendingProgrammatic:
+      state.pendingProgrammatic?.kind === "smooth-bottom" ? state.pendingProgrammatic : null,
   };
 }
 
@@ -227,6 +231,40 @@ export function handleContainerScroll(
   thresholdPx: number = CHAT_BOTTOM_THRESHOLD_PX,
 ): ChatScrollState {
   const pending = getActivePending(state.pendingProgrammatic, now);
+  const distance = getDistanceFromBottom(metrics);
+  const prev = state.lastMetrics;
+  const movedUp = prev !== null && metrics.scrollTop < prev.scrollTop - 0.5;
+  const movedDown = prev !== null && metrics.scrollTop > prev.scrollTop + 0.5;
+  const clampedAtBottomDueToShrink =
+    prev !== null && metrics.scrollHeight < prev.scrollHeight && distance <= 1;
+
+  if (pending?.kind === "smooth-bottom") {
+    if (movedUp && !clampedAtBottomDueToShrink) {
+      return {
+        isStickyBottom: false,
+        lastMetrics: metrics,
+        pendingProgrammatic: null,
+      };
+    }
+
+    if (distance <= thresholdPx) {
+      return {
+        isStickyBottom: true,
+        lastMetrics: metrics,
+        pendingProgrammatic: null,
+      };
+    }
+
+    return {
+      isStickyBottom: true,
+      lastMetrics: metrics,
+      pendingProgrammatic: {
+        ...pending,
+        targetScrollTop: Math.max(0, metrics.scrollHeight - metrics.clientHeight),
+      },
+    };
+  }
+
   if (
     pending &&
     Math.abs(metrics.scrollTop - pending.targetScrollTop) <= PROGRAMMATIC_SCROLL_TOLERANCE_PX
@@ -237,13 +275,6 @@ export function handleContainerScroll(
       pendingProgrammatic: null,
     };
   }
-
-  const distance = getDistanceFromBottom(metrics);
-  const prev = state.lastMetrics;
-  const movedUp = prev !== null && metrics.scrollTop < prev.scrollTop - 0.5;
-  const movedDown = prev !== null && metrics.scrollTop > prev.scrollTop + 0.5;
-  const clampedAtBottomDueToShrink =
-    prev !== null && metrics.scrollHeight < prev.scrollHeight && distance <= 1;
 
   let nextSticky: boolean;
   if (movedUp && !clampedAtBottomDueToShrink) {
@@ -275,6 +306,20 @@ export function syncScrollStateAfterResize(
   thresholdPx: number = CHAT_BOTTOM_THRESHOLD_PX,
 ): ChatScrollState {
   const activePending = getActivePending(state.pendingProgrammatic, now);
+  if (activePending?.kind === "smooth-bottom") {
+    const arrived = isAtChatBottom(metrics, thresholdPx);
+    return {
+      isStickyBottom: true,
+      lastMetrics: metrics,
+      pendingProgrammatic: arrived
+        ? null
+        : {
+            ...activePending,
+            targetScrollTop: Math.max(0, metrics.scrollHeight - metrics.clientHeight),
+          },
+    };
+  }
+
   const nextSticky = state.isStickyBottom ? isAtChatBottom(metrics, thresholdPx) : false;
 
   return {
@@ -282,6 +327,63 @@ export function syncScrollStateAfterResize(
     lastMetrics: metrics,
     pendingProgrammatic: activePending,
   };
+}
+
+/**
+ * Records a user-triggered smooth scroll-to-bottom action (e.g. clicking the
+ * floating Scroll-to-Bottom button). Re-enables `isStickyBottom` immediately
+ * and tracks the in-flight animation so intermediate downward `scroll` events
+ * do not prematurely disable sticky-bottom.
+ */
+export function recordSmoothScrollToBottom(
+  _state: ChatScrollState,
+  currentMetrics: ScrollMetrics,
+  now: number,
+  thresholdPx: number = CHAT_BOTTOM_THRESHOLD_PX,
+): ChatScrollState {
+  const targetScrollTop = Math.max(0, currentMetrics.scrollHeight - currentMetrics.clientHeight);
+  const alreadyAtBottom = isAtChatBottom(currentMetrics, thresholdPx);
+  return {
+    isStickyBottom: true,
+    lastMetrics: currentMetrics,
+    pendingProgrammatic: alreadyAtBottom
+      ? null
+      : {
+          kind: "smooth-bottom",
+          targetScrollTop,
+          expiresAt: now + SMOOTH_SCROLL_EXPIRY_MS,
+        },
+  };
+}
+
+/**
+ * Returns true when the floating Scroll-to-Bottom button should be shown:
+ * there are messages, the timeline overflows, the user is scrolled above the bottom
+ * threshold, and we are not already scrolling programmatically to the bottom.
+ */
+export function shouldShowScrollToBottomButton(
+  state: ChatScrollState,
+  metrics: ScrollMetrics | null = state.lastMetrics,
+  options?: {
+    hasMessages?: boolean;
+    now?: number;
+    thresholdPx?: number;
+  },
+): boolean {
+  if (options?.hasMessages === false) {
+    return false;
+  }
+  const effectiveMetrics = metrics ?? state.lastMetrics;
+  if (!effectiveMetrics || !isContainerScrollable(effectiveMetrics)) {
+    return false;
+  }
+  const now = options?.now ?? Date.now();
+  const thresholdPx = options?.thresholdPx ?? CHAT_BOTTOM_THRESHOLD_PX;
+  const activePending = getActivePending(state.pendingProgrammatic, now);
+  if (activePending?.kind === "bottom" || activePending?.kind === "smooth-bottom") {
+    return false;
+  }
+  return !isAtChatBottom(effectiveMetrics, thresholdPx);
 }
 
 /**
@@ -348,6 +450,25 @@ export function evaluateAutoScrollOnUpdate(
   }
 
   if (updateKind === "earlier-updated" || updateKind === "unchanged") {
+    if (activePending?.kind === "smooth-bottom") {
+      return {
+        shouldScrollToBottom: false,
+        nextState: {
+          isStickyBottom: true,
+          lastMetrics: currentMetrics,
+          pendingProgrammatic: isAtChatBottom(currentMetrics, thresholdPx)
+            ? null
+            : {
+                ...activePending,
+                targetScrollTop: Math.max(
+                  0,
+                  currentMetrics.scrollHeight - currentMetrics.clientHeight,
+                ),
+              },
+        },
+      };
+    }
+
     return {
       shouldScrollToBottom: false,
       nextState: {
@@ -390,6 +511,17 @@ export function evaluateAutoScrollOnUpdate(
       };
     }
 
+    if (activePending?.kind === "smooth-bottom") {
+      return {
+        shouldScrollToBottom: true,
+        nextState: {
+          isStickyBottom: true,
+          lastMetrics: currentMetrics,
+          pendingProgrammatic: null,
+        },
+      };
+    }
+
     const preGrowthDistance = Math.max(
       0,
       prev.scrollHeight - currentMetrics.scrollTop - prev.clientHeight,
@@ -404,6 +536,15 @@ export function evaluateAutoScrollOnUpdate(
         },
       };
     }
+  } else if (activePending?.kind === "smooth-bottom") {
+    return {
+      shouldScrollToBottom: true,
+      nextState: {
+        isStickyBottom: true,
+        lastMetrics: currentMetrics,
+        pendingProgrammatic: null,
+      },
+    };
   } else if (!isAtChatBottom(currentMetrics, thresholdPx)) {
     return {
       shouldScrollToBottom: false,

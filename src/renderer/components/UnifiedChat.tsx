@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowUp,
   BarChart3,
   Bell,
@@ -98,6 +99,8 @@ import {
   handleContainerScroll,
   handleUserScrollIntent,
   recordProgrammaticScroll,
+  recordSmoothScrollToBottom,
+  shouldShowScrollToBottomButton,
   syncScrollStateAfterResize,
   type ChatScrollState,
   type ScrollMetrics,
@@ -256,6 +259,9 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const hasMessagesRef = useRef(snapshot.messages.length > 0);
+  hasMessagesRef.current = snapshot.messages.length > 0;
   const activeLocale = locale ?? resolveUiLocale(snapshot.preferredLanguage);
 
   // Voice Input (Web Speech API STT) state
@@ -574,90 +580,141 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     return () => observer.disconnect();
   }, [unreadReplyIds, onMarkMessagesRead, snapshot.messages.length]);
 
-  const scrollContainerToBottom = useCallback((container: HTMLDivElement) => {
-    const beforeScrollTop = container.scrollTop;
-    container.scrollTop = container.scrollHeight;
-    const actualMetrics = readScrollMetrics(container);
-    const didScroll = Math.abs(actualMetrics.scrollTop - beforeScrollTop) >= 0.5;
-    scrollStateRef.current = recordProgrammaticScroll(
-      scrollStateRef.current,
-      "bottom",
-      actualMetrics,
-      didScroll,
-      Date.now(),
-    );
-  }, []);
+  const syncScrollToBottomVisibility = useCallback(
+    (metrics: ScrollMetrics | null, now: number = Date.now()) => {
+      setShowScrollToBottom(
+        shouldShowScrollToBottomButton(scrollStateRef.current, metrics, {
+          hasMessages: hasMessagesRef.current,
+          now,
+        }),
+      );
+    },
+    [],
+  );
+
+  const scrollContainerToBottom = useCallback(
+    (container: HTMLDivElement) => {
+      const beforeScrollTop = container.scrollTop;
+      container.scrollTop = container.scrollHeight;
+      const actualMetrics = readScrollMetrics(container);
+      const didScroll = Math.abs(actualMetrics.scrollTop - beforeScrollTop) >= 0.5;
+      const now = Date.now();
+      scrollStateRef.current = recordProgrammaticScroll(
+        scrollStateRef.current,
+        "bottom",
+        actualMetrics,
+        didScroll,
+        now,
+      );
+      syncScrollToBottomVisibility(actualMetrics, now);
+    },
+    [syncScrollToBottomVisibility],
+  );
+
+  const handleScrollToBottomClick = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    if (typeof container.scrollTo === "function") {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    } else {
+      container.scrollTop = container.scrollHeight;
+    }
+    const now = Date.now();
+    const metrics = readScrollMetrics(container);
+    scrollStateRef.current = recordSmoothScrollToBottom(scrollStateRef.current, metrics, now);
+    syncScrollToBottomVisibility(metrics, now);
+    flushVisibleUnread();
+  }, [flushVisibleUnread, syncScrollToBottomVisibility]);
 
   const handleChatScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    scrollStateRef.current = handleContainerScroll(
-      scrollStateRef.current,
-      readScrollMetrics(el),
-      Date.now(),
-    );
+    const now = Date.now();
+    const metrics = readScrollMetrics(el);
+    scrollStateRef.current = handleContainerScroll(scrollStateRef.current, metrics, now);
+    syncScrollToBottomVisibility(metrics, now);
     flushVisibleUnread();
-  }, [flushVisibleUnread]);
+  }, [flushVisibleUnread, syncScrollToBottomVisibility]);
 
-  const handleChatWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
-    const el = scrollContainerRef.current;
-    if (!el || e.deltaY === 0) return;
-    scrollStateRef.current = handleUserScrollIntent(
-      scrollStateRef.current,
-      e.deltaY < 0 ? "up" : "down",
-      readScrollMetrics(el),
-    );
-  }, []);
+  const handleChatWheel = useCallback(
+    (e: React.WheelEvent<HTMLDivElement>) => {
+      const el = scrollContainerRef.current;
+      if (!el || e.deltaY === 0) return;
+      const metrics = readScrollMetrics(el);
+      scrollStateRef.current = handleUserScrollIntent(
+        scrollStateRef.current,
+        e.deltaY < 0 ? "up" : "down",
+        metrics,
+      );
+      syncScrollToBottomVisibility(metrics);
+    },
+    [syncScrollToBottomVisibility],
+  );
 
-  const handleChatTouchStart = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
-    lastTouchYRef.current = e.touches[0]?.clientY ?? null;
-    scrollStateRef.current = clearPendingProgrammaticScroll(scrollStateRef.current);
-  }, []);
+  const handleChatTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      lastTouchYRef.current = e.touches[0]?.clientY ?? null;
+      scrollStateRef.current = clearPendingProgrammaticScroll(scrollStateRef.current);
+      const el = scrollContainerRef.current;
+      if (el) {
+        syncScrollToBottomVisibility(readScrollMetrics(el));
+      }
+    },
+    [syncScrollToBottomVisibility],
+  );
 
-  const handleChatTouchMove = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
-    const el = scrollContainerRef.current;
-    const currentY = e.touches[0]?.clientY;
-    const prevY = lastTouchYRef.current;
-    if (currentY !== undefined) {
-      lastTouchYRef.current = currentY;
-    }
-    if (!el || currentY === undefined || prevY === null || currentY === prevY) return;
-    // Swiping finger downward scrolls chat content upward toward earlier messages.
-    scrollStateRef.current = handleUserScrollIntent(
-      scrollStateRef.current,
-      currentY > prevY ? "up" : "down",
-      readScrollMetrics(el),
-    );
-  }, []);
+  const handleChatTouchMove = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      const el = scrollContainerRef.current;
+      const currentY = e.touches[0]?.clientY;
+      const prevY = lastTouchYRef.current;
+      if (currentY !== undefined) {
+        lastTouchYRef.current = currentY;
+      }
+      if (!el || currentY === undefined || prevY === null || currentY === prevY) return;
+      // Swiping finger downward scrolls chat content upward toward earlier messages.
+      const metrics = readScrollMetrics(el);
+      scrollStateRef.current = handleUserScrollIntent(
+        scrollStateRef.current,
+        currentY > prevY ? "up" : "down",
+        metrics,
+      );
+      syncScrollToBottomVisibility(metrics);
+    },
+    [syncScrollToBottomVisibility],
+  );
 
   const handleChatTouchEnd = useCallback(() => {
     lastTouchYRef.current = null;
   }, []);
 
-  const handleChatPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    const el = scrollContainerRef.current;
-    if (el && e.target === el) {
-      scrollStateRef.current = clearPendingProgrammaticScroll(scrollStateRef.current);
-    }
-  }, []);
+  const handleChatPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const el = scrollContainerRef.current;
+      if (el && e.target === el) {
+        scrollStateRef.current = clearPendingProgrammaticScroll(scrollStateRef.current);
+        syncScrollToBottomVisibility(readScrollMetrics(el));
+      }
+    },
+    [syncScrollToBottomVisibility],
+  );
 
-  const handleChatKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    if (e.key === "PageUp" || e.key === "ArrowUp" || e.key === "Home") {
-      scrollStateRef.current = handleUserScrollIntent(
-        scrollStateRef.current,
-        "up",
-        readScrollMetrics(el),
-      );
-    } else if (e.key === "PageDown" || e.key === "ArrowDown" || e.key === "End") {
-      scrollStateRef.current = handleUserScrollIntent(
-        scrollStateRef.current,
-        "down",
-        readScrollMetrics(el),
-      );
-    }
-  }, []);
+  const handleChatKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const el = scrollContainerRef.current;
+      if (!el) return;
+      if (e.key === "PageUp" || e.key === "ArrowUp" || e.key === "Home") {
+        const metrics = readScrollMetrics(el);
+        scrollStateRef.current = handleUserScrollIntent(scrollStateRef.current, "up", metrics);
+        syncScrollToBottomVisibility(metrics);
+      } else if (e.key === "PageDown" || e.key === "ArrowDown" || e.key === "End") {
+        const metrics = readScrollMetrics(el);
+        scrollStateRef.current = handleUserScrollIntent(scrollStateRef.current, "down", metrics);
+        syncScrollToBottomVisibility(metrics);
+      }
+    },
+    [syncScrollToBottomVisibility],
+  );
 
   useEffect(() => {
     const scrollEl = scrollContainerRef.current;
@@ -665,17 +722,16 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     if (!scrollEl || !contentEl || typeof ResizeObserver === "undefined") return;
 
     const observer = new ResizeObserver(() => {
-      scrollStateRef.current = syncScrollStateAfterResize(
-        scrollStateRef.current,
-        readScrollMetrics(scrollEl),
-        Date.now(),
-      );
+      const now = Date.now();
+      const metrics = readScrollMetrics(scrollEl);
+      scrollStateRef.current = syncScrollStateAfterResize(scrollStateRef.current, metrics, now);
+      syncScrollToBottomVisibility(metrics, now);
     });
 
     observer.observe(contentEl);
     observer.observe(scrollEl);
     return () => observer.disconnect();
-  }, []);
+  }, [syncScrollToBottomVisibility]);
 
   useLayoutEffect(() => {
     if (!jumpRequest) return;
@@ -698,13 +754,15 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     container.scrollTop = targetScrollTop;
     const actualMetrics = readScrollMetrics(container);
     const didScroll = Math.abs(actualMetrics.scrollTop - beforeScrollTop) >= 0.5;
+    const now = Date.now();
     scrollStateRef.current = recordProgrammaticScroll(
       scrollStateRef.current,
       "jump",
       actualMetrics,
       didScroll,
-      Date.now(),
+      now,
     );
+    syncScrollToBottomVisibility(actualMetrics, now);
     flushVisibleUnreadRef.current();
 
     setHighlightedMessageId(jumpRequest.messageId);
@@ -716,7 +774,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     }, 1800);
 
     return () => window.clearTimeout(timer);
-  }, [jumpRequest]);
+  }, [jumpRequest, syncScrollToBottomVisibility]);
 
   const activeTab = snapshot.browserTabs.find((t) => t.id === snapshot.activeBrowserTabId);
   const browserErrorCount = (activeTab?.consoleErrorCount ?? 0) + (activeTab?.networkErrorCount ?? 0);
@@ -848,18 +906,27 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     if (!container) return;
 
     const updateKind = classifyMessagesUpdate(prevMessages, nextMessages);
+    const now = Date.now();
+    const currentMetrics = readScrollMetrics(container);
     const decision = evaluateAutoScrollOnUpdate(scrollStateRef.current, {
       updateKind,
-      currentMetrics: readScrollMetrics(container),
-      now: Date.now(),
+      currentMetrics,
+      now,
     });
     scrollStateRef.current = decision.nextState;
 
     if (decision.shouldScrollToBottom) {
       scrollContainerToBottom(container);
       flushVisibleUnreadRef.current();
+    } else {
+      syncScrollToBottomVisibility(currentMetrics, now);
     }
-  }, [snapshot.activeChatSessionId, snapshot.messages, scrollContainerToBottom]);
+  }, [
+    snapshot.activeChatSessionId,
+    snapshot.messages,
+    scrollContainerToBottom,
+    syncScrollToBottomVisibility,
+  ]);
 
   const displayComposerText =
     isListening && interimTranscript
@@ -1277,46 +1344,54 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
       )}
 
       {/* Unified Chat Stream */}
-      <div
-        ref={scrollContainerRef}
-        onScroll={handleChatScroll}
-        onWheel={handleChatWheel}
-        onTouchStart={handleChatTouchStart}
-        onTouchMove={handleChatTouchMove}
-        onTouchEnd={handleChatTouchEnd}
-        onTouchCancel={handleChatTouchEnd}
-        onPointerDown={handleChatPointerDown}
-        onKeyDown={handleChatKeyDown}
-        className="flex-1 overflow-y-auto px-5 py-6"
-      >
-        <div ref={contentContainerRef} className="max-w-[740px] mx-auto space-y-5">
-          {snapshot.messages.length === 0 ? (
-            <EmptyWelcome
-              projectCount={snapshot.projects.length}
-              recentProjectNames={recentProjectNames}
-              locale={activeLocale}
-              onAddProject={onAddProject}
-              onPickPrompt={handlePickWelcomePrompt}
-            />
-          ) : (
-            <ChatMessageList
-              messages={snapshot.messages}
-              projects={snapshot.projects}
-              tasks={snapshot.tasks}
-              defaultIntegrationMode={snapshot.defaultIntegrationMode}
-              locale={activeLocale}
-              highlightedMessageId={highlightedMessageId}
-              registerMessageEl={registerMessageEl}
-              onOpenUrl={onOpenUrl}
-              onOpenMarkdownFile={onOpenMarkdownFile}
-              onOpenImageAttachment={onOpenImageAttachment}
-              onOpenTask={onOpenTask}
-              onUpdateTaskStatus={onUpdateTaskStatus}
-              onLandTask={onLandTask}
-              onStopMessage={onStopMessage}
-            />
-          )}
+      <div className="relative flex-1 min-h-0 flex flex-col">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleChatScroll}
+          onWheel={handleChatWheel}
+          onTouchStart={handleChatTouchStart}
+          onTouchMove={handleChatTouchMove}
+          onTouchEnd={handleChatTouchEnd}
+          onTouchCancel={handleChatTouchEnd}
+          onPointerDown={handleChatPointerDown}
+          onKeyDown={handleChatKeyDown}
+          className="flex-1 overflow-y-auto px-5 py-6"
+        >
+          <div ref={contentContainerRef} className="max-w-[740px] mx-auto space-y-5">
+            {snapshot.messages.length === 0 ? (
+              <EmptyWelcome
+                projectCount={snapshot.projects.length}
+                recentProjectNames={recentProjectNames}
+                locale={activeLocale}
+                onAddProject={onAddProject}
+                onPickPrompt={handlePickWelcomePrompt}
+              />
+            ) : (
+              <ChatMessageList
+                messages={snapshot.messages}
+                projects={snapshot.projects}
+                tasks={snapshot.tasks}
+                defaultIntegrationMode={snapshot.defaultIntegrationMode}
+                locale={activeLocale}
+                highlightedMessageId={highlightedMessageId}
+                registerMessageEl={registerMessageEl}
+                onOpenUrl={onOpenUrl}
+                onOpenMarkdownFile={onOpenMarkdownFile}
+                onOpenImageAttachment={onOpenImageAttachment}
+                onOpenTask={onOpenTask}
+                onUpdateTaskStatus={onUpdateTaskStatus}
+                onLandTask={onLandTask}
+                onStopMessage={onStopMessage}
+              />
+            )}
+          </div>
         </div>
+
+        <ScrollToBottomButton
+          visible={showScrollToBottom}
+          locale={activeLocale}
+          onClick={handleScrollToBottomClick}
+        />
       </div>
 
       {/* Non-Blocking Composer */}
@@ -1718,6 +1793,34 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     </section>
   );
 };
+
+export interface ScrollToBottomButtonProps {
+  visible: boolean;
+  locale: UiLocale;
+  onClick: () => void;
+}
+
+export const ScrollToBottomButton: React.FC<ScrollToBottomButtonProps> = React.memo(
+  ({ visible, locale, onClick }) => {
+    if (!visible) return null;
+    const label = t(locale, "chat.scrollToBottom");
+    return (
+      <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-4">
+        <button
+          type="button"
+          data-testid="chat-scroll-to-bottom-btn"
+          onClick={onClick}
+          title={label}
+          aria-label={label}
+          className="pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11.5px] font-medium border border-zinc-200/90 dark:border-zinc-700/90 bg-white/95 dark:bg-[#191d26]/95 backdrop-blur-md text-zinc-700 dark:text-zinc-200 shadow-md shadow-zinc-950/10 dark:shadow-black/35 hover:border-indigo-500/50 hover:text-indigo-600 dark:hover:text-indigo-300 hover:bg-white dark:hover:bg-[#1f2430] active:scale-[0.98] transition-all cursor-pointer"
+        >
+          <ArrowDown className="w-3.5 h-3.5 shrink-0" />
+          <span>{label}</span>
+        </button>
+      </div>
+    );
+  },
+);
 
 const ChatMessageItem: React.FC<{
   message: ChatMessage;
