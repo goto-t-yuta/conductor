@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -15,6 +15,11 @@ import {
   type MentionSuggestion,
 } from "../../shared/mentions.js";
 import { formatTaskStatusLabel, t, type UiLocale } from "../../shared/i18n.js";
+import {
+  MENTION_POPOVER_BATCH_SIZE,
+  MENTION_POPOVER_INITIAL_LIMIT,
+  computeMentionPopoverVisibleCount,
+} from "../lib/composer-perf.js";
 import { ProjectNamePill, TaskCodePill } from "./MentionChips.js";
 
 interface MentionPopoverProps {
@@ -49,7 +54,7 @@ function compactPath(fullPath: string): string {
   return `${parts[0]}/…/${parts.slice(-2).join("/")}`;
 }
 
-export const MentionPopover: React.FC<MentionPopoverProps> = ({
+export const MentionPopover: React.FC<MentionPopoverProps> = React.memo(({
   query,
   suggestions,
   scopedProject,
@@ -59,13 +64,39 @@ export const MentionPopover: React.FC<MentionPopoverProps> = ({
   onSelect,
 }) => {
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [renderLimit, setRenderLimit] = useState(MENTION_POPOVER_INITIAL_LIMIT);
+
+  useEffect(() => {
+    setRenderLimit(MENTION_POPOVER_INITIAL_LIMIT);
+  }, [query.start, query.rawQuery, query.mode]);
+
+  const visibleCount = computeMentionPopoverVisibleCount(
+    suggestions.length,
+    activeIndex,
+    renderLimit,
+    MENTION_POPOVER_BATCH_SIZE,
+  );
+  const visibleSuggestions =
+    visibleCount < suggestions.length ? suggestions.slice(0, visibleCount) : suggestions;
+  const remainingCount = suggestions.length - visibleSuggestions.length;
 
   useEffect(() => {
     const activeEl = itemRefs.current[activeIndex];
     if (activeEl) {
       activeEl.scrollIntoView({ block: "nearest" });
     }
-  }, [activeIndex, suggestions.length]);
+  }, [activeIndex, visibleCount]);
+
+  const handleListScroll = useCallback(
+    (e: React.UIEvent<HTMLDivElement>) => {
+      if (remainingCount <= 0) return;
+      const el = e.currentTarget;
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 80) {
+        setRenderLimit((prev) => Math.min(suggestions.length, prev + MENTION_POPOVER_BATCH_SIZE));
+      }
+    },
+    [remainingCount, suggestions.length],
+  );
 
   const headerTitle =
     query.mode === "project_tasks"
@@ -103,10 +134,13 @@ export const MentionPopover: React.FC<MentionPopoverProps> = ({
             : t(locale, "mention.noMatches")}
         </div>
       ) : (
-        <div className="max-h-72 overflow-y-auto py-1">
-          {suggestions.map((item, idx) => {
+        <div
+          onScroll={handleListScroll}
+          className="max-h-72 overflow-y-auto py-1"
+        >
+          {visibleSuggestions.map((item, idx) => {
             const isActive = idx === activeIndex;
-            const prevKind = idx > 0 ? suggestions[idx - 1].kind : null;
+            const prevKind = idx > 0 ? visibleSuggestions[idx - 1].kind : null;
             const showDivider = query.mode === "all" && prevKind !== null && prevKind !== item.kind;
 
             return (
@@ -183,8 +217,23 @@ export const MentionPopover: React.FC<MentionPopoverProps> = ({
               </React.Fragment>
             );
           })}
+          {remainingCount > 0 && (
+            <button
+              type="button"
+              data-testid="mention-popover-load-more"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setRenderLimit((prev) =>
+                  Math.min(suggestions.length, prev + MENTION_POPOVER_BATCH_SIZE),
+                );
+              }}
+              className="w-full px-3 py-1.5 text-center text-[11px] text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/70 transition-colors cursor-pointer"
+            >
+              +{remainingCount}
+            </button>
+          )}
         </div>
       )}
     </div>
   );
-};
+});

@@ -58,6 +58,7 @@ import {
   reconcileUnreadReplies,
   type QuestionItem,
 } from "./lib/questions.js";
+import { stabilizeMentionTasks } from "./lib/composer-perf.js";
 import { reconcileAppSnapshot } from "./lib/snapshot-reconcile.js";
 import {
   activateTabInWorkspace,
@@ -148,12 +149,13 @@ function normalizeUrlForCompare(raw: string): string {
   }
 }
 
+const EMPTY_APP_TASKS: AgentTask[] = [];
+const EMPTY_APP_PROJECTS: Project[] = [];
+
 export const App: React.FC = () => {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
-  const [composerText, setComposerText] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [selectedMentions, setSelectedMentions] = useState<ExplicitMentionTarget[]>([]);
-  const composerTextRef = useRef("");
   const attachmentsRef = useRef<ChatAttachment[]>([]);
   const selectedMentionsRef = useRef<ExplicitMentionTarget[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -207,11 +209,6 @@ export const App: React.FC = () => {
       voiceQueueRef.current = [];
       void stopAllVoicePlayback();
     };
-  }, []);
-
-  const updateComposerText = useCallback((nextText: string) => {
-    composerTextRef.current = nextText;
-    setComposerText(nextText);
   }, []);
 
   const updateAttachments = useCallback(
@@ -401,13 +398,20 @@ export const App: React.FC = () => {
   const uiLocaleRef = useRef(uiLocale);
   uiLocaleRef.current = uiLocale;
 
+  const stableMentionTasksRef = useRef<AgentTask[]>(EMPTY_APP_TASKS);
+  const stableMentionTasks = stabilizeMentionTasks(
+    stableMentionTasksRef.current,
+    snapshot?.tasks ?? EMPTY_APP_TASKS,
+  );
+  stableMentionTasksRef.current = stableMentionTasks;
+
   const questions = useMemo(
     () =>
       deriveQuestionItems(snapshot?.messages ?? [], unreadReplyIds, uiLocale, {
-        projects: snapshot?.projects ?? [],
-        tasks: snapshot?.tasks ?? [],
+        projects: snapshot?.projects ?? EMPTY_APP_PROJECTS,
+        tasks: stableMentionTasks,
       }),
-    [snapshot?.messages, snapshot?.projects, snapshot?.tasks, unreadReplyIds, uiLocale],
+    [snapshot?.messages, snapshot?.projects, stableMentionTasks, unreadReplyIds, uiLocale],
   );
 
   useEffect(() => {
@@ -1786,35 +1790,37 @@ export const App: React.FC = () => {
     window.addEventListener("mouseup", onUp);
   };
 
-  const handleSend = useCallback(() => {
-    const snap = snapshotRef.current;
-    if (!snap) return;
-    const text = composerTextRef.current;
-    const atts = [...attachmentsRef.current];
-    const mentions = [...selectedMentionsRef.current];
-    if (!text.trim() && atts.length === 0) return;
+  const handleSend = useCallback(
+    (submittedText?: string) => {
+      const snap = snapshotRef.current;
+      if (!snap) return;
+      const text = submittedText ?? "";
+      const atts = [...attachmentsRef.current];
+      const mentions = [...selectedMentionsRef.current];
+      if (!text.trim() && atts.length === 0) return;
 
-    updateComposerText("");
-    updateAttachments([]);
-    updateSelectedMentions([]);
+      updateAttachments([]);
+      updateSelectedMentions([]);
 
-    // Automatically switch the right-pane project scope when the user mentions a project or task
-    const mentionedProject = resolveProjectFromChatText(
-      text,
-      snap.projects,
-      snap.tasks,
-      mentions,
-    );
-    if (mentionedProject) {
-      setWorkspaceState((prev) => switchActiveProjectScope(prev, mentionedProject.id));
-    }
+      // Automatically switch the right-pane project scope when the user mentions a project or task
+      const mentionedProject = resolveProjectFromChatText(
+        text,
+        snap.projects,
+        snap.tasks,
+        mentions,
+      );
+      if (mentionedProject) {
+        setWorkspaceState((prev) => switchActiveProjectScope(prev, mentionedProject.id));
+      }
 
-    void window.conductor.sendMessage({
-      text,
-      attachments: atts,
-      ...(mentions.length > 0 ? { mentions } : {}),
-    });
-  }, [updateComposerText, updateAttachments, updateSelectedMentions]);
+      void window.conductor.sendMessage({
+        text,
+        attachments: atts,
+        ...(mentions.length > 0 ? { mentions } : {}),
+      });
+    },
+    [updateAttachments, updateSelectedMentions],
+  );
 
   const handleAttachCurrentUrl = useCallback(() => {
     const snap = snapshotRef.current;
@@ -2295,14 +2301,12 @@ export const App: React.FC = () => {
         <UnifiedChat
           snapshot={snapshot}
           locale={uiLocale}
-          composerText={composerText}
           attachments={attachments}
           selectedMentions={selectedMentions}
           jumpRequest={jumpRequest}
           unreadReplyIds={unreadReplyIds}
           onMarkMessagesRead={handleMarkMessagesRead}
           isMessageVisibleRef={isMessageVisibleRef}
-          onComposerTextChange={updateComposerText}
           onAddMention={handleAddMention}
           onRemoveMention={handleRemoveMention}
           onRemoveAttachment={handleRemoveAttachment}

@@ -58,7 +58,7 @@ function providerShortLabel(provider?: AgentProvider): string | null {
   }
 }
 
-export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
+export const ChatSessionControls: React.FC<ChatSessionControlsProps> = React.memo(({
   sessions,
   activeSessionId,
   activeMessageCount,
@@ -436,4 +436,4 @@ export const ChatSessionControls: React.FC<ChatSessionControlsProps> = ({
       </div>
     </div>
   );
-};
+});

@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import type { AgentTask, AgentTaskStatus, IntegrationMode, Project } from "../../shared/types.js";
 import { t, type UiLocale } from "../../shared/i18n.js";
-import { formatTaskCode } from "../../shared/mentions.js";
+import { findProjectForTask, formatTaskCode } from "../../shared/mentions.js";
 import {
   getLocalizedMarkTaskDoneBlockedReason,
   requiresLandBeforeDone,
@@ -96,13 +96,11 @@ export interface TaskSidebarProps {
 }
 
 function findTaskProject(projects: Project[], task: AgentTask): Project | undefined {
-  const byId = task.projectId ? projects.find((p) => p.id === task.projectId) : undefined;
-  if (byId) return byId;
-  return projects.find((p) => p.name.toLowerCase() === task.projectName.toLowerCase());
+  return findProjectForTask(projects, task);
 }
 
 function projectColor(projects: Project[], task: AgentTask): string {
-  return findTaskProject(projects, task)?.colorHex ?? "#6366F1";
+  return findProjectForTask(projects, task)?.colorHex ?? "#6366F1";
 }
 
 function TaskStatusIcon({ status }: { status: AgentTask["status"] }) {

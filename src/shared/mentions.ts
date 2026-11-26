@@ -126,19 +126,135 @@ const EMAIL_LOCAL_CHAR_RE = /[A-Za-z0-9._+-]/;
 const ASCII_TOKEN_CHAR_RE = /[A-Za-z0-9_-]/;
 const HARD_BREAK_RE = /[\s@/,、。！？!?()[\]{}<>"'「」『』【】;:`]/;
 
+interface IndexedProjectEntry {
+  project: Project;
+  index: number;
+  lowerName: string;
+  lowerPath: string;
+  length: number;
+}
+
+interface ProjectMentionIndex {
+  sourceLength: number;
+  byId: Map<string, Project>;
+  byLowerName: Map<string, Project>;
+  byNormalizedPath: Map<string, Project>;
+  sortedByLength: IndexedProjectEntry[];
+  searchEntries: IndexedProjectEntry[];
+}
+
+interface IndexedTaskEntry {
+  task: AgentTask;
+  lowerCode: string;
+  numStr: string;
+  lowerTitle: string;
+  lowerProjectName: string;
+}
+
+interface TaskMentionIndex {
+  sourceLength: number;
+  byId: Map<string, AgentTask>;
+  byNumber: Map<number, AgentTask>;
+  countsByProjectKey: Map<string, number>;
+  searchEntries: IndexedTaskEntry[];
+}
+
+const projectMentionIndexCache = new WeakMap<readonly Project[], ProjectMentionIndex>();
+const taskMentionIndexCache = new WeakMap<readonly AgentTask[], TaskMentionIndex>();
+
+function getProjectMentionIndex(projects: readonly Project[]): ProjectMentionIndex {
+  const cached = projectMentionIndexCache.get(projects);
+  if (cached && cached.sourceLength === projects.length) {
+    return cached;
+  }
+
+  const byId = new Map<string, Project>();
+  const byLowerName = new Map<string, Project>();
+  const byNormalizedPath = new Map<string, Project>();
+  const searchEntries: IndexedProjectEntry[] = new Array(projects.length);
+
+  for (let i = 0; i < projects.length; i += 1) {
+    const project = projects[i];
+    const lowerName = project.name.toLowerCase();
+    const lowerPath = project.path.toLowerCase();
+    if (!byId.has(project.id)) byId.set(project.id, project);
+    if (lowerName && !byLowerName.has(lowerName)) byLowerName.set(lowerName, project);
+    const normalizedPath = project.path.replace(/\/+$/, "");
+    if (normalizedPath && !byNormalizedPath.has(normalizedPath)) {
+      byNormalizedPath.set(normalizedPath, project);
+    }
+    searchEntries[i] = {
+      project,
+      index: i,
+      lowerName,
+      lowerPath,
+      length: project.name.length,
+    };
+  }
+
+  const sortedByLength = [...searchEntries].sort((a, b) => b.length - a.length);
+  const index: ProjectMentionIndex = {
+    sourceLength: projects.length,
+    byId,
+    byLowerName,
+    byNormalizedPath,
+    sortedByLength,
+    searchEntries,
+  };
+  projectMentionIndexCache.set(projects, index);
+  return index;
+}
+
+function getTaskMentionIndex(tasks: readonly AgentTask[]): TaskMentionIndex {
+  const cached = taskMentionIndexCache.get(tasks);
+  if (cached && cached.sourceLength === tasks.length) {
+    return cached;
+  }
+
+  const byId = new Map<string, AgentTask>();
+  const byNumber = new Map<number, AgentTask>();
+  const countsByProjectKey = new Map<string, number>();
+  const searchEntries: IndexedTaskEntry[] = new Array(tasks.length);
+
+  for (let i = 0; i < tasks.length; i += 1) {
+    const task = tasks[i];
+    const lowerProjectName = task.projectName.toLowerCase();
+    if (!byId.has(task.id)) byId.set(task.id, task);
+    if (!byNumber.has(task.taskNumber)) byNumber.set(task.taskNumber, task);
+    const countKey = task.projectId ?? lowerProjectName;
+    countsByProjectKey.set(countKey, (countsByProjectKey.get(countKey) ?? 0) + 1);
+    searchEntries[i] = {
+      task,
+      lowerCode: `t${task.taskNumber}`,
+      numStr: String(task.taskNumber),
+      lowerTitle: task.title.toLowerCase(),
+      lowerProjectName,
+    };
+  }
+
+  const index: TaskMentionIndex = {
+    sourceLength: tasks.length,
+    byId,
+    byNumber,
+    countsByProjectKey,
+    searchEntries,
+  };
+  taskMentionIndexCache.set(tasks, index);
+  return index;
+}
+
 function isValidMentionPrefix(text: string, atIndex: number): boolean {
   if (atIndex === 0) return true;
   const prev = text[atIndex - 1];
   return !EMAIL_LOCAL_CHAR_RE.test(prev);
 }
 
-function findProjectByName(projects: Project[], name: string): Project | undefined {
-  const lower = name.toLowerCase();
-  return projects.find((p) => p.name.toLowerCase() === lower);
+function findProjectByName(projects: readonly Project[], name: string): Project | undefined {
+  return getProjectMentionIndex(projects).byLowerName.get(name.toLowerCase());
 }
 
-function findTaskByNumber(tasks: AgentTask[], taskNumber: number): AgentTask | undefined {
-  return tasks.find((t) => t.taskNumber === taskNumber);
+function findTaskByNumber(tasks: readonly AgentTask[], taskNumber: number): AgentTask | undefined {
+  return getTaskMentionIndex(tasks).byNumber.get(taskNumber);
 }
 
 /**
@@ -150,35 +266,53 @@ export function parseAndResolveMentions(
   projects: Project[],
   tasks: AgentTask[],
 ): ResolvedMentions {
+  if (!text || !text.includes("@")) {
+    return {
+      mentions: [],
+      projects: [],
+      tasks: [],
+      unresolvedTaskCodes: [],
+    };
+  }
+
   const mentions: ParsedMention[] = [];
   const resolvedProjectMap = new Map<string, Project>();
   const resolvedTaskMap = new Map<string, AgentTask>();
   const unresolvedTaskSet = new Set<string>();
 
-  // Sort projects longest name first so `@my-app-v2` matches before `@my-app`.
-  const projectsByLength = [...projects].sort((a, b) => b.name.length - a.name.length);
+  // Use cached length-sorted project entries so `@my-app-v2` matches before `@my-app`
+  // without re-sorting 90+ projects on every keystroke.
+  const projectIndex = getProjectMentionIndex(projects);
+  const taskIndex = getTaskMentionIndex(tasks);
+  const projectsByLength = projectIndex.sortedByLength;
 
   let i = 0;
   while (i < text.length) {
-    if (text[i] !== "@" || !isValidMentionPrefix(text, i)) {
+    const nextAt = text.indexOf("@", i);
+    if (nextAt === -1) break;
+    i = nextAt;
+    if (!isValidMentionPrefix(text, i)) {
       i += 1;
       continue;
     }
 
     const rest = text.slice(i + 1);
+    const restLower = rest.toLowerCase();
 
     // 1. Try `@<projectName>/T<number>` (exact known project prefix first, then generic token)
     let matchedProjectTask = false;
-    for (const proj of projectsByLength) {
-      const candidatePrefix = rest.slice(0, proj.name.length);
-      if (candidatePrefix.toLowerCase() === proj.name.toLowerCase() && rest[proj.name.length] === "/") {
-        const afterSlash = rest.slice(proj.name.length + 1);
+    for (const entry of projectsByLength) {
+      const projLen = entry.length;
+      if (projLen === 0 || rest.length <= projLen || rest[projLen] !== "/") continue;
+      if (restLower.startsWith(entry.lowerName)) {
+        const afterSlash = rest.slice(projLen + 1);
         const taskMatch = afterSlash.match(/^[Tt](\d+)(?![A-Za-z0-9_/-])/);
         if (taskMatch) {
+          const proj = entry.project;
           const taskNumber = Number(taskMatch[1]);
-          const fullLen = 1 + proj.name.length + 1 + taskMatch[0].length;
+          const fullLen = 1 + projLen + 1 + taskMatch[0].length;
           const raw = text.slice(i, i + fullLen);
-          const task = findTaskByNumber(tasks, taskNumber);
+          const task = taskIndex.byNumber.get(taskNumber);
           mentions.push({
             raw,
             start: i,
@@ -210,8 +344,8 @@ export function parseAndResolveMentions(
       const taskNumber = Number(genericProjTask[2]);
       const fullLen = 1 + genericProjTask[0].length;
       const raw = text.slice(i, i + fullLen);
-      const project = findProjectByName(projects, projToken);
-      const task = findTaskByNumber(tasks, taskNumber);
+      const project = projectIndex.byLowerName.get(projToken.toLowerCase());
+      const task = taskIndex.byNumber.get(taskNumber);
       mentions.push({
         raw,
         start: i,
@@ -238,7 +372,7 @@ export function parseAndResolveMentions(
       const taskNumber = Number(taskOnlyMatch[1]);
       const fullLen = 1 + taskOnlyMatch[0].length;
       const raw = text.slice(i, i + fullLen);
-      const task = findTaskByNumber(tasks, taskNumber);
+      const task = taskIndex.byNumber.get(taskNumber);
       mentions.push({
         raw,
         start: i,
@@ -258,23 +392,24 @@ export function parseAndResolveMentions(
 
     // 3. Try `@<projectName>` against all known projects (longest match first)
     let matchedProject = false;
-    for (const proj of projectsByLength) {
-      if (!proj.name) continue;
-      const candidate = rest.slice(0, proj.name.length);
-      if (candidate.toLowerCase() !== proj.name.toLowerCase()) continue;
+    for (const entry of projectsByLength) {
+      const projLen = entry.length;
+      if (projLen === 0 || rest.length < projLen) continue;
+      if (!restLower.startsWith(entry.lowerName)) continue;
 
-      const nextChar = rest[proj.name.length];
+      const proj = entry.project;
+      const nextChar = rest[projLen];
       // Prevent matching `@app` inside `@apple` or `@app/foo`
       if (nextChar === "/") continue;
       if (
         nextChar !== undefined &&
-        ASCII_TOKEN_CHAR_RE.test(proj.name[proj.name.length - 1]) &&
+        ASCII_TOKEN_CHAR_RE.test(proj.name[projLen - 1]) &&
         ASCII_TOKEN_CHAR_RE.test(nextChar)
       ) {
         continue;
       }
 
-      const fullLen = 1 + proj.name.length;
+      const fullLen = 1 + projLen;
       const raw = text.slice(i, i + fullLen);
       mentions.push({
         raw,
@@ -306,18 +441,18 @@ function findProjectForExplicitTarget(
   projects: readonly Project[],
   target: Extract<ExplicitMentionTarget, { kind: "project" }>,
 ): Project | undefined {
+  const index = getProjectMentionIndex(projects);
   if (target.projectId) {
-    const byId = projects.find((p) => p.id === target.projectId);
+    const byId = index.byId.get(target.projectId);
     if (byId) return byId;
   }
   if (target.projectPath) {
     const normalizedTargetPath = target.projectPath.replace(/\/+$/, "");
-    const byPath = projects.find((p) => p.path.replace(/\/+$/, "") === normalizedTargetPath);
+    const byPath = index.byNormalizedPath.get(normalizedTargetPath);
     if (byPath) return byPath;
   }
   if (target.projectName) {
-    const lower = target.projectName.toLowerCase();
-    return projects.find((p) => p.name.toLowerCase() === lower);
+    return index.byLowerName.get(target.projectName.toLowerCase());
   }
   return undefined;
 }
@@ -326,12 +461,13 @@ function findTaskForExplicitTarget(
   tasks: readonly AgentTask[],
   target: Extract<ExplicitMentionTarget, { kind: "task" }>,
 ): AgentTask | undefined {
+  const index = getTaskMentionIndex(tasks);
   if (target.taskId) {
-    const byId = tasks.find((t) => t.id === target.taskId);
+    const byId = index.byId.get(target.taskId);
     if (byId) return byId;
   }
   if (typeof target.taskNumber === "number" && Number.isInteger(target.taskNumber) && target.taskNumber > 0) {
-    return tasks.find((t) => t.taskNumber === target.taskNumber);
+    return index.byNumber.get(target.taskNumber);
   }
   return undefined;
 }
@@ -928,6 +1064,9 @@ export function resolveMessageMentionBadges(
     });
   };
 
+  const projectIndex = getProjectMentionIndex(projects);
+  const taskIndex = getTaskMentionIndex(tasks);
+
   const hydrateMentionSnapshots = (
     snapshots: readonly ChatMessageMentionRef[] | undefined,
     source: ResolvedMessageMentionBadgeSource,
@@ -936,8 +1075,7 @@ export function resolveMessageMentionBadges(
     for (const snap of snapshots) {
       if (snap.kind === "task") {
         const liveTask =
-          tasks.find((t) => t.id === snap.taskId) ??
-          tasks.find((t) => t.taskNumber === snap.taskNumber);
+          taskIndex.byId.get(snap.taskId) ?? taskIndex.byNumber.get(snap.taskNumber);
         if (liveTask) {
           const liveProject = findProjectForTask(projects, liveTask);
           addTaskBadge(
@@ -956,8 +1094,8 @@ export function resolveMessageMentionBadges(
           );
         } else {
           const liveProject =
-            (snap.projectId ? projects.find((p) => p.id === snap.projectId) : undefined) ??
-            projects.find((p) => p.name.toLowerCase() === snap.projectName.toLowerCase());
+            (snap.projectId ? projectIndex.byId.get(snap.projectId) : undefined) ??
+            projectIndex.byLowerName.get(snap.projectName.toLowerCase());
           addTaskBadge(
             {
               taskId: snap.taskId,
@@ -975,8 +1113,8 @@ export function resolveMessageMentionBadges(
         }
       } else if (snap.kind === "project") {
         const liveProject =
-          (snap.projectId ? projects.find((p) => p.id === snap.projectId) : undefined) ??
-          projects.find((p) => p.name.toLowerCase() === snap.projectName.toLowerCase());
+          (snap.projectId ? projectIndex.byId.get(snap.projectId) : undefined) ??
+          projectIndex.byLowerName.get(snap.projectName.toLowerCase());
         if (liveProject) {
           addProjectBadge(
             {
@@ -1109,60 +1247,64 @@ export function findProjectForTask(
   projects: readonly Project[],
   task: AgentTask,
 ): Project | undefined {
+  const index = getProjectMentionIndex(projects);
   if (task.projectId) {
-    const byId = projects.find((p) => p.id === task.projectId);
+    const byId = index.byId.get(task.projectId);
     if (byId) return byId;
   }
   const lowerName = task.projectName.toLowerCase();
-  return projects.find((p) => p.name.toLowerCase() === lowerName);
+  return lowerName ? index.byLowerName.get(lowerName) : undefined;
 }
 
 export function getProjectColorForTask(projects: readonly Project[], task: AgentTask): string {
   return findProjectForTask(projects, task)?.colorHex ?? "#6366F1";
 }
 
-function projectColorForTask(projects: readonly Project[], task: AgentTask): string {
-  return getProjectColorForTask(projects, task);
+function projectColorForTask(
+  projectIndex: ProjectMentionIndex,
+  task: AgentTask,
+  lowerProjectName?: string,
+): string {
+  if (task.projectId) {
+    const byId = projectIndex.byId.get(task.projectId);
+    if (byId) return byId.colorHex;
+  }
+  const key = lowerProjectName ?? task.projectName.toLowerCase();
+  return (key ? projectIndex.byLowerName.get(key)?.colorHex : undefined) ?? "#6366F1";
 }
 
-function taskBelongsToProject(task: AgentTask, project: Project): boolean {
+function taskBelongsToProject(task: AgentTask, project: Project, projectLowerName: string): boolean {
   if (task.projectId && task.projectId === project.id) return true;
   if (task.projectPath && task.projectPath === project.path) return true;
-  return task.projectName.toLowerCase() === project.name.toLowerCase();
+  return task.projectName.toLowerCase() === projectLowerName;
 }
 
-function scoreTaskMatch(task: AgentTask, q: string): number {
-  const code = formatTaskCode(task.taskNumber).toLowerCase();
-  const numStr = String(task.taskNumber);
-  const title = task.title.toLowerCase();
-  const proj = task.projectName.toLowerCase();
-
+function scoreIndexedTaskMatch(entry: IndexedTaskEntry, q: string): number {
   if (!q) {
     // Active tasks surface first
-    if (task.status === "running") return 50;
-    if (task.status === "needs_review") return 45;
-    if (task.status === "queued") return 40;
+    const status = entry.task.status;
+    if (status === "running") return 50;
+    if (status === "needs_review") return 45;
+    if (status === "queued") return 40;
     return 30;
   }
 
-  if (code === q || numStr === q) return 1000;
-  if (code.startsWith(q)) return 900;
-  if (numStr.startsWith(q)) return 850;
-  if (title.startsWith(q)) return 700;
-  if (proj.startsWith(q)) return 650;
-  if (title.includes(q)) return 550;
-  if (proj.includes(q)) return 500;
+  if (entry.lowerCode === q || entry.numStr === q) return 1000;
+  if (entry.lowerCode.startsWith(q)) return 900;
+  if (entry.numStr.startsWith(q)) return 850;
+  if (entry.lowerTitle.startsWith(q)) return 700;
+  if (entry.lowerProjectName.startsWith(q)) return 650;
+  if (entry.lowerTitle.includes(q)) return 550;
+  if (entry.lowerProjectName.includes(q)) return 500;
   return -1;
 }
 
-function scoreProjectMatch(project: Project, q: string): number {
-  const name = project.name.toLowerCase();
-  const fullPath = project.path.toLowerCase();
+function scoreIndexedProjectMatch(entry: IndexedProjectEntry, q: string): number {
   if (!q) return 100;
-  if (name === q) return 950;
-  if (name.startsWith(q)) return 800;
-  if (name.includes(q)) return 600;
-  if (fullPath.includes(q)) return 400;
+  if (entry.lowerName === q) return 950;
+  if (entry.lowerName.startsWith(q)) return 800;
+  if (entry.lowerName.includes(q)) return 600;
+  if (entry.lowerPath.includes(q)) return 400;
   return -1;
 }
 
@@ -1178,30 +1320,42 @@ export function getMentionSuggestions(
   suggestions: MentionSuggestion[];
   scopedProject: Project | null;
 } {
+  const projectIndex = getProjectMentionIndex(projects);
+  const taskIndex = getTaskMentionIndex(tasks);
+
   if (query.mode === "project_tasks") {
     const pq = query.projectQuery.toLowerCase();
     const scopedProject =
-      projects.find((p) => p.name.toLowerCase() === pq) ??
-      projects.find((p) => p.name.toLowerCase().startsWith(pq)) ??
+      projectIndex.byLowerName.get(pq) ??
+      projectIndex.searchEntries.find((entry) => entry.lowerName.startsWith(pq))?.project ??
       null;
 
-    const candidateTasks = scopedProject
-      ? tasks.filter((t) => taskBelongsToProject(t, scopedProject))
-      : tasks.filter((t) => t.projectName.toLowerCase() === pq);
-
+    const scopedLowerName = scopedProject ? scopedProject.name.toLowerCase() : pq;
     const tq = query.taskQuery.trim().toLowerCase();
-    const matched = candidateTasks
-      .map((task) => ({ task, score: scoreTaskMatch(task, tq) }))
-      .filter((entry) => entry.score >= 0)
-      .sort((a, b) => b.score - a.score || b.task.taskNumber - a.task.taskNumber);
+    const matched: Array<{ entry: IndexedTaskEntry; score: number }> = [];
+
+    for (const entry of taskIndex.searchEntries) {
+      const belongs = scopedProject
+        ? taskBelongsToProject(entry.task, scopedProject, scopedLowerName)
+        : entry.lowerProjectName === pq;
+      if (!belongs) continue;
+      const score = scoreIndexedTaskMatch(entry, tq);
+      if (score >= 0) {
+        matched.push({ entry, score });
+      }
+    }
+
+    matched.sort((a, b) => b.score - a.score || b.entry.task.taskNumber - a.entry.task.taskNumber);
 
     const projLabel = scopedProject?.name ?? query.projectQuery;
-    const suggestions: MentionSuggestion[] = matched.map(({ task }) => ({
-      id: `task:${projLabel}:${task.id}`,
+    const suggestions: MentionSuggestion[] = matched.map(({ entry }) => ({
+      id: `task:${projLabel}:${entry.task.id}`,
       kind: "task",
-      task,
-      projectColorHex: scopedProject?.colorHex ?? projectColorForTask(projects, task),
-      insertText: `@${projLabel}/${formatTaskCode(task.taskNumber)}`,
+      task: entry.task,
+      projectColorHex:
+        scopedProject?.colorHex ??
+        projectColorForTask(projectIndex, entry.task, entry.lowerProjectName),
+      insertText: `@${projLabel}/${formatTaskCode(entry.task.taskNumber)}`,
       scopedProjectName: projLabel,
     }));
 
@@ -1210,49 +1364,62 @@ export function getMentionSuggestions(
 
   const q = query.rawQuery.trim().toLowerCase();
   const isTaskCodeQuery = /^t\d*$/i.test(q);
+  const taskCounts = taskIndex.countsByProjectKey;
 
-  // Count tasks per project for subtle UI hints
-  const taskCounts = new Map<string, number>();
-  for (const t of tasks) {
-    const key = t.projectId ?? t.projectName.toLowerCase();
-    taskCounts.set(key, (taskCounts.get(key) ?? 0) + 1);
+  const scoredTasks: Array<{ entry: IndexedTaskEntry; score: number }> = [];
+  for (const entry of taskIndex.searchEntries) {
+    const score = scoreIndexedTaskMatch(entry, q);
+    if (score >= 0) {
+      scoredTasks.push({ entry, score });
+    }
   }
+  scoredTasks.sort(
+    (a, b) => b.score - a.score || b.entry.task.taskNumber - a.entry.task.taskNumber,
+  );
 
-  const matchedTasks = tasks
-    .map((task) => ({ task, score: scoreTaskMatch(task, q) }))
-    .filter((entry) => entry.score >= 0)
-    .sort((a, b) => b.score - a.score || b.task.taskNumber - a.task.taskNumber)
-    .map<MentionSuggestion>(({ task }) => ({
-      id: `task:${task.id}`,
-      kind: "task",
-      task,
-      projectColorHex: projectColorForTask(projects, task),
-      insertText: `@${formatTaskCode(task.taskNumber)}`,
-    }));
+  const scoredProjects: Array<{ entry: IndexedProjectEntry; score: number }> = [];
+  for (const entry of projectIndex.searchEntries) {
+    const score = scoreIndexedProjectMatch(entry, q);
+    if (score >= 0) {
+      scoredProjects.push({ entry, score });
+    }
+  }
+  scoredProjects.sort((a, b) => b.score - a.score || a.entry.index - b.entry.index);
 
-  const matchedProjects = projects
-    .map((project, index) => ({ project, index, score: scoreProjectMatch(project, q) }))
-    .filter((entry) => entry.score >= 0)
-    .sort((a, b) => b.score - a.score || a.index - b.index)
-    .map<MentionSuggestion>(({ project }) => ({
-      id: `project:${project.id}`,
-      kind: "project",
-      project,
-      taskCount: taskCounts.get(project.id) ?? taskCounts.get(project.name.toLowerCase()) ?? 0,
-      insertText: `@${project.name}`,
-    }));
+  const toTaskSuggestion = (entry: IndexedTaskEntry): MentionSuggestion => ({
+    id: `task:${entry.task.id}`,
+    kind: "task",
+    task: entry.task,
+    projectColorHex: projectColorForTask(projectIndex, entry.task, entry.lowerProjectName),
+    insertText: `@${formatTaskCode(entry.task.taskNumber)}`,
+  });
+
+  const matchedProjects: MentionSuggestion[] = scoredProjects.map(({ entry }) => ({
+    id: `project:${entry.project.id}`,
+    kind: "project",
+    project: entry.project,
+    taskCount: taskCounts.get(entry.project.id) ?? taskCounts.get(entry.lowerName) ?? 0,
+    insertText: `@${entry.project.name}`,
+  }));
 
   // When query looks like `@T` or `@T1`, put tasks first; otherwise show tasks first if empty
   // or interleave cleanly (tasks first when matching task code, projects & tasks grouped clearly).
-  const suggestions = isTaskCodeQuery
-    ? [...matchedTasks, ...matchedProjects]
-    : q.length === 0
-      ? [...matchedTasks, ...matchedProjects]
-      : [
-          ...matchedTasks.filter((item) => scoreTaskMatch((item as { task: AgentTask }).task, q) >= 850),
-          ...matchedProjects,
-          ...matchedTasks.filter((item) => scoreTaskMatch((item as { task: AgentTask }).task, q) < 850),
-        ];
+  let suggestions: MentionSuggestion[];
+  if (isTaskCodeQuery || q.length === 0) {
+    suggestions = [...scoredTasks.map((item) => toTaskSuggestion(item.entry)), ...matchedProjects];
+  } else {
+    const highPriorityTasks: MentionSuggestion[] = [];
+    const regularTasks: MentionSuggestion[] = [];
+    for (const item of scoredTasks) {
+      const suggestion = toTaskSuggestion(item.entry);
+      if (item.score >= 850) {
+        highPriorityTasks.push(suggestion);
+      } else {
+        regularTasks.push(suggestion);
+      }
+    }
+    suggestions = [...highPriorityTasks, ...matchedProjects, ...regularTasks];
+  }
 
   return { suggestions, scopedProject: null };
 }
