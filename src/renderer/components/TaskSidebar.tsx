@@ -104,7 +104,7 @@ function TaskStatusIcon({ status }: { status: AgentTask["status"] }) {
   }
 }
 
-export const TaskSidebar: React.FC<TaskSidebarProps> = ({
+export const TaskSidebar: React.FC<TaskSidebarProps> = React.memo(({
   projects,
   tasks,
   questions = [],
@@ -149,9 +149,9 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
     if (!el) return;
 
     const updateSidebarHeight = () => {
-      const nextHeight = el.getBoundingClientRect().height;
+      const nextHeight = Math.round(el.getBoundingClientRect().height);
       if (nextHeight > 0) {
-        setSidebarHeight(nextHeight);
+        setSidebarHeight((prev) => (prev === nextHeight ? prev : nextHeight));
       }
     };
 
@@ -743,7 +743,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
                 })}
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 tabular-nums"
               >
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                 {questionSummary.unreadCount}
               </span>
             )}
@@ -776,7 +776,7 @@ export const TaskSidebar: React.FC<TaskSidebarProps> = ({
       </div>
     </aside>
   );
-};
+});
 
 export interface TaskCardProps {
   task: AgentTask;
@@ -830,7 +830,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   return (
     <div
       onClick={onSelect}
-      className={`group rounded-xl p-2.5 border transition-all cursor-pointer ${
+      className={`group rounded-xl p-2.5 border transition-colors cursor-pointer ${
         isSelected
           ? "bg-indigo-500/10 border-indigo-500/50"
           : isDone
@@ -1119,7 +1119,7 @@ const QuestionCard: React.FC<{
   item: QuestionItem;
   locale: UiLocale;
   onSelect: () => void;
-}> = ({ item, locale, onSelect }) => {
+}> = React.memo(({ item, locale, onSelect }) => {
   const timeLabel = formatQuestionTime(item.updatedAt);
   const providerLabel =
     item.provider === "agy" ? "AGY" : item.provider === "claude" ? "Claude" : item.provider === "codex" ? "Codex" : null;
@@ -1136,7 +1136,7 @@ const QuestionCard: React.FC<{
     <button
       type="button"
       onClick={onSelect}
-      className={`w-full text-left group rounded-xl p-2 border transition-all cursor-pointer ${cardSurface}`}
+      className={`w-full text-left group rounded-xl p-2 border transition-colors cursor-pointer ${cardSurface}`}
     >
       <div className="flex items-center gap-1.5 mb-1">
         <QuestionStatusIcon item={item} locale={locale} />
@@ -1182,4 +1182,4 @@ const QuestionCard: React.FC<{
       </div>
     </button>
   );
-};
+});

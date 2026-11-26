@@ -20,6 +20,67 @@ function detectDarkTheme(): boolean {
   return false;
 }
 
+const mermaidThemeListeners = new Set<() => void>();
+let sharedDarkTheme: boolean | null = null;
+let detachSharedThemeWatchers: (() => void) | null = null;
+
+function readSharedDarkTheme(): boolean {
+  if (sharedDarkTheme === null) {
+    sharedDarkTheme = detectDarkTheme();
+  }
+  return sharedDarkTheme;
+}
+
+function subscribeMermaidTheme(listener: () => void): () => void {
+  mermaidThemeListeners.add(listener);
+
+  if (
+    mermaidThemeListeners.size === 1 &&
+    typeof window !== "undefined" &&
+    typeof document !== "undefined"
+  ) {
+    const notifyIfChanged = () => {
+      const next = detectDarkTheme();
+      if (next !== sharedDarkTheme) {
+        sharedDarkTheme = next;
+        for (const fn of mermaidThemeListeners) {
+          fn();
+        }
+      }
+    };
+
+    sharedDarkTheme = detectDarkTheme();
+    const mql =
+      typeof window.matchMedia === "function"
+        ? window.matchMedia("(prefers-color-scheme: dark)")
+        : null;
+    mql?.addEventListener?.("change", notifyIfChanged);
+
+    const observer =
+      typeof MutationObserver !== "undefined"
+        ? new MutationObserver(notifyIfChanged)
+        : null;
+    observer?.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+
+    detachSharedThemeWatchers = () => {
+      mql?.removeEventListener?.("change", notifyIfChanged);
+      observer?.disconnect();
+      detachSharedThemeWatchers = null;
+      sharedDarkTheme = null;
+    };
+  }
+
+  return () => {
+    mermaidThemeListeners.delete(listener);
+    if (mermaidThemeListeners.size === 0 && detachSharedThemeWatchers) {
+      detachSharedThemeWatchers();
+    }
+  };
+}
+
 function useMermaidTheme(): MermaidThemeMode {
   const [isDark, setIsDark] = useState<boolean>(() => detectDarkTheme());
 
@@ -27,29 +88,10 @@ function useMermaidTheme(): MermaidThemeMode {
     if (typeof window === "undefined" || typeof document === "undefined") {
       return;
     }
-
-    const update = () => setIsDark(detectDarkTheme());
-    update();
-
-    const mql =
-      typeof window.matchMedia === "function"
-        ? window.matchMedia("(prefers-color-scheme: dark)")
-        : null;
-    mql?.addEventListener?.("change", update);
-
-    const observer =
-      typeof MutationObserver !== "undefined"
-        ? new MutationObserver(update)
-        : null;
-    observer?.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class"],
-    });
-
-    return () => {
-      mql?.removeEventListener?.("change", update);
-      observer?.disconnect();
-    };
+    const sync = () => setIsDark(readSharedDarkTheme());
+    const unsub = subscribeMermaidTheme(sync);
+    sync();
+    return unsub;
   }, []);
 
   return isDark ? "dark" : "light";
@@ -60,7 +102,7 @@ export interface MermaidBlockProps {
   locale?: UiLocale;
 }
 
-export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code, locale = "ja" }) => {
+export const MermaidBlock: React.FC<MermaidBlockProps> = React.memo(({ code, locale = "ja" }) => {
   const theme = useMermaidTheme();
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -204,4 +246,4 @@ export const MermaidBlock: React.FC<MermaidBlockProps> = ({ code, locale = "ja" 
       )}
     </div>
   );
-};
+});

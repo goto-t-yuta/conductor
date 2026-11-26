@@ -412,6 +412,7 @@ export class ConductorController {
   private readonly agyBrainBaseDir: string;
   private readonly maxIdleLanes = 2;
   private snapshotTimer: NodeJS.Timeout | null = null;
+  private lastPersistedBrowserKey: string | null = null;
 
   constructor(options: {
     store: StateStore;
@@ -510,9 +511,28 @@ export class ConductorController {
     };
   }
 
-  public notifyBrowserChanged(): void {
-    this.persist();
-    this.broadcastSnapshot();
+  public notifyBrowserChanged(options?: { persist?: boolean }): void {
+    const shouldPersist = options?.persist !== false;
+    if (shouldPersist) {
+      const nextBrowserKey = this.computePersistedBrowserKey();
+      if (nextBrowserKey !== this.lastPersistedBrowserKey) {
+        this.persist();
+      }
+      this.broadcastSnapshot();
+      return;
+    }
+    // Coalesce transient browser metadata updates (isLoading, console/network errors, picker state)
+    // so rapid CDP / navigation events never storm IPC or disk writes.
+    this.scheduleBroadcast();
+  }
+
+  private computePersistedBrowserKey(): string {
+    const activeId = this.browser.getActiveTabId() ?? "";
+    const tabs = this.browser
+      .getTabs()
+      .map((t) => `${t.id}\0${t.title}\0${t.url}\0${t.projectId ?? ""}`)
+      .join("\n");
+    return `${activeId}\n${tabs}`;
   }
 
   public async start(): Promise<void> {
@@ -5774,6 +5794,7 @@ export class ConductorController {
 
   private persist(): void {
     this.syncActiveChatSession(false);
+    this.lastPersistedBrowserKey = this.computePersistedBrowserKey();
     this.store.save({
       projects: this.projects,
       scanRoots: this.scanRoots,
@@ -5813,7 +5834,7 @@ export class ConductorController {
     this.snapshotTimer = setTimeout(() => {
       this.snapshotTimer = null;
       this.broadcastSnapshot();
-    }, 32);
+    }, 50);
   }
 
   private broadcastSnapshot(): void {

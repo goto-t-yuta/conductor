@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import type { BrowserTab } from "../../shared/types.js";
 import { t, type UiLocale } from "../../shared/i18n.js";
+import { hideBrowserBounds, syncBrowserBounds } from "../lib/browser-bounds-client.js";
 
 export interface InAppBrowserPaneProps {
   activeTab: BrowserTab | null;
@@ -34,7 +35,7 @@ export interface InAppBrowserPaneProps {
   onOpenExternal: () => void;
 }
 
-export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
+export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = React.memo(({
   activeTab,
   isPickingElement,
   hideNativeView,
@@ -64,21 +65,17 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
       return;
     }
 
+    let pendingRafId: number | null = null;
+
     const syncBounds = () => {
       const el = canvasRef.current;
       const shouldShow = !hideNativeView && Boolean(activeTab?.url) && Boolean(el);
       if (!el || !shouldShow) {
-        void window.conductor.browserSetBounds({
-          x: 0,
-          y: 0,
-          width: 0,
-          height: 0,
-          visible: false,
-        });
+        hideBrowserBounds();
         return;
       }
       const rect = el.getBoundingClientRect();
-      void window.conductor.browserSetBounds({
+      syncBrowserBounds({
         x: rect.left,
         y: rect.top,
         width: rect.width,
@@ -87,33 +84,36 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
       });
     };
 
+    const scheduleSync = () => {
+      if (typeof requestAnimationFrame === "undefined") {
+        syncBounds();
+        return;
+      }
+      if (pendingRafId !== null) return;
+      pendingRafId = requestAnimationFrame(() => {
+        pendingRafId = null;
+        syncBounds();
+      });
+    };
+
     syncBounds();
-    const rafId =
-      typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame(syncBounds) : null;
-    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(syncBounds) : null;
+    scheduleSync();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(scheduleSync) : null;
     if (ro && canvasRef.current) ro.observe(canvasRef.current);
-    window.addEventListener("resize", syncBounds);
+    window.addEventListener("resize", scheduleSync);
 
     return () => {
-      if (rafId !== null && typeof cancelAnimationFrame !== "undefined") {
-        cancelAnimationFrame(rafId);
+      if (pendingRafId !== null && typeof cancelAnimationFrame !== "undefined") {
+        cancelAnimationFrame(pendingRafId);
       }
       ro?.disconnect();
-      window.removeEventListener("resize", syncBounds);
+      window.removeEventListener("resize", scheduleSync);
     };
   }, [hideNativeView, activeTab?.id, activeTab?.url, isPickingElement, layoutSyncKey]);
 
   useEffect(() => {
     return () => {
-      if (typeof window !== "undefined" && window.conductor?.browserSetBounds) {
-        void window.conductor.browserSetBounds({
-          x: 0,
-          y: 0,
-          width: 0,
-          height: 0,
-          visible: false,
-        });
-      }
+      hideBrowserBounds();
     };
   }, []);
 
@@ -316,4 +316,4 @@ export const InAppBrowserPane: React.FC<InAppBrowserPaneProps> = ({
       </div>
     </div>
   );
-};
+});

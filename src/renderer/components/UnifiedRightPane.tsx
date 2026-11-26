@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import type { ProjectFileEntry } from "../../shared/types.js";
 import { t, type UiLocale } from "../../shared/i18n.js";
+import { hideBrowserBounds } from "../lib/browser-bounds-client.js";
 import { isMarkdownPathOrUrl } from "../lib/markdown-utils.js";
 import type {
   ProjectScopeKey,
@@ -87,7 +88,7 @@ export interface UnifiedRightPaneProps {
   onRevealInFinder: (filePath: string) => void;
 }
 
-export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
+export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = React.memo(({
   activeProjectItem,
   switcherWithTabs,
   switcherOthers,
@@ -175,35 +176,15 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
   };
 
   const handleClosePanel = () => {
-    if (typeof window !== "undefined" && window.conductor?.browserSetBounds) {
-      void window.conductor.browserSetBounds({
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        visible: false,
-      });
-    }
+    hideBrowserBounds();
     onCloseRightPane?.();
   };
 
   // Ensure Chromium WebContentsView is hidden whenever active tab is not a browser tab
   // or when the project switcher dropdown / overlay is open.
   useEffect(() => {
-    if (
-      typeof window === "undefined" ||
-      !window.conductor?.browserSetBounds
-    ) {
-      return;
-    }
     if (activeTab?.kind !== "browser" || effectiveHideNativeView) {
-      void window.conductor.browserSetBounds({
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        visible: false,
-      });
+      hideBrowserBounds();
     }
   }, [activeTab?.kind, activeTab?.id, effectiveHideNativeView]);
 
@@ -644,4 +625,4 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
       )}
     </section>
   );
-};
+});

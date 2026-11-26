@@ -98,6 +98,9 @@ import {
   type ScrollMetrics,
 } from "../lib/chat-scroll.js";
 
+const EMPTY_PROJECTS: Project[] = [];
+const EMPTY_TASKS: AgentTask[] = [];
+
 function readScrollMetrics(el: HTMLElement): ScrollMetrics {
   return {
     scrollTop: el.scrollTop,
@@ -865,6 +868,19 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     el.style.height = `${Math.min(160, Math.max(44, el.scrollHeight))}px`;
   }, [displayComposerText]);
 
+  const handlePickWelcomePrompt = useCallback(
+    (prompt: string) => {
+      onComposerTextChange(prompt);
+      textareaRef.current?.focus();
+    },
+    [onComposerTextChange],
+  );
+
+  const recentProjectNames = useMemo(
+    () => snapshot.projects.slice(0, 4).map((p) => p.name),
+    [snapshot.projects],
+  );
+
   const canSend = composerText.trim().length > 0 || attachments.length > 0;
   const handleTriggerSend = useCallback(() => {
     if (isListening || recognitionRef.current) {
@@ -911,7 +927,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             <span
               title={snapshot.connectionStatus}
               className={`w-2 h-2 rounded-full shrink-0 ${
-                snapshot.isConnected ? "bg-emerald-500" : "bg-amber-500 animate-pulse"
+                snapshot.isConnected ? "bg-emerald-500" : "bg-amber-500"
               }`}
             />
             <span className="text-[13px] font-semibold">Conductor</span>
@@ -1272,51 +1288,28 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
           {snapshot.messages.length === 0 ? (
             <EmptyWelcome
               projectCount={snapshot.projects.length}
-              recentProjectNames={snapshot.projects.slice(0, 4).map((p) => p.name)}
+              recentProjectNames={recentProjectNames}
               locale={activeLocale}
               onAddProject={onAddProject}
-              onPickPrompt={(prompt) => {
-                onComposerTextChange(prompt);
-                textareaRef.current?.focus();
-              }}
+              onPickPrompt={handlePickWelcomePrompt}
             />
           ) : (
-            snapshot.messages.map((msg) => {
-              const isHighlighted = highlightedMessageId === msg.id;
-              return (
-                <div
-                  key={msg.id}
-                  ref={(el) => registerMessageEl(msg.id, el)}
-                  data-message-id={msg.id}
-                  className={`scroll-mt-6 -mx-2.5 px-2.5 py-2 rounded-2xl transition-all duration-500 ${
-                    isHighlighted
-                      ? "bg-indigo-500/[0.09] dark:bg-indigo-500/[0.16] ring-2 ring-indigo-500/60 shadow-sm"
-                      : "ring-0 ring-transparent"
-                  }`}
-                >
-                  <MessageRow
-                    message={msg}
-                    projects={snapshot.projects}
-                    tasks={snapshot.tasks}
-                    defaultIntegrationMode={snapshot.defaultIntegrationMode}
-                    locale={activeLocale}
-                    onOpenUrl={(url) => onOpenUrl(url, { message: msg })}
-                    onOpenMarkdownFile={(target, base) =>
-                      onOpenMarkdownFile(target, base, { message: msg })
-                    }
-                    onOpenImageAttachment={
-                      onOpenImageAttachment
-                        ? (att) => onOpenImageAttachment(att, { message: msg })
-                        : undefined
-                    }
-                    onOpenTask={onOpenTask}
-                    onUpdateTaskStatus={onUpdateTaskStatus}
-                    onLandTask={onLandTask}
-                    onStop={() => onStopMessage(msg.id)}
-                  />
-                </div>
-              );
-            })
+            <ChatMessageList
+              messages={snapshot.messages}
+              projects={snapshot.projects}
+              tasks={snapshot.tasks}
+              defaultIntegrationMode={snapshot.defaultIntegrationMode}
+              locale={activeLocale}
+              highlightedMessageId={highlightedMessageId}
+              registerMessageEl={registerMessageEl}
+              onOpenUrl={onOpenUrl}
+              onOpenMarkdownFile={onOpenMarkdownFile}
+              onOpenImageAttachment={onOpenImageAttachment}
+              onOpenTask={onOpenTask}
+              onUpdateTaskStatus={onUpdateTaskStatus}
+              onLandTask={onLandTask}
+              onStopMessage={onStopMessage}
+            />
           )}
         </div>
       </div>
@@ -1721,13 +1714,182 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   );
 };
 
+const ChatMessageItem: React.FC<{
+  message: ChatMessage;
+  projects: Project[];
+  tasks: AgentTask[];
+  defaultIntegrationMode?: IntegrationMode;
+  locale: UiLocale;
+  isHighlighted: boolean;
+  registerMessageEl: (messageId: string, el: HTMLDivElement | null) => void;
+  onOpenUrl: (url: string, context?: { message?: ChatMessage }) => void;
+  onOpenMarkdownFile: (
+    target: string,
+    baseFilePath?: string,
+    context?: { message?: ChatMessage },
+  ) => void;
+  onOpenImageAttachment?: (
+    attachment: ChatAttachment,
+    context?: {
+      message?: ChatMessage;
+      draftText?: string;
+      draftMentions?: ExplicitMentionTarget[];
+    },
+  ) => void;
+  onOpenTask: (taskId: string) => void;
+  onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
+  onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
+  onStopMessage: (id: string) => void;
+}> = React.memo(({
+  message,
+  projects,
+  tasks,
+  defaultIntegrationMode,
+  locale,
+  isHighlighted,
+  registerMessageEl,
+  onOpenUrl,
+  onOpenMarkdownFile,
+  onOpenImageAttachment,
+  onOpenTask,
+  onUpdateTaskStatus,
+  onLandTask,
+  onStopMessage,
+}) => {
+  const setRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      registerMessageEl(message.id, el);
+    },
+    [registerMessageEl, message.id],
+  );
+
+  const handleOpenUrl = useCallback(
+    (url: string) => onOpenUrl(url, { message }),
+    [onOpenUrl, message],
+  );
+
+  const handleOpenMarkdownFile = useCallback(
+    (target: string, base?: string) => onOpenMarkdownFile(target, base, { message }),
+    [onOpenMarkdownFile, message],
+  );
+
+  const handleOpenImage = useCallback(
+    (att: ChatAttachment) => onOpenImageAttachment?.(att, { message }),
+    [onOpenImageAttachment, message],
+  );
+
+  const handleStop = useCallback(
+    () => onStopMessage(message.id),
+    [onStopMessage, message.id],
+  );
+
+  return (
+    <div
+      ref={setRef}
+      data-message-id={message.id}
+      className={`scroll-mt-6 -mx-2.5 px-2.5 py-2 rounded-2xl transition-colors duration-300 ${
+        isHighlighted
+          ? "bg-indigo-500/[0.09] dark:bg-indigo-500/[0.16] ring-2 ring-indigo-500/60 shadow-sm"
+          : "ring-0 ring-transparent"
+      }`}
+    >
+      <MessageRow
+        message={message}
+        projects={projects}
+        tasks={tasks}
+        defaultIntegrationMode={defaultIntegrationMode}
+        locale={locale}
+        onOpenUrl={handleOpenUrl}
+        onOpenMarkdownFile={handleOpenMarkdownFile}
+        onOpenImageAttachment={onOpenImageAttachment ? handleOpenImage : undefined}
+        onOpenTask={onOpenTask}
+        onUpdateTaskStatus={onUpdateTaskStatus}
+        onLandTask={onLandTask}
+        onStop={handleStop}
+      />
+    </div>
+  );
+});
+
+const ChatMessageList: React.FC<{
+  messages: ChatMessage[];
+  projects: Project[];
+  tasks: AgentTask[];
+  defaultIntegrationMode?: IntegrationMode;
+  locale: UiLocale;
+  highlightedMessageId: string | null;
+  registerMessageEl: (messageId: string, el: HTMLDivElement | null) => void;
+  onOpenUrl: (url: string, context?: { message?: ChatMessage }) => void;
+  onOpenMarkdownFile: (
+    target: string,
+    baseFilePath?: string,
+    context?: { message?: ChatMessage },
+  ) => void;
+  onOpenImageAttachment?: (
+    attachment: ChatAttachment,
+    context?: {
+      message?: ChatMessage;
+      draftText?: string;
+      draftMentions?: ExplicitMentionTarget[];
+    },
+  ) => void;
+  onOpenTask: (taskId: string) => void;
+  onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
+  onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
+  onStopMessage: (id: string) => void;
+}> = React.memo(({
+  messages,
+  projects,
+  tasks,
+  defaultIntegrationMode,
+  locale,
+  highlightedMessageId,
+  registerMessageEl,
+  onOpenUrl,
+  onOpenMarkdownFile,
+  onOpenImageAttachment,
+  onOpenTask,
+  onUpdateTaskStatus,
+  onLandTask,
+  onStopMessage,
+}) => {
+  return (
+    <>
+      {messages.map((msg) => {
+        const needsWorkspaceRefs = msg.role !== "assistant";
+        return (
+          <ChatMessageItem
+            key={msg.id}
+            message={msg}
+            projects={needsWorkspaceRefs ? projects : EMPTY_PROJECTS}
+            tasks={needsWorkspaceRefs ? tasks : EMPTY_TASKS}
+            defaultIntegrationMode={
+              msg.role === "taskEvent" ? defaultIntegrationMode : undefined
+            }
+            locale={locale}
+            isHighlighted={highlightedMessageId === msg.id}
+            registerMessageEl={registerMessageEl}
+            onOpenUrl={onOpenUrl}
+            onOpenMarkdownFile={onOpenMarkdownFile}
+            onOpenImageAttachment={onOpenImageAttachment}
+            onOpenTask={onOpenTask}
+            onUpdateTaskStatus={onUpdateTaskStatus}
+            onLandTask={onLandTask}
+            onStopMessage={onStopMessage}
+          />
+        );
+      })}
+    </>
+  );
+});
+
 const EmptyWelcome: React.FC<{
   projectCount: number;
   recentProjectNames: string[];
   locale: UiLocale;
   onAddProject: () => void;
   onPickPrompt: (prompt: string) => void;
-}> = ({ projectCount, recentProjectNames, locale, onAddProject, onPickPrompt }) => {
+}> = React.memo(({ projectCount, recentProjectNames, locale, onAddProject, onPickPrompt }) => {
   const sampleName = recentProjectNames[0] ?? t(locale, "chat.welcomeSampleFallback");
   const prompts = [
     {
@@ -1795,7 +1957,7 @@ const EmptyWelcome: React.FC<{
       </div>
     </div>
   );
-};
+});
 
 export interface TaskEventCardProps {
   message: ChatMessage;
@@ -2032,6 +2194,8 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
   );
 };
 
+const MemoTaskEventCard = React.memo(TaskEventCard);
+
 const MessageRow: React.FC<{
   message: ChatMessage;
   projects: Project[];
@@ -2045,7 +2209,7 @@ const MessageRow: React.FC<{
   onUpdateTaskStatus?: (taskId: string, status: AgentTaskStatus) => void;
   onLandTask?: (taskId: string, options?: { createPr?: boolean }) => void;
   onStop: () => void;
-}> = ({
+}> = React.memo(({
   message,
   projects,
   tasks,
@@ -2155,7 +2319,7 @@ const MessageRow: React.FC<{
 
   if (message.role === "taskEvent") {
     return (
-      <TaskEventCard
+      <MemoTaskEventCard
         message={message}
         tasks={tasks}
         projects={projects}
@@ -2257,4 +2421,4 @@ const MessageRow: React.FC<{
       </div>
     </div>
   );
-};
+});

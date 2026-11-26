@@ -464,7 +464,8 @@ async function createWindow(): Promise<void> {
   browserManager = new BrowserManager({
     window: mainWindow,
     store: stateStore,
-    onTabsChanged: () => controller?.notifyBrowserChanged(),
+    onTabsChanged: (reason) =>
+      controller?.notifyBrowserChanged({ persist: reason !== "transient" }),
     onElementPicked: (attachment) => sendToRenderer("conductor:browserAttachment", attachment),
   });
 

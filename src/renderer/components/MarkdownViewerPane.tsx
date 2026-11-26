@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   BookOpen,
@@ -63,7 +63,7 @@ export interface MarkdownViewerPaneProps {
 
 const HEADING_ID_PREFIX = "md-viewer-h-";
 
-export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
+export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = React.memo(({
   activeTab,
   recentFiles,
   autoReload,
@@ -100,12 +100,15 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
   const [imageReloadVersion, setImageReloadVersion] = useState(0);
 
   const viewMode = activeTab?.viewMode ?? localViewMode;
-  const setViewMode = (mode: "rendered" | "raw") => {
-    setLocalViewMode(mode);
-    if (activeTab && onChangeViewMode) {
-      onChangeViewMode(activeTab.filePath, mode);
-    }
-  };
+  const setViewMode = useCallback(
+    (mode: "rendered" | "raw") => {
+      setLocalViewMode(mode);
+      if (activeTab?.filePath && onChangeViewMode) {
+        onChangeViewMode(activeTab.filePath, mode);
+      }
+    },
+    [activeTab?.filePath, onChangeViewMode],
+  );
 
   const isDirty = Boolean(activeTab?.isDirty);
   const isSaving = Boolean(activeTab?.isSaving);
@@ -172,28 +175,31 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
     return new TextEncoder().encode(content).byteLength;
   }, [activeTab?.document, isDirty, content]);
 
-  const scrollToHeading = (rawId: string) => {
-    if (viewMode === "raw") {
-      setViewMode("rendered");
-    }
-    const normalized = slugifyHeading(rawId);
-    requestAnimationFrame(() => {
-      const container = scrollContainerRef.current;
-      const directEl =
-        document.getElementById(`${HEADING_ID_PREFIX}${rawId}`) ??
-        document.getElementById(`${HEADING_ID_PREFIX}${normalized}`);
-      if (directEl) {
-        directEl.scrollIntoView({ behavior: "smooth", block: "start" });
-        setActiveHeadingId(directEl.id.replace(HEADING_ID_PREFIX, ""));
-      } else if (container && /^L(\d+)/i.test(rawId)) {
-        const lineNum = Number.parseInt(rawId.slice(1), 10);
-        if (!Number.isNaN(lineNum) && stats.lines > 0) {
-          const ratio = Math.min(1, Math.max(0, (lineNum - 1) / stats.lines));
-          container.scrollTo({ top: container.scrollHeight * ratio, behavior: "smooth" });
-        }
+  const scrollToHeading = useCallback(
+    (rawId: string) => {
+      if (viewMode === "raw") {
+        setViewMode("rendered");
       }
-    });
-  };
+      const normalized = slugifyHeading(rawId);
+      requestAnimationFrame(() => {
+        const container = scrollContainerRef.current;
+        const directEl =
+          document.getElementById(`${HEADING_ID_PREFIX}${rawId}`) ??
+          document.getElementById(`${HEADING_ID_PREFIX}${normalized}`);
+        if (directEl) {
+          directEl.scrollIntoView({ behavior: "smooth", block: "start" });
+          setActiveHeadingId(directEl.id.replace(HEADING_ID_PREFIX, ""));
+        } else if (container && /^L(\d+)/i.test(rawId)) {
+          const lineNum = Number.parseInt(rawId.slice(1), 10);
+          if (!Number.isNaN(lineNum) && stats.lines > 0) {
+            const ratio = Math.min(1, Math.max(0, (lineNum - 1) / stats.lines));
+            container.scrollTo({ top: container.scrollHeight * ratio, behavior: "smooth" });
+          }
+        }
+      });
+    },
+    [viewMode, setViewMode, stats.lines],
+  );
 
   useEffect(() => {
     if (!pendingAnchor || !activeTab?.document) return;
@@ -472,7 +478,7 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
               </span>
             ) : autoReload && isWatching ? (
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                 Live
               </span>
             ) : null}
@@ -740,4 +746,4 @@ export const MarkdownViewerPane: React.FC<MarkdownViewerPaneProps> = ({
       </div>
     </div>
   );
-};
+});
