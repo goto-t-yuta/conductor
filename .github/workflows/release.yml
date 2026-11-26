@@ -56,14 +56,44 @@ jobs:
         if: matrix.platform == 'linux'
         run: pnpm test
 
+      - name: Configure optional code signing
+        shell: bash
+        env:
+          RAW_CSC_LINK: ${{ secrets.CSC_LINK }}
+          RAW_CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          RAW_WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          RAW_WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          write_env() {
+            local key="$1"
+            local val="$2"
+            local delim="__EOF_${key}__"
+            {
+              echo "${key}<<${delim}"
+              printf '%s\n' "${val}"
+              echo "${delim}"
+            } >> "$GITHUB_ENV"
+          }
+
+          if [ -n "${RAW_CSC_LINK}" ]; then
+            write_env CSC_LINK "${RAW_CSC_LINK}"
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=true" >> "$GITHUB_ENV"
+          else
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+          fi
+          if [ -n "${RAW_CSC_KEY_PASSWORD}" ]; then
+            write_env CSC_KEY_PASSWORD "${RAW_CSC_KEY_PASSWORD}"
+          fi
+          if [ -n "${RAW_WIN_CSC_LINK}" ]; then
+            write_env WIN_CSC_LINK "${RAW_WIN_CSC_LINK}"
+          fi
+          if [ -n "${RAW_WIN_CSC_KEY_PASSWORD}" ]; then
+            write_env WIN_CSC_KEY_PASSWORD "${RAW_WIN_CSC_KEY_PASSWORD}"
+          fi
+
       - name: Build and package (${{ matrix.platform }})
         run: pnpm run ${{ matrix.package_script }}
-        env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' && 'true' || 'false' }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
