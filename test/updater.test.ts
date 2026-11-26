@@ -530,4 +530,18 @@ describe("AppUpdater main-process service", () => {
     expect(res.status).toBe("up_to_date");
     expect(res.updateAvailable).toBe(false);
   });
+
+  it("includes macOS Gatekeeper quarantine fix guidance in release workflow and README", () => {
+    const repoRoot = path.resolve(import.meta.dirname, "..");
+    const releaseWorkflow = fs.readFileSync(
+      path.join(repoRoot, ".github/workflows/release.yml"),
+      "utf8",
+    );
+    expect(releaseWorkflow).toContain("xattr -cr /Applications/Conductor.app");
+    expect(releaseWorkflow).toContain("--notes");
+    expect(releaseWorkflow).toContain("--generate-notes");
+
+    const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
+    expect(readme).toContain("xattr -cr /Applications/Conductor.app");
+  });
 });

@@ -193,6 +193,7 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
+          MACOS_INSTALL_NOTE='> **macOS (unsigned build)**: After dragging `Conductor.app` to `/Applications`, if Gatekeeper says *"Conductor is damaged"*, run `xattr -cr /Applications/Conductor.app` in Terminal and reopen the app.'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" artifacts/* --clobber
           else
@@ -200,5 +201,6 @@ jobs:
               --target "$GITHUB_SHA" \
               --title "Conductor ${TAG}" \
               --latest \
+              --notes "$MACOS_INSTALL_NOTE" \
               --generate-notes
           fi

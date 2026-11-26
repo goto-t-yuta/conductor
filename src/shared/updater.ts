@@ -8,6 +8,7 @@ export const GITHUB_REPO_NAME = "conductor";
 export const GITHUB_RELEASES_API_URL = `https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/releases/latest`;
 export const GITHUB_RELEASES_PAGE_URL = `https://github.com/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/releases`;
 export const GITHUB_LATEST_RELEASE_PAGE_URL = `https://github.com/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/releases/latest`;
+export const MACOS_GATEKEEPER_FIX_COMMAND = "xattr -cr /Applications/Conductor.app";
 
 export type AppUpdateStatus =
   | "idle"

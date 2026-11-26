@@ -140,7 +140,41 @@ describe("AppUpdateSettingsSection & UnifiedChat update UI", () => {
     expect(downloadedHtml).toContain("Open Installer");
     expect(downloadedHtml).toContain("Show in Folder");
     expect(downloadedHtml).toContain("Gatekeeper");
+    expect(downloadedHtml).toContain('data-testid="app-update-macos-gatekeeper-hint"');
+    expect(downloadedHtml).toContain("xattr -cr /Applications/Conductor.app");
     expect(downloadedHtml).not.toMatch(JAPANESE_CHAR_RE);
+
+    const downloadedJaHtml = renderToStaticMarkup(
+      <AppUpdateSettingsSection
+        appUpdate={makeUpdateState({
+          status: "downloaded",
+          platform: "darwin",
+          downloadedFilePath: "/Users/test/Downloads/Conductor-Updates/Conductor-0.1.0-mac-arm64.dmg",
+          openedInstaller: false,
+        })}
+        locale="ja"
+      />,
+    );
+    expect(downloadedJaHtml).toContain('data-testid="app-update-macos-gatekeeper-hint"');
+    expect(downloadedJaHtml).toContain("xattr -cr /Applications/Conductor.app");
+    expect(downloadedJaHtml).toContain("壊れているため開けません");
+
+    // Non-macOS platforms should not display the macOS Gatekeeper xattr hint
+    const downloadedWinHtml = renderToStaticMarkup(
+      <AppUpdateSettingsSection
+        appUpdate={makeUpdateState({
+          status: "downloaded",
+          platform: "win32",
+          arch: "x64",
+          downloadedFilePath: "C:\\Users\\test\\Downloads\\Conductor-0.1.0-win-x64-setup.exe",
+          openedInstaller: true,
+        })}
+        locale="en"
+      />,
+    );
+    expect(downloadedWinHtml).not.toContain('data-testid="app-update-macos-gatekeeper-hint"');
+    expect(downloadedWinHtml).not.toContain("xattr -cr");
+    expect(downloadedWinHtml).not.toMatch(JAPANESE_CHAR_RE);
   });
 
   it("renders AppUpdateSettingsSection inside SettingsModal when appUpdate is provided", () => {

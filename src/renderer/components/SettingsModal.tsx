@@ -43,7 +43,11 @@ import type {
   UsageBudgetSettings,
   UsageRecord,
 } from "../../shared/types.js";
-import { formatBytes, formatPlatformArchLabel } from "../../shared/updater.js";
+import {
+  MACOS_GATEKEEPER_FIX_COMMAND,
+  formatBytes,
+  formatPlatformArchLabel,
+} from "../../shared/updater.js";
 import {
   DEFAULT_VOICE_AUTO_SEND,
   DEFAULT_VOICE_READBACK_ENABLED,
@@ -152,6 +156,16 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
   onShowDownloadedUpdateInFolder,
   onOpenUpdateReleasePage,
 }) => {
+  const [copiedGatekeeperCmd, setCopiedGatekeeperCmd] = useState(false);
+
+  const handleCopyGatekeeperCmd = () => {
+    void navigator.clipboard?.writeText(MACOS_GATEKEEPER_FIX_COMMAND);
+    setCopiedGatekeeperCmd(true);
+    setTimeout(() => {
+      setCopiedGatekeeperCmd(false);
+    }, 1800);
+  };
+
   const isChecking = appUpdate.status === "checking";
   const isDownloading = appUpdate.status === "downloading";
   const isDownloaded = appUpdate.status === "downloaded";
@@ -397,9 +411,45 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
                 data-testid="app-update-downloaded-hint"
                 className="px-2.5 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-[11px] text-emerald-700 dark:text-emerald-300 leading-relaxed"
               >
-                {appUpdate.openedInstaller
-                  ? t(locale, "update.downloadedOpenedHint")
-                  : t(locale, "update.downloadedManualHint")}
+                <div>
+                  {appUpdate.openedInstaller
+                    ? t(locale, "update.downloadedOpenedHint")
+                    : t(locale, "update.downloadedManualHint")}
+                </div>
+                {appUpdate.platform === "darwin" && (
+                  <div
+                    data-testid="app-update-macos-gatekeeper-hint"
+                    className="mt-2 pt-2 border-t border-emerald-500/20 space-y-1 text-[10.5px] text-emerald-800/90 dark:text-emerald-200/85"
+                  >
+                    <div>{t(locale, "update.macosGatekeeperHint")}</div>
+                    <div className="flex items-center gap-1.5">
+                      <code
+                        data-testid="app-update-macos-gatekeeper-cmd"
+                        className="flex-1 min-w-0 truncate px-2 py-1 rounded-md bg-white/80 dark:bg-zinc-950/70 border border-emerald-500/25 font-mono text-[10.5px] text-zinc-800 dark:text-zinc-200 select-all"
+                      >
+                        {MACOS_GATEKEEPER_FIX_COMMAND}
+                      </code>
+                      <button
+                        type="button"
+                        data-testid="app-update-copy-gatekeeper-cmd"
+                        aria-label={t(locale, "update.copyCommandAria")}
+                        onClick={handleCopyGatekeeperCmd}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium bg-white/90 dark:bg-zinc-900 border border-emerald-500/30 hover:border-emerald-500/60 text-zinc-700 dark:text-zinc-200 cursor-pointer shrink-0 transition-colors"
+                      >
+                        {copiedGatekeeperCmd ? (
+                          <Check className="w-3 h-3 text-emerald-500" />
+                        ) : (
+                          <Copy className="w-3 h-3" />
+                        )}
+                        <span>
+                          {copiedGatekeeperCmd
+                            ? t(locale, "remote.copiedBtn")
+                            : t(locale, "remote.copyBtn")}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
