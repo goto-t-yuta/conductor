@@ -1,0 +1,226 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" fill="none">
+  <defs>
+    <!-- macOS standard continuous squircle path (824x824 centered at 512,512) -->
+    <path id="squircle" d="M 334,100 L 690,100 C 860,100 924,164 924,334 L 924,690 C 924,860 860,924 690,924 L 334,924 C 164,924 100,860 100,690 L 100,334 C 100,164 164,100 334,100 Z" />
+
+    <clipPath id="squircleClip">
+      <use href="#squircle" />
+    </clipPath>
+
+    <!-- Soft native macOS drop shadow -->
+    <filter id="iconShadow" x="-12%" y="-10%" width="124%" height="128%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="22" stdDeviation="20" flood-color="#05060F" flood-opacity="0.42" />
+      <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#05060F" flood-opacity="0.28" />
+    </filter>
+
+    <!-- Deep indigo-to-midnight-violet background surface -->
+    <linearGradient id="bgBase" x1="140" y1="100" x2="884" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#241F58" />
+      <stop offset="44%" stop-color="#131531" />
+      <stop offset="100%" stop-color="#0A0C1B" />
+    </linearGradient>
+
+    <!-- Upper-right luminous violet/indigo aurora -->
+    <radialGradient id="auroraViolet" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(725 255) rotate(135) scale(650 580)">
+      <stop offset="0%" stop-color="#7C3AED" stop-opacity="0.5" />
+      <stop offset="45%" stop-color="#4F46E5" stop-opacity="0.24" />
+      <stop offset="100%" stop-color="#4F46E5" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Lower-left cool cobalt/cyan depth glow -->
+    <radialGradient id="auroraCyan" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(270 770) rotate(-30) scale(520 460)">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.24" />
+      <stop offset="50%" stop-color="#4338CA" stop-opacity="0.12" />
+      <stop offset="100%" stop-color="#4338CA" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Smooth modern vertical surface lighting (no hard gloss curve) -->
+    <linearGradient id="surfaceLight" x1="512" y1="100" x2="512" y2="620" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.11" />
+      <stop offset="28%" stop-color="#C7D2FE" stop-opacity="0.035" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- Tactile glass edge rim -->
+    <linearGradient id="rimGrad" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E0E7FF" stop-opacity="0.46" />
+      <stop offset="22%" stop-color="#A5B4FC" stop-opacity="0.16" />
+      <stop offset="82%" stop-color="#6366F1" stop-opacity="0.12" />
+      <stop offset="100%" stop-color="#312E81" stop-opacity="0.34" />
+    </linearGradient>
+
+    <!-- Main sculpted C-arc gradient -->
+    <linearGradient id="cArcGrad" x1="286" y1="260" x2="664" y2="740" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="48%" stop-color="#E8EDFF" />
+      <stop offset="100%" stop-color="#A5B4FC" />
+    </linearGradient>
+
+    <!-- Inner specular line on C-arc -->
+    <linearGradient id="cArcHighlight" x1="276" y1="270" x2="584" y2="680" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.72" />
+      <stop offset="60%" stop-color="#FFFFFF" stop-opacity="0.16" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- Inner harmonic wave arc -->
+    <linearGradient id="innerArcGrad" x1="364" y1="360" x2="624" y2="660" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#67E8F9" />
+      <stop offset="50%" stop-color="#818CF8" />
+      <stop offset="100%" stop-color="#C084FC" />
+    </linearGradient>
+
+    <!-- Coaxial baton shaft gradient (in rotated local coords along +X axis from x=0 to x=362) -->
+    <linearGradient id="batonShaftGrad" x1="0" y1="0" x2="362" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A5B4FC" />
+      <stop offset="35%" stop-color="#E2E8F0" />
+      <stop offset="72%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#E0F2FE" />
+    </linearGradient>
+
+    <!-- Coaxial baton ergonomic grip gradient (local coords x=0 to x=88) -->
+    <linearGradient id="batonGripGrad" x1="0" y1="-20" x2="88" y2="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4F46E5" />
+      <stop offset="52%" stop-color="#818CF8" />
+      <stop offset="100%" stop-color="#C7D2FE" />
+    </linearGradient>
+
+    <!-- Cue spark radial bloom -->
+    <radialGradient id="sparkHalo" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(740 390) scale(98)">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.92" />
+      <stop offset="24%" stop-color="#67E8F9" stop-opacity="0.58" />
+      <stop offset="58%" stop-color="#6366F1" stop-opacity="0.22" />
+      <stop offset="100%" stop-color="#6366F1" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Soft glows for right-side agent nodes -->
+    <radialGradient id="nodeMidGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(758 516) scale(52)">
+      <stop offset="0%" stop-color="#818CF8" stop-opacity="0.65" />
+      <stop offset="100%" stop-color="#818CF8" stop-opacity="0" />
+    </radialGradient>
+
+    <radialGradient id="nodeLowGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(714 630) scale(50)">
+      <stop offset="0%" stop-color="#C084FC" stop-opacity="0.62" />
+      <stop offset="100%" stop-color="#C084FC" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Soft glow behind main hero mark -->
+    <filter id="markGlow" x="-25%" y="-25%" width="150%" height="150%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#050714" flood-opacity="0.55" />
+      <feDropShadow dx="0" dy="0" stdDeviation="16" flood-color="#6366F1" flood-opacity="0.34" />
+    </filter>
+
+    <filter id="batonShadow" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#040510" flood-opacity="0.52" />
+      <feDropShadow dx="0" dy="0" stdDeviation="8" flood-color="#38BDF8" flood-opacity="0.28" />
+    </filter>
+
+    <!-- Subtle connecting wave gradient between baton cue and agent nodes -->
+    <linearGradient id="waveLineGrad" x1="740" y1="390" x2="714" y2="630" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#67E8F9" stop-opacity="0.85" />
+      <stop offset="50%" stop-color="#818CF8" stop-opacity="0.72" />
+      <stop offset="100%" stop-color="#C084FC" stop-opacity="0.78" />
+    </linearGradient>
+  </defs>
+
+  <!-- Outer squircle silhouette with native macOS shadow -->
+  <g filter="url(#iconShadow)">
+    <use href="#squircle" fill="url(#bgBase)" />
+  </g>
+
+  <!-- Clipped interior layers -->
+  <g clip-path="url(#squircleClip)">
+    <!-- Ambient radial aurora glows -->
+    <rect x="100" y="100" width="824" height="824" fill="url(#auroraViolet)" />
+    <rect x="100" y="100" width="824" height="824" fill="url(#auroraCyan)" />
+
+    <!-- Smooth modern vertical surface lighting -->
+    <rect x="100" y="100" width="824" height="520" fill="url(#surfaceLight)" />
+
+    <!-- Precision concentric orchestration field rings -->
+    <circle cx="504" cy="512" r="298" stroke="#A5B4FC" stroke-opacity="0.11" stroke-width="2" />
+    <circle cx="504" cy="512" r="364" stroke="#818CF8" stroke-opacity="0.065" stroke-width="2" />
+
+    <!-- Subtle resonance ripples emanating from baton cue tip -->
+    <circle cx="740" cy="390" r="56" stroke="#67E8F9" stroke-opacity="0.24" stroke-width="2.5" />
+    <circle cx="740" cy="390" r="98" stroke="#818CF8" stroke-opacity="0.13" stroke-width="2" />
+
+    <!-- Orchestration wave curve linking the 3 parallel agent nodes -->
+    <path
+      d="M 740 390 Q 780 453 758 516 Q 742 576 714 630"
+      stroke="url(#waveLineGrad)"
+      stroke-width="6"
+      stroke-linecap="round"
+      stroke-opacity="0.65"
+    />
+
+    <!-- Inner harmonic echo arc -->
+    <path
+      d="M 577.1 395.0 A 138 138 0 1 0 577.1 629.0"
+      stroke="url(#innerArcGrad)"
+      stroke-width="18"
+      stroke-linecap="round"
+      stroke-opacity="0.88"
+    />
+
+    <!-- Hero sculpted "C" orchestration arc -->
+    <g filter="url(#markGlow)">
+      <path
+        d="M 642.8 346.5 A 216 216 0 1 0 642.8 677.5"
+        stroke="url(#cArcGrad)"
+        stroke-width="64"
+        stroke-linecap="round"
+      />
+      <!-- Fine upper specular edge for sculpted depth -->
+      <path
+        d="M 642.8 346.5 A 216 216 0 1 0 642.8 677.5"
+        stroke="url(#cArcHighlight)"
+        stroke-width="6"
+        stroke-linecap="round"
+        transform="translate(-4, -5)"
+      />
+    </g>
+
+    <!-- Coaxial Conductor's Baton sweeping cleanly from (416, 577) to cue tip (740, 390) at -30 deg -->
+    <g filter="url(#batonShadow)" transform="translate(416 577) rotate(-30)">
+      <!-- Tapered luminous baton shaft (exact coaxial geometry) -->
+      <path
+        d="M 80,-12.5 L 368,-4.5 C 373,-4.3 373,4.3 368,4.5 L 80,12.5 Z"
+        fill="url(#batonShaftGrad)"
+      />
+      <!-- Sculpted ergonomic handle grip seamlessly aligned to shaft axis -->
+      <path
+        d="M 16,-18.5 L 72,-16 C 82,-15.5 87,-10 87,0 C 87,10 82,15.5 72,16 L 16,18.5 C 4,18.5 -4,10.5 -4,0 C -4,-10.5 4,-18.5 16,-18.5 Z"
+        fill="url(#batonGripGrad)"
+      />
+      <!-- Crisp metallic ferrule ring at the grip-to-shaft collar -->
+      <rect x="75" y="-14.5" width="8.5" height="29" rx="4" fill="#FFFFFF" fill-opacity="0.92" />
+    </g>
+
+    <!-- Soft glows for right-side agent nodes -->
+    <circle cx="740" cy="390" r="98" fill="url(#sparkHalo)" />
+    <circle cx="758" cy="516" r="52" fill="url(#nodeMidGlow)" />
+    <circle cx="714" cy="630" r="50" fill="url(#nodeLowGlow)" />
+
+    <!-- Node 1: Baton tip / refined concave 4-point cue star (Agent 1 - Cyan/Sky) -->
+    <path
+      d="M 740 344 Q 744 386 786 390 Q 744 394 740 436 Q 736 394 694 390 Q 736 386 740 344 Z"
+      fill="#FFFFFF"
+    />
+    <circle cx="740" cy="390" r="13.5" fill="#E0F2FE" />
+    <circle cx="740" cy="390" r="8" fill="#FFFFFF" />
+
+    <!-- Node 2: Mid-right orchestrated agent node (Agent 2 - Indigo) -->
+    <circle cx="758" cy="516" r="24" fill="#6366F1" />
+    <circle cx="758" cy="516" r="15" fill="#C7D2FE" />
+    <circle cx="758" cy="516" r="7.5" fill="#FFFFFF" />
+
+    <!-- Node 3: Lower-right orchestrated agent node (Agent 3 - Violet) -->
+    <circle cx="714" cy="630" r="21" fill="#A855F7" />
+    <circle cx="714" cy="630" r="13" fill="#E9D5FF" />
+    <circle cx="714" cy="630" r="6.5" fill="#FFFFFF" />
+
+    <!-- Subtle inner border highlight matching macOS app icon polish -->
+    <use href="#squircle" stroke="url(#rimGrad)" stroke-width="3" />
+  </g>
+</svg>

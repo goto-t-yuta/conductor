@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Conductor — 単一チャットから並列AIエージェントを指揮するデスクトップオーケストレーター</title>
+    <meta
+      name="description"
+      content="Codex・AGY・Claudeをひとつのノンブロッキングチャットから並列指揮。Git Worktree分離実行＆自動Land、Chromium CDPブラウザ統合、Tailscale＋QRコード対応Androidアプリを備えたオープンソースのマルチエージェントオーケストレーター。"
+    />
+    <meta name="theme-color" content="#070913" />
+    <link rel="canonical" href="https://goto-t-yuta.github.io/conductor/" />
+
+    <!-- Open Graph / Social -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://goto-t-yuta.github.io/conductor/" />
+    <meta property="og:title" content="Conductor — Multi-Agent Desktop Orchestrator" />
+    <meta
+      property="og:description"
+      content="Orchestrate Codex, AGY, and Claude across multiple repositories from one non-blocking chat with isolated Git worktrees, Chromium CDP browser, and Tailscale Android companion."
+    />
+    <meta property="og:image" content="https://goto-t-yuta.github.io/conductor/images/conductor-overview.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- Icons -->
+    <link rel="icon" type="image/svg+xml" href="./assets/icon.svg" />
+    <link rel="apple-touch-icon" href="./assets/icon.png" />
+
+    <!-- Fonts (graceful system fallback when offline) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+JP:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Prevent theme/language flash before paint -->
+    <script>
+      (function () {
+        try {
+          var params = new URLSearchParams(window.location.search);
+          var qTheme = params.get("theme");
+          var storedTheme = localStorage.getItem("conductor-site-theme");
+          var systemDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var theme =
+            qTheme === "dark" || qTheme === "light"
+              ? qTheme
+              : storedTheme === "dark" || storedTheme === "light"
+                ? storedTheme
+                : systemDark
+                  ? "dark"
+                  : "light";
+          document.documentElement.setAttribute("data-theme", theme);
+
+          var qLang = params.get("lang");
+          var storedLang = localStorage.getItem("conductor-site-lang");
+          var navLangs = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || "en"];
+          var isJa = navLangs.some(function (l) {
+            return String(l || "").toLowerCase().startsWith("ja");
+          });
+          var lang =
+            qLang === "ja" || qLang === "en"
+              ? qLang
+              : storedLang === "ja" || storedLang === "en"
+                ? storedLang
+                : isJa
+                  ? "ja"
+                  : "en";
+          document.documentElement.setAttribute("lang", lang);
+          document.documentElement.setAttribute("data-lang", lang);
+        } catch (_err) {
+          /* ignore */
+        }
+      })();
+    </script>
+
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-ambient" aria-hidden="true">
+      <div class="bg-orb bg-orb-indigo"></div>
+      <div class="bg-orb bg-orb-cyan"></div>
+      <div class="bg-grid"></div>
+    </div>
+
+    <!-- Header -->
+    <header class="site-header" id="top">
+      <div class="container header-inner">
+        <a href="#top" class="brand" aria-label="Conductor Home">
+          <img src="./assets/icon.svg" alt="Conductor Icon" class="brand-icon" width="32" height="32" />
+          <span class="brand-name">Conductor</span>
+          <span class="brand-badge">OSS</span>
+        </a>
+
+        <nav class="site-nav" aria-label="Primary Navigation">
+          <a href="#features" data-i18n="nav.features">機能</a>
+          <a href="#workspace" data-i18n="nav.workspace">ワークスペース</a>
+          <a href="#mobile" data-i18n="nav.mobile">モバイル連携</a>
+          <a href="#download" data-i18n="nav.download">ダウンロード</a>
+        </nav>
+
+        <div class="header-actions">
+          <div class="lang-switch" role="group" aria-label="Language switcher">
+            <button type="button" class="lang-btn" data-set-lang="ja" aria-pressed="true">日本語</button>
+            <button type="button" class="lang-btn" data-set-lang="en" aria-pressed="false">EN</button>
+          </div>
+
+          <button type="button" class="icon-btn" id="theme-toggle" aria-label="Toggle color theme" title="Toggle theme">
+            <svg class="icon-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+            </svg>
+            <svg class="icon-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
+            </svg>
+          </button>
+
+          <a
+            href="https://github.com/goto-t-yuta/conductor"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="icon-btn"
+            aria-label="GitHub Repository"
+            title="GitHub"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+              <path
+                d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0 1 12 6.844a9.59 9.59 0 0 1 2.504.337c1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0 0 22 12.017C22 6.484 17.522 2 12 2z"
+              />
+            </svg>
+          </a>
+
+          <a href="#download" class="btn btn-primary btn-sm header-cta" data-i18n="nav.getApp">ダウンロード</a>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <!-- Hero Section -->
+      <section class="hero">
+        <div class="container">
+          <div class="hero-copy">
+            <a
+              href="https://github.com/goto-t-yuta/conductor/releases/latest"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="release-pill"
+              id="hero-release-pill"
+            >
+              <span class="release-dot" aria-hidden="true"></span>
+              <span id="hero-release-text" data-i18n="hero.badgeFallback">Open Source • MIT License</span>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M5 12h14M13 5l7 7-7 7" />
+              </svg>
+            </a>
+
+            <div class="hero-icon-wrap">
+              <div class="hero-icon-glow" aria-hidden="true"></div>
+              <img src="./assets/icon.svg" alt="Conductor App Icon" class="hero-icon" width="84" height="84" />
+            </div>
+
+            <h1 class="hero-title" data-i18n="hero.title">
+              ひとつのチャットから、<br />並列AIエージェントを指揮する。
+            </h1>
+
+            <p class="hero-subtitle" data-i18n="hero.subtitle">
+              複数のローカルリポジトリを、入力を止めない単一チャットで統合オーケストレーション。Codex・AGY・Claude の並列 Git Worktree ワーカー、Chromium CDP ブラウザ検証、Tailscale＋QRコード対応 Android アプリまでをひとつのワークスペースに。
+            </p>
+
+            <div class="hero-actions">
+              <a
+                href="https://github.com/goto-t-yuta/conductor/releases/latest"
+                class="btn btn-primary btn-lg hero-download-btn"
+                id="hero-primary-download"
+              >
+                <span class="btn-os-icon" id="hero-os-icon" aria-hidden="true"></span>
+                <span class="btn-label-stack">
+                  <span class="btn-label-main" id="hero-download-label" data-i18n="hero.downloadDefault">最新リリースをダウンロード</span>
+                  <span class="btn-label-sub" id="hero-download-sub">macOS • Windows • Linux • Android</span>
+                </span>
+              </a>
+
+              <a
+                href="https://github.com/goto-t-yuta/conductor"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="btn btn-secondary btn-lg"
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+                  <path
+                    d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0 1 12 6.844a9.59 9.59 0 0 1 2.504.337c1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0 0 22 12.017C22 6.484 17.522 2 12 2z"
+                  />
+                </svg>
+                <span data-i18n="hero.githubCta">GitHub で見る</span>
+              </a>
+            </div>
+
+            <div class="hero-meta-bar">
+              <a href="#download" class="hero-all-platforms" data-i18n="hero.allPlatforms">
+                macOS (Apple Silicon / Intel)・Windows・Linux・Android APK をすべて見る →
+              </a>
+              <div class="provider-chips" aria-label="Supported AI providers">
+                <span class="chip chip-provider"><span class="dot dot-cyan"></span>AGY (ACP)</span>
+                <span class="chip chip-provider"><span class="dot dot-indigo"></span>Codex</span>
+                <span class="chip chip-provider"><span class="dot dot-violet"></span>Claude CLI</span>
+                <span class="chip chip-provider"><span class="dot dot-emerald"></span>100% Local-First</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Interactive App Showcase -->
+          <div class="showcase-shell">
+            <div class="showcase-tabs" role="tablist" aria-label="Product screenshots">
+              <button
+                type="button"
+                class="showcase-tab is-active"
+                role="tab"
+                aria-selected="true"
+                data-shot="overview"
+                data-i18n="showcase.tabOverview"
+              >
+                3ペイン統合ワークスペース
+              </button>
+              <button
+                type="button"
+                class="showcase-tab"
+                role="tab"
+                aria-selected="false"
+                data-shot="worktree"
+                data-i18n="showcase.tabWorktree"
+              >
+                Git Worktree &amp; Auto-Land
+              </button>
+              <button
+                type="button"
+                class="showcase-tab"
+                role="tab"
+                aria-selected="false"
+                data-shot="markdown"
+                data-i18n="showcase.tabMarkdown"
+              >
+                ライブ Markdown ビューア
+              </button>
+            </div>
+
+            <div class="window-frame">
+              <div class="window-chrome" aria-hidden="true">
+                <span class="traffic-dot dot-red"></span>
+                <span class="traffic-dot dot-amber"></span>
+                <span class="traffic-dot dot-green"></span>
+                <span class="window-title" id="showcase-window-title">Conductor — Unified Workspace</span>
+                <button
+                  type="button"
+                  class="window-zoom-btn"
+                  id="showcase-zoom-btn"
+                  data-i18n-title="showcase.zoomHint"
+                  title="拡大表示"
+                  aria-label="Zoom screenshot"
+                >
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                  </svg>
+                </button>
+              </div>
+              <div class="window-viewport">
+                <img
+                  id="showcase-img"
+                  src="./images/conductor-overview.png"
+                  alt="Conductor 3-pane workspace showing Agent Tasks & Questions on the left, Unified Non-Blocking Chat in the center, and In-App Chromium Browser on the right"
+                  class="showcase-img"
+                  loading="eager"
+                />
+              </div>
+            </div>
+            <p class="showcase-caption" id="showcase-caption" data-i18n="showcase.captionOverview">
+              左に Agent Tasks &amp; Questions、中央にノンブロッキング統合チャット（@ メンション付き）、右にプロジェクト連動の Chromium CDP ブラウザを配置。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Architecture / 3-Step Flow Strip -->
+      <section class="workflow-strip" aria-label="Workflow overview">
+        <div class="container">
+          <div class="workflow-grid">
+            <div class="workflow-step">
+              <span class="step-num">01</span>
+              <h2 class="step-title" data-i18n="flow.step1Title">単一チャットで複数リポジトリへ指示</h2>
+              <p class="step-desc" data-i18n="flow.step1Desc">
+                <code>@project</code> や <code>@T#</code> バッジで対象を指定。応答のストリーミング中や作業中でも入力がブロックされず、質問や並列指示を即座に続けられます。
+              </p>
+            </div>
+            <div class="workflow-step">
+              <span class="step-num">02</span>
+              <h2 class="step-title" data-i18n="flow.step2Title">独立した Git Worktree で並列実装</h2>
+              <p class="step-desc" data-i18n="flow.step2Desc">
+                タスクごとに専用 worktree を自動作成。Codex・AGY・Claude のワーカーがメイン作業ツリーを汚さずに同時並行でコード変更とテストを実行します。
+              </p>
+            </div>
+            <div class="workflow-step">
+              <span class="step-num">03</span>
+              <h2 class="step-title" data-i18n="flow.step3Title">右ペインで検証し、Auto-Land で統合</h2>
+              <p class="step-desc" data-i18n="flow.step3Desc">
+                内蔵 Chromium ブラウザ・コンソール・Markdown ビューアで成果をその場で確認。完了時は自動 Land、コンフリクト時は AI が自力解消します。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Core Features Section -->
+      <section class="section" id="features">
+        <div class="container">
+          <div class="section-header">
+            <span class="section-eyebrow" data-i18n="features.eyebrow">Core Capabilities</span>
+            <h2 class="section-title" data-i18n="features.title">
+              並列開発のボトルネックをすべて解消する設計
+            </h2>
+            <p class="section-subtitle" data-i18n="features.subtitle">
+              大量のターミナルタブやリポジトリごとのチャット画面を行き来する必要はもうありません。
+            </p>
+          </div>
+
+          <!-- Feature Bento Row 1: Orchestration + Worktree Spotlight -->
+          <div class="feature-bento">
+            <!-- Feature 1: Multi-Project Orchestration -->
+            <article class="card card-orchestration">
+              <div class="card-badge">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+                <span data-i18n="f1.badge">Unified Orchestration</span>
+              </div>
+              <h3 class="card-title" data-i18n="f1.title">単一チャットからのマルチプロジェクト並列オーケストレーション</h3>
+              <p class="card-desc" data-i18n="f1.desc">
+                Chat 応答用とコーディング Worker 用のプロバイダー（AGY / Codex / Claude）、モデル、推論強度をそれぞれ独立して選択可能。複数リポジトリを横断する並列タスクをひとつの会話から指揮できます。
+              </p>
+              <ul class="feature-list">
+                <li data-i18n="f1.bullet1"><strong>ノンブロッキング入力:</strong> 応答生成やワーカー実行中でも、別タスクの起動や質問を止めずに送信</li>
+                <li data-i18n="f1.bullet2"><strong>構造化 @ メンション:</strong> <code>@project</code> / <code>@T#</code> / <code>@project/T#</code> バッジで対象を正確に特定</li>
+                <li data-i18n="f1.bullet3"><strong>非破壊タスク検査:</strong> 実行中ワーカーを止めずに <code>get_task_detail</code> で進捗・設計・差分を質問</li>
+              </ul>
+
+              <!-- Stylized Orchestration Mini-Preview -->
+              <div class="mini-orchestrator" aria-hidden="true">
+                <div class="mini-row">
+                  <span class="mini-pill pill-indigo">T4</span>
+                  <span class="mini-pill pill-sky">acme-web</span>
+                  <span class="mini-pill pill-neutral">Codex</span>
+                  <span class="mini-status status-running">Running</span>
+                </div>
+                <div class="mini-row">
+                  <span class="mini-pill pill-indigo">T3</span>
+                  <span class="mini-pill pill-sky">acme-web</span>
+                  <span class="mini-pill pill-neutral">AGY</span>
+                  <span class="mini-status status-landed">Landed ✓</span>
+                </div>
+                <div class="mini-row">
+                  <span class="mini-pill pill-indigo">T2</span>
+                  <span class="mini-pill pill-emerald">pulse-api</span>
+                  <span class="mini-pill pill-neutral">Claude</span>
+                  <span class="mini-status status-pr">PR #48</span>
+                </div>
+              </div>
+            </article>
+
+            <!-- Feature 2: Git Worktree & Auto-Land -->
+            <article class="card card-worktree">
+              <div class="card-badge badge-emerald">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <line x1="6" y1="3" x2="6" y2="15"></line>
+                  <circle cx="18" cy="6" r="3"></circle>
+                  <circle cx="6" cy="18" r="3"></circle>
+                  <path d="M18 9a9 9 0 0 1-9 9"></path>
+                </svg>
+                <span data-i18n="f2.badge">Git Worktree &amp; Auto-Land</span>
+              </div>
+              <h3 class="card-title" data-i18n="f2.title">Git Worktree 分離実行＆自動 Land（コンフリクト自力解消付き）</h3>
+              <p class="card-desc" data-i18n="f2.desc">
+                すべてのコーディングタスクは専用の Git Worktree で完全分離して実行されるため、並列エージェント同士が衝突しません。完了後の統合からコンフリクト解消までシームレスに完結します。
+              </p>
+
+              <div class="mode-pills">
+                <span class="mode-pill"><code>feature-branch</code></span>
+                <span class="mode-pill"><code>per-task-pr</code></span>
+                <span class="mode-pill"><code>direct</code></span>
+              </div>
+
+              <ul class="feature-list">
+                <li data-i18n="f2.bullet1"><strong>3つの統合モード:</strong> プロジェクト単位でブランチ統合・自動 PR 作成・直接反映を切替</li>
+                <li data-i18n="f2.bullet2"><strong>Auto-Land &amp; AI コンフリクト自力解消:</strong> 競合が起きてもワンクリックで AI が worktree 内で安全に解消</li>
+                <li data-i18n="f2.bullet3"><strong>終了ガード &amp; 自動再開:</strong> 実行中ワーカーの誤終了を防ぎ、再起動時の中断タスク再開にも対応</li>
+              </ul>
+
+              <button
+                type="button"
+                class="card-screenshot-btn"
+                data-lightbox-src="./images/conductor-worktree-inspector.png"
+                data-lightbox-title="Git Worktree Inspector & Auto-Land"
+                aria-label="Inspect Git Worktree modal screenshot"
+              >
+                <img
+                  src="./images/conductor-worktree-inspector.png"
+                  alt="Conductor Git Worktree Inspector showing branch status, diff summary, and Auto-Land state"
+                  loading="eager"
+                />
+                <span class="zoom-badge" data-i18n="common.clickZoom">クリックで拡大</span>
+              </button>
+            </article>
+          </div>
+
+          <!-- Feature 3: Unified Right-Pane Workspace -->
+          <div class="spotlight-card" id="workspace">
+            <div class="spotlight-copy">
+              <div class="card-badge badge-cyan">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                  <path d="M15 3v18"></path>
+                </svg>
+                <span data-i18n="f3.badge">Right-Pane Workspace</span>
+              </div>
+              <h3 class="spotlight-title" data-i18n="f3.title">
+                右ペイン統合ワークスペース：<br />Chromium CDP ブラウザ / コンソール / Markdown・ファイルビューア
+              </h3>
+              <p class="card-desc" data-i18n="f3.desc">
+                ヘッダーからプロジェクトを切り替えるだけで、タブ構成がリポジトリごとに自動スコープ。アプリを離れることなく開発・検証・ドキュメント確認がすべて完結します。
+              </p>
+
+              <div class="workspace-pillars">
+                <div class="ws-pillar">
+                  <h4 data-i18n="f3.p1Title">内蔵 Chromium CDP ブラウザ</h4>
+                  <p data-i18n="f3.p1Desc">
+                    実 Chromium エンジンに Chrome DevTools (<code>⌘⌥I</code>)、DOM 要素ピッカー (<code>⌘⇧P</code>)、ワンクリック撮影 (<code>⌘⇧S</code>)、エラーチャット添付を搭載。MCP ブラウザツール経由でエージェント自身による UI 検証も可能です。
+                  </p>
+                </div>
+                <div class="ws-pillar">
+                  <h4 data-i18n="f3.p2Title">統合コンソール（xterm.js + PTY）</h4>
+                  <p data-i18n="f3.p2Desc">
+                    プロジェクトや worktree に連動した対話的ターミナルを右ペインに統合。開発サーバーのログ確認や手動コマンド実行を同じ画面内で行えます。
+                  </p>
+                </div>
+                <div class="ws-pillar">
+                  <h4 data-i18n="f3.p3Title">ライブ Markdown・コード・ファイル・画像ビューア</h4>
+                  <p data-i18n="f3.p3Desc">
+                    ファイル監視で自動リロードする Markdown（GFM / Mermaid / TOC 対応）、プロジェクトファイルツリー、ソースコード・透過グリッド付き画像ビューアをひとつのタブバーに統合。
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div class="spotlight-media">
+              <button
+                type="button"
+                class="card-screenshot-btn card-screenshot-tall"
+                data-lightbox-src="./images/conductor-markdown-viewer.png"
+                data-lightbox-title="Project-Scoped Right-Pane Workspace"
+                aria-label="Inspect Right-Pane Markdown & Browser Viewer screenshot"
+              >
+                <img
+                  src="./images/conductor-markdown-viewer.png"
+                  alt="Conductor Right-Pane Workspace showing live-reloading Markdown Viewer and project-scoped tabs"
+                  loading="eager"
+                />
+                <span class="zoom-badge" data-i18n="common.clickZoom">クリックで拡大</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Feature Row 3: Tailscale Mobile + Usage / i18n / Voice -->
+          <div class="feature-bento feature-bento-bottom">
+            <!-- Feature 4: Tailscale Remote Access & Android App -->
+            <article class="card card-mobile" id="mobile">
+              <div class="card-badge badge-violet">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+                  <line x1="12" y1="18" x2="12.01" y2="18"></line>
+                </svg>
+                <span data-i18n="f4.badge">Tailscale + Android Companion</span>
+              </div>
+              <h3 class="card-title" data-i18n="f4.title">
+                Tailscale 経由リモートアクセス＆QR コードで即セットアップできる Android アプリ
+              </h3>
+              <p class="card-desc" data-i18n="f4.desc">
+                デスクを離れても手元からオーケストレーション。同じ Tailscale tailnet 上の Mac に安全に接続し、チャット送信やタスク監視・承認をリアルタイムで行えます。
+              </p>
+
+              <ul class="feature-list">
+                <li data-i18n="f4.bullet1"><strong>QR コードでワンタップ連携:</strong> デスクトップ設定画面の QR をスキャンするだけで URL と Bearer Token を自動保存（Google Play サービス不要）</li>
+                <li data-i18n="f4.bullet2"><strong>SSE リアルタイム同期 &amp; 操作:</strong> チャット応答・<code>@</code> メンション・Running / Needs Review 確認とワンタップ Stop / Land / Done</li>
+                <li data-i18n="f4.bullet3"><strong>モバイル Web UI フォールバック:</strong> アプリなしでも Android Chrome から <code>http://100.x.x.x:4789</code> を開くだけですぐ利用可能</li>
+              </ul>
+
+              <!-- Stylized QR -> Tailscale -> Android Visual -->
+              <div class="mobile-diagram" aria-hidden="true">
+                <div class="diagram-qr-box">
+                  <div class="qr-label">Desktop QR</div>
+                  <svg class="qr-svg" viewBox="0 0 64 64" width="56" height="56">
+                    <rect x="4" y="4" width="18" height="18" rx="2.5" fill="none" stroke="currentColor" stroke-width="3.5" />
+                    <rect x="9.5" y="9.5" width="7" height="7" rx="1" fill="currentColor" />
+                    <rect x="42" y="4" width="18" height="18" rx="2.5" fill="none" stroke="currentColor" stroke-width="3.5" />
+                    <rect x="47.5" y="9.5" width="7" height="7" rx="1" fill="currentColor" />
+                    <rect x="4" y="42" width="18" height="18" rx="2.5" fill="none" stroke="currentColor" stroke-width="3.5" />
+                    <rect x="9.5" y="47.5" width="7" height="7" rx="1" fill="currentColor" />
+                    <rect x="28" y="6" width="5" height="5" rx="1" fill="currentColor" />
+                    <rect x="28" y="16" width="5" height="5" rx="1" fill="currentColor" />
+                    <rect x="28" y="28" width="8" height="8" rx="1.5" fill="#6366f1" />
+                    <rect x="10" y="28" width="5" height="5" rx="1" fill="currentColor" />
+                    <rect x="19" y="28" width="5" height="5" rx="1" fill="currentColor" />
+                    <rect x="42" y="28" width="5" height="5" rx="1" fill="currentColor" />
+                    <rect x="52" y="28" width="8" height="5" rx="1" fill="currentColor" />
+                    <rect x="28" y="42" width="6" height="6" rx="1" fill="currentColor" />
+                    <rect x="40" y="42" width="6" height="6" rx="1" fill="currentColor" />
+                    <rect x="52" y="42" width="8" height="8" rx="1.5" fill="#38bdf8" />
+                    <rect x="28" y="53" width="12" height="5" rx="1" fill="currentColor" />
+                    <rect x="44" y="53" width="6" height="5" rx="1" fill="currentColor" />
+                  </svg>
+                  <span class="qr-uri">conductor://connect</span>
+                </div>
+
+                <div class="diagram-bridge">
+                  <span class="bridge-line"></span>
+                  <span class="bridge-tag">Tailscale</span>
+                  <span class="bridge-line"></span>
+                </div>
+
+                <div class="diagram-phone">
+                  <div class="phone-top">
+                    <span>Conductor Mobile</span>
+                    <span class="sse-dot">SSE Live</span>
+                  </div>
+                  <div class="phone-card">
+                    <div class="phone-card-head">
+                      <span class="mini-pill pill-indigo">T3</span>
+                      <span class="phone-task-name">Analytics UI</span>
+                    </div>
+                    <div class="phone-card-actions">
+                      <span class="phone-btn phone-btn-land">Land</span>
+                      <span class="phone-btn phone-btn-done">Done ✓</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <!-- Feature 5: Usage, i18n & Voice -->
+            <article class="card card-usage">
+              <div class="card-badge badge-amber">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3 3v18h18"></path>
+                  <path d="M18 17V9"></path>
+                  <path d="M13 17V5"></path>
+                  <path d="M8 17v-3"></path>
+                </svg>
+                <span data-i18n="f5.badge">Usage • i18n • Voice</span>
+              </div>
+              <h3 class="card-title" data-i18n="f5.title">
+                トークン使用量・推定利用料（Usage）＆日英 i18n・音声入出力
+              </h3>
+              <p class="card-desc" data-i18n="f5.desc">
+                マルチプロバイダー運用に欠かせないコスト可視化、自然な日本語／英語 UI と出力制御、さらにハンズフリーな音声入出力まで標準搭載しています。
+              </p>
+
+              <ul class="feature-list">
+                <li data-i18n="f5.bullet1"><strong>トークン使用量・推定利用料（Usage）:</strong> プロバイダー・モデルごとの入力／出力トークンと推定コストを一覧で把握</li>
+                <li data-i18n="f5.bullet2"><strong>日英 i18n 完全対応:</strong> UI 表示と AI 出力言語を <code>auto</code> / <code>ja</code> / <code>en</code> で自在に切替</li>
+                <li data-i18n="f5.bullet3"><strong>音声入出力 &amp; ローカルセキュリティ:</strong> マイク音声入力・読み上げ対応。テレメトリゼロ、MCP は <code>127.0.0.1</code> 限定バインド</li>
+              </ul>
+
+              <!-- Stylized Usage + Voice + i18n Mini Dashboard -->
+              <div class="usage-widget" aria-hidden="true">
+                <div class="usage-header">
+                  <span class="usage-label">Session Usage</span>
+                  <span class="usage-cost">$1.42 est.</span>
+                </div>
+                <div class="usage-bars">
+                  <div class="usage-bar-row">
+                    <span>Codex</span>
+                    <div class="bar-track"><div class="bar-fill fill-indigo" style="width: 68%"></div></div>
+                    <span class="bar-val">412k</span>
+                  </div>
+                  <div class="usage-bar-row">
+                    <span>AGY</span>
+                    <div class="bar-track"><div class="bar-fill fill-cyan" style="width: 48%"></div></div>
+                    <span class="bar-val">286k</span>
+                  </div>
+                  <div class="usage-bar-row">
+                    <span>Claude</span>
+                    <div class="bar-track"><div class="bar-fill fill-violet" style="width: 34%"></div></div>
+                    <span class="bar-val">194k</span>
+                  </div>
+                </div>
+                <div class="usage-footer">
+                  <span class="mini-tag">JA / EN i18n</span>
+                  <span class="mini-tag voice-tag">
+                    <span class="voice-eq"><span></span><span></span><span></span></span>
+                    Voice I/O
+                  </span>
+                  <span class="mini-tag">127.0.0.1 MCP</span>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- Download Section -->
+      <section class="section download-section" id="download">
+        <div class="container">
+          <div class="section-header">
+            <span class="section-eyebrow" data-i18n="download.eyebrow">Download</span>
+            <h2 class="section-title" data-i18n="download.title">お使いの環境に合わせて今すぐ開始</h2>
+            <p class="section-subtitle" data-i18n="download.subtitle">
+              GitHub Releases から最新ビルドを自動取得しています。デスクトップ各 OS と Android コンパニオン APK をワンクリックでダウンロードできます。
+            </p>
+
+            <div class="release-meta-bar" id="release-meta-bar">
+              <span class="release-version-chip" id="release-version-chip">
+                <span class="release-dot" aria-hidden="true"></span>
+                <span id="release-version-label" data-i18n="download.loading">最新リリースを確認中...</span>
+              </span>
+              <a
+                href="https://github.com/goto-t-yuta/conductor/releases/latest"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="meta-link"
+                id="release-notes-link"
+                data-i18n="download.releaseNotes"
+              >
+                リリースノートを見る ↗
+              </a>
+              <a
+                href="https://github.com/goto-t-yuta/conductor/releases/latest"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="meta-link"
+                id="release-checksums-link"
+                hidden
+              >
+                SHA256SUMS.txt ↗
+              </a>
+            </div>
+          </div>
+
+          <div class="download-grid">
+            <!-- macOS Card -->
+            <div class="dl-card" data-platform-card="mac">
+              <div class="dl-card-top">
+                <div class="dl-os-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                    <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.33c.64-.78 1.08-1.86.96-2.94-.93.04-2.06.62-2.72 1.4-.58.68-1.1 1.79-.96 2.84 1.04.08 2.08-.52 2.72-1.3z" />
+                  </svg>
+                </div>
+                <span class="recommended-pill" data-i18n="download.recommended">お使いの OS</span>
+              </div>
+              <h3 class="dl-card-title">macOS</h3>
+              <p class="dl-card-desc" data-i18n="download.macDesc">Apple Silicon (arm64) &amp; Intel (x64) 対応</p>
+              <a
+                href="https://github.com/goto-t-yuta/conductor/releases/latest"
+                class="btn btn-primary dl-primary-btn"
+                id="dl-mac-arm64"
+              >
+                <span data-i18n="download.macArm64">Apple Silicon (.dmg)</span>
+                <span class="dl-size" id="size-mac-arm64"></span>
+              </a>
+              <div class="dl-secondary-links">
+                <a href="https://github.com/goto-t-yuta/conductor/releases/latest" id="dl-mac-x64" class="dl-alt-link">
+                  <span data-i18n="download.macX64">Intel Mac (.dmg)</span>
+                  <span class="dl-size-inline" id="size-mac-x64"></span>
+                </a>
+                <a href="https://github.com/goto-t-yuta/conductor/releases/latest" id="dl-mac-zip" class="dl-alt-link">
+                  <span data-i18n="download.macZip">ZIP アーカイブ (.zip)</span>
+                  <span class="dl-size-inline" id="size-mac-zip"></span>
+                </a>
+              </div>
+            </div>
+
+            <!-- Windows Card -->
+            <div class="dl-card" data-platform-card="win">
+              <div class="dl-card-top">
+                <div class="dl-os-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                    <path d="M3 5.55 10.35 4.5v7.05H3V5.55Zm8.35-1.2L21 3v8.55h-9.65V4.35ZM3 12.55h7.35v7.05L3 18.55v-6Zm8.35 0H21V21l-9.65-1.35v-7.1Z" />
+                  </svg>
+                </div>
+                <span class="recommended-pill" data-i18n="download.recommended">お使いの OS</span>
+              </div>
+              <h3 class="dl-card-title">Windows</h3>
+              <p class="dl-card-desc" data-i18n="download.winDesc">Windows 10 / 11 (x64) インストーラー＆ポータブル</p>
+              <a
+                href="https://github.com/goto-t-yuta/conductor/releases/latest"
+                class="btn btn-primary dl-primary-btn"
+                id="dl-win-setup"
+              >
+                <span data-i18n="download.winSetup">インストーラー (.exe)</span>
+                <span class="dl-size" id="size-win-setup"></span>
+              </a>
+              <div class="dl-secondary-links">
+                <a href="https://github.com/goto-t-yuta/conductor/releases/latest" id="dl-win-portable" class="dl-alt-link">
+                  <span data-i18n="download.winPortable">ポータブル版 (.exe)</span>
+                  <span class="dl-size-inline" id="size-win-portable"></span>
+                </a>
+              </div>
+            </div>
+
+            <!-- Linux Card -->
+            <div class="dl-card" data-platform-card="linux">
+              <div class="dl-card-top">
+                <div class="dl-os-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="4" width="18" height="14" rx="2"></rect>
+                    <path d="M7 9l3 3-3 3"></path>
+                    <path d="M13 15h4"></path>
+                    <path d="M8 21h8"></path>
+                  </svg>
+                </div>
+                <span class="recommended-pill" data-i18n="download.recommended">お使いの OS</span>
+              </div>
+              <h3 class="dl-card-title">Linux</h3>
+              <p class="dl-card-desc" data-i18n="download.linuxDesc">AppImage / Debian・Ubuntu (.deb) (x64)</p>
+              <a
+                href="https://github.com/goto-t-yuta/conductor/releases/latest"
+                class="btn btn-primary dl-primary-btn"
+                id="dl-linux-appimage"
+              >
+                <span data-i18n="download.linuxAppImage">AppImage (x64)</span>
+                <span class="dl-size" id="size-linux-appimage"></span>
+              </a>
+              <div class="dl-secondary-links">
+                <a href="https://github.com/goto-t-yuta/conductor/releases/latest" id="dl-linux-deb" class="dl-alt-link">
+                  <span data-i18n="download.linuxDeb">Debian / Ubuntu (.deb)</span>
+                  <span class="dl-size-inline" id="size-linux-deb"></span>
+                </a>
+              </div>
+            </div>
+
+            <!-- Android Card -->
+            <div class="dl-card" data-platform-card="android">
+              <div class="dl-card-top">
+                <div class="dl-os-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="23" height="23" fill="currentColor">
+                    <path d="M17.523 15.341a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5Zm-11.046 0a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5ZM17.9 10.67l1.62-2.8a.45.45 0 0 0-.16-.62.45.45 0 0 0-.62.17l-1.64 2.84a10.48 10.48 0 0 0-5.1-1.26c-1.85 0-3.58.46-5.1 1.26L5.26 7.42a.45.45 0 0 0-.62-.17.45.45 0 0 0-.16.62l1.62 2.8C3.53 12.1 1.85 14.74 1.5 17.85h21c-.35-3.11-2.03-5.75-4.6-7.18Z" />
+                  </svg>
+                </div>
+                <span class="recommended-pill" data-i18n="download.recommended">お使いの OS</span>
+              </div>
+              <h3 class="dl-card-title">Android</h3>
+              <p class="dl-card-desc" data-i18n="download.androidDesc">Tailscale + QR 接続コンパニオン APK</p>
+              <a
+                href="https://github.com/goto-t-yuta/conductor/releases/latest"
+                class="btn btn-primary dl-primary-btn"
+                id="dl-android-apk"
+              >
+                <span data-i18n="download.androidApk">Android APK (.apk)</span>
+                <span class="dl-size" id="size-android-apk"></span>
+              </a>
+              <div class="dl-secondary-links">
+                <a
+                  href="https://github.com/goto-t-yuta/conductor/blob/main/mobile/android/README.md"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="dl-alt-link"
+                  data-i18n="download.androidGuide"
+                >
+                  Tailscale・QR 接続ガイドを見る ↗
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <!-- macOS Unsigned Build Callout -->
+          <div class="callout-card" id="macos-setup">
+            <div class="callout-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                <path d="M12 8v4" />
+                <path d="M12 16h.01" />
+              </svg>
+            </div>
+            <div class="callout-body">
+              <h3 class="callout-title" data-i18n="macos.title">
+                macOS 未署名ビルドの初回起動について
+              </h3>
+              <p class="callout-desc" data-i18n="macos.desc">
+                GitHub Actions でビルドされた macOS 版は現在コード未署名のため、<code>/Applications</code> へコピー後の初回起動時に「壊れているため開けません」と表示される場合があります。ターミナルで以下のコマンドを実行して隔離属性（quarantine）を解除してください。
+              </p>
+
+              <div class="cmd-box">
+                <code class="cmd-code" id="xattr-cmd">xattr -cr /Applications/Conductor.app</code>
+                <button
+                  type="button"
+                  class="copy-btn"
+                  data-copy-target="xattr-cmd"
+                  aria-label="Copy xattr command"
+                >
+                  <svg class="copy-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                  <svg class="check-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                  <span class="copy-label" data-i18n="common.copy">コピー</span>
+                </button>
+              </div>
+
+              <p class="callout-footnote" data-i18n="macos.altNote">
+                ※ 隔離属性のみを削除したい場合は <code>xattr -dr com.apple.quarantine /Applications/Conductor.app</code> でも同様に起動できます。
+              </p>
+            </div>
+          </div>
+
+          <!-- Quick Start from Source -->
+          <div class="source-card">
+            <div class="source-copy">
+              <h3 class="source-title" data-i18n="source.title">ソースからビルド・起動する</h3>
+              <p class="source-desc" data-i18n="source.desc">
+                Node.js 22+・pnpm・Git 2.25+ と、いずれかの CLI（<code>codex</code> / <code>agy</code> / <code>claude</code>）があればローカルで即座に開発モード起動できます。
+              </p>
+            </div>
+            <div class="cmd-box cmd-box-compact">
+              <code class="cmd-code" id="source-cmd">git clone https://github.com/goto-t-yuta/conductor.git &amp;&amp; cd conductor &amp;&amp; pnpm install &amp;&amp; pnpm dev</code>
+              <button
+                type="button"
+                class="copy-btn"
+                data-copy-target="source-cmd"
+                aria-label="Copy quick start command"
+              >
+                <svg class="copy-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <svg class="check-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+                <span class="copy-label" data-i18n="common.copy">コピー</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="site-footer">
+      <div class="container footer-inner">
+        <div class="footer-brand">
+          <img src="./assets/icon.svg" alt="" width="28" height="28" class="brand-icon" aria-hidden="true" />
+          <div>
+            <div class="footer-title">Conductor</div>
+            <div class="footer-sub" data-i18n="footer.tagline">Single-chat multi-agent orchestrator for Codex, AGY, and Claude.</div>
+          </div>
+        </div>
+
+        <div class="footer-links">
+          <a href="https://github.com/goto-t-yuta/conductor" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://github.com/goto-t-yuta/conductor/releases" target="_blank" rel="noopener noreferrer" data-i18n="footer.releases">Releases</a>
+          <a href="https://github.com/goto-t-yuta/conductor/blob/main/mobile/android/README.md" target="_blank" rel="noopener noreferrer" data-i18n="footer.androidDocs">Android ガイド</a>
+          <a href="https://github.com/goto-t-yuta/conductor/issues" target="_blank" rel="noopener noreferrer">Issues</a>
+          <a href="https://github.com/goto-t-yuta/conductor/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a>
+        </div>
+      </div>
+    </footer>
+
+    <!-- Screenshot Lightbox Modal -->
+    <div class="lightbox" id="lightbox" hidden role="dialog" aria-modal="true" aria-labelledby="lightbox-title">
+      <div class="lightbox-backdrop" data-lightbox-close></div>
+      <div class="lightbox-content">
+        <div class="lightbox-header">
+          <span class="lightbox-title" id="lightbox-title">Conductor</span>
+          <button type="button" class="icon-btn lightbox-close" data-lightbox-close aria-label="Close preview">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <img id="lightbox-img" alt="" />
+      </div>
+    </div>
+
+    <div class="sr-only" aria-live="polite" id="live-announcer"></div>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>
