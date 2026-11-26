@@ -9,6 +9,7 @@ import {
   Loader2,
   PanelRightClose,
   Plus,
+  Terminal,
   Upload,
   X,
 } from "lucide-react";
@@ -28,6 +29,7 @@ import type { MarkdownOpenedImage } from "./MarkdownView.js";
 import { MarkdownViewerPane } from "./MarkdownViewerPane.js";
 import { ProjectFileTree } from "./ProjectFileTree.js";
 import { RightPaneProjectSwitcher } from "./RightPaneProjectSwitcher.js";
+import { TerminalPane } from "./TerminalPane.js";
 
 export interface UnifiedRightPaneProps {
   activeProjectItem: ProjectSwitcherItem;
@@ -77,6 +79,9 @@ export interface UnifiedRightPaneProps {
   onOpenProjectFile?: (entry: ProjectFileEntry) => void;
   onRefreshActiveCode?: () => void;
   onAttachCodeFileToChat?: (filePath: string, fileName: string) => void;
+  // Terminal props
+  onNewTerminalTab?: () => void;
+  onRestartTerminalTab?: (tabId: string) => void;
   onCloseRightPane?: () => void;
   initialShowFileTree?: boolean;
   initialFileTreeEntries?: Record<string, ProjectFileEntry[]>;
@@ -132,6 +137,8 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = React.memo(({
   onOpenProjectFile,
   onRefreshActiveCode,
   onAttachCodeFileToChat,
+  onNewTerminalTab,
+  onRestartTerminalTab,
   onCloseRightPane,
   initialShowFileTree = false,
   initialFileTreeEntries,
@@ -288,6 +295,19 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = React.memo(({
       );
     }
 
+    if (tab.kind === "terminal") {
+      if (tab.isLoading) {
+        return <Loader2 className="w-3 h-3 text-violet-500 animate-spin shrink-0" />;
+      }
+      return (
+        <Terminal
+          className={`w-3 h-3 shrink-0 ${
+            tab.hasError ? "text-rose-500" : isActive ? "text-violet-500" : "text-zinc-400"
+          }`}
+        />
+      );
+    }
+
     return (
       <ImageIcon
         className={`w-3 h-3 shrink-0 ${
@@ -399,6 +419,16 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = React.memo(({
           </button>
           <button
             type="button"
+            data-testid="new-terminal-tab-btn"
+            onClick={() => onNewTerminalTab?.()}
+            title={t(locale, "rightPane.newTerminalTabTitle")}
+            aria-label={t(locale, "rightPane.newTerminalTabTitle")}
+            className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+          >
+            <Terminal className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
             data-testid="open-markdown-tab-btn"
             onClick={onOpenMarkdownDialog}
             title={t(locale, "rightPane.openMarkdownTitle")}
@@ -479,6 +509,15 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = React.memo(({
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>{t(locale, "rightPane.newBrowserTabBtn")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="empty-new-terminal-btn"
+                    onClick={() => onNewTerminalTab?.()}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[12px] font-medium bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 text-zinc-800 dark:text-zinc-200 border border-zinc-200/80 dark:border-zinc-700/80 transition-colors cursor-pointer"
+                  >
+                    <Terminal className="w-3.5 h-3.5 text-violet-500" />
+                    <span>{t(locale, "rightPane.newTerminalTabBtn")}</span>
                   </button>
                   <button
                     type="button"
@@ -597,7 +636,7 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = React.memo(({
               onRevealInFinder={onRevealInFinder}
               onAttachFileToChat={onAttachCodeFileToChat}
             />
-          ) : (
+          ) : activeTab.kind === "image" ? (
             <ImageViewerPane
               activeTab={activeTab.imageTab}
               locale={locale}
@@ -607,7 +646,25 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = React.memo(({
               onOpenUrl={onOpenUrl}
               onRevealInFinder={onRevealInFinder}
             />
-          )}
+          ) : null}
+
+          {/* Keep open terminal tabs in this project mounted so switching tabs preserves xterm state */}
+          {tabs
+            .filter(
+              (tab): tab is Extract<UnifiedRightPaneTab, { kind: "terminal" }> =>
+                tab.kind === "terminal",
+            )
+            .map((tab) => (
+              <TerminalPane
+                key={tab.terminalTab.id}
+                tab={tab.terminalTab}
+                isVisible={activeTab?.kind === "terminal" && activeTab.id === tab.id}
+                locale={locale}
+                onRestart={onRestartTerminalTab}
+                onNewTerminalTab={onNewTerminalTab}
+                onRevealInFinder={onRevealInFinder}
+              />
+            ))}
         </div>
       </div>
 

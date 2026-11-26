@@ -16,6 +16,7 @@ import { RightPaneProjectSwitcher } from "../src/renderer/components/RightPanePr
 import { SettingsModal } from "../src/renderer/components/SettingsModal.js";
 import { TaskInspectorModal } from "../src/renderer/components/TaskInspectorModal.js";
 import { TaskSidebar } from "../src/renderer/components/TaskSidebar.js";
+import { TerminalPane } from "../src/renderer/components/TerminalPane.js";
 import { TaskEventCard, UnifiedChat } from "../src/renderer/components/UnifiedChat.js";
 import { UnifiedRightPane } from "../src/renderer/components/UnifiedRightPane.js";
 import { deriveQuestionItems } from "../src/renderer/lib/questions.js";
@@ -714,5 +715,39 @@ describe("Main-process ConductorController TaskEvent localization", () => {
       .messages.filter((m) => m.role === "taskEvent")
       .at(-1);
     expect(jaEvent?.text).toContain("— 完了（確認待ち）");
+  });
+
+  it("renders TerminalPane cleanly in both Japanese and English with zero leaked Japanese in English mode", () => {
+    expect(t("ja", "rightPane.newTerminalTabBtn")).toBe("新しいターミナル");
+    expect(t("en", "rightPane.newTerminalTabBtn")).toBe("New Terminal");
+    expect(t("ja", "terminal.restartBtn")).toBe("再起動");
+    expect(t("en", "terminal.restartBtn")).toBe("Restart");
+
+    const enTerminalHtml = renderToStaticMarkup(
+      <TerminalPane
+        tab={{
+          id: "term-en",
+          title: "zsh",
+          cwd: "/workspace/acme-web",
+          shell: "/bin/zsh",
+          shellName: "zsh",
+          pid: 1234,
+          backend: "node-pty",
+          projectId: SAMPLE_PROJECT.id,
+          status: "exited",
+          exitCode: 0,
+          error: null,
+          sequenceNumber: 1,
+        }}
+        isVisible={true}
+        locale="en"
+        onRestart={vi.fn()}
+        onNewTerminalTab={vi.fn()}
+        onRevealInFinder={vi.fn()}
+      />,
+    );
+    expect(enTerminalHtml).toContain("Exited (code 0)");
+    expect(enTerminalHtml).toContain("Restart");
+    expect(enTerminalHtml).not.toMatch(JAPANESE_CHAR_RE);
   });
 });

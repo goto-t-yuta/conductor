@@ -13,7 +13,7 @@ const commonConfig = {
   format: "cjs",
   target: "node22",
   sourcemap: true,
-  external: ["electron"],
+  external: ["electron", "node-pty"],
 };
 
 async function run() {

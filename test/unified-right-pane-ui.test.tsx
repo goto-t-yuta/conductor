@@ -12,8 +12,10 @@ import {
   makeCodeUnifiedTabId,
   makeImageUnifiedTabId,
   makeMarkdownUnifiedTabId,
+  makeTerminalUnifiedTabId,
   type CodeViewerTab,
   type ProjectSwitcherItem,
+  type TerminalTab,
   type UnifiedRightPaneTab,
 } from "../src/renderer/lib/right-pane-tabs.js";
 
@@ -206,8 +208,9 @@ describe("UnifiedRightPane & RightPaneProjectSwitcher UI", () => {
     expect(html).toContain('data-testid="unified-tab-image"');
     expect(html).toContain("screenshot.png");
 
-    // Quick add buttons for browser tab and markdown file
+    // Quick add buttons for browser tab, terminal tab, and markdown file
     expect(html).toContain('data-testid="new-browser-tab-btn"');
+    expect(html).toContain('data-testid="new-terminal-tab-btn"');
     expect(html).toContain('data-testid="open-markdown-tab-btn"');
 
     // Old Browser | Markdown | Image mode switcher is gone
@@ -250,6 +253,8 @@ describe("UnifiedRightPane & RightPaneProjectSwitcher UI", () => {
     expect(html).toContain('data-testid="right-pane-empty-state"');
     expect(html).toContain("web_app");
     expect(html).toContain("新しいブラウザタブ");
+    expect(html).toContain("新しいターミナル");
+    expect(html).toContain('data-testid="empty-new-terminal-btn"');
     expect(html).toContain("Markdown ファイルを開く");
     expect(html).toContain("GUIDE.md");
   });
@@ -468,5 +473,119 @@ describe("UnifiedRightPane & RightPaneProjectSwitcher UI", () => {
     expect(previewHtml).toContain("Unsaved edits appear in preview too.");
     expect(previewHtml).toContain('data-testid="markdown-save-btn"');
     expect(previewHtml).toContain('data-testid="markdown-discard-btn"');
+  });
+
+  it("renders interactive terminal tabs, keeps multiple terminals mounted, and shows running/exited/error states", () => {
+    const runningTerm: TerminalTab = {
+      id: "term-a",
+      title: "zsh",
+      cwd: PROJ_A.path,
+      shell: "/bin/zsh",
+      shellName: "zsh",
+      pid: 4242,
+      backend: "node-pty",
+      projectId: PROJ_A.id,
+      status: "running",
+      exitCode: null,
+      error: null,
+      sequenceNumber: 1,
+    };
+
+    const exitedTerm: TerminalTab = {
+      id: "term-b",
+      title: "zsh #2",
+      cwd: PROJ_A.path,
+      shell: "/bin/zsh",
+      shellName: "zsh",
+      pid: null,
+      backend: "python-pty",
+      projectId: PROJ_A.id,
+      status: "exited",
+      exitCode: 1,
+      error: null,
+      sequenceNumber: 2,
+    };
+
+    const termTabA: UnifiedRightPaneTab = {
+      id: makeTerminalUnifiedTabId(runningTerm.id),
+      kind: "terminal",
+      projectScope: PROJ_A.id,
+      title: runningTerm.title,
+      subtitle: runningTerm.cwd,
+      isLoading: false,
+      hasError: false,
+      terminalTab: runningTerm,
+    };
+    const termTabB: UnifiedRightPaneTab = {
+      id: makeTerminalUnifiedTabId(exitedTerm.id),
+      kind: "terminal",
+      projectScope: PROJ_A.id,
+      title: exitedTerm.title,
+      subtitle: exitedTerm.cwd,
+      isLoading: false,
+      hasError: true,
+      terminalTab: exitedTerm,
+    };
+
+    const runningHtml = renderToStaticMarkup(
+      <UnifiedRightPane
+        {...makeProps({
+          tabs: [...MIXED_TABS, termTabA, termTabB],
+          activeTab: termTabA,
+          onNewTerminalTab: vi.fn(),
+          onRestartTerminalTab: vi.fn(),
+        })}
+      />,
+    );
+
+    expect(runningHtml).toContain('data-testid="unified-tab-terminal"');
+    expect(runningHtml).toContain('data-terminal-id="term-a"');
+    expect(runningHtml).toContain('data-terminal-id="term-b"');
+    expect(runningHtml).toContain('data-testid="terminal-xterm-host"');
+    expect(runningHtml).toContain("実行中");
+    expect(runningHtml).toContain(PROJ_A.path);
+
+    const exitedHtml = renderToStaticMarkup(
+      <UnifiedRightPane
+        {...makeProps({
+          tabs: [termTabB],
+          activeTab: termTabB,
+          onNewTerminalTab: vi.fn(),
+          onRestartTerminalTab: vi.fn(),
+        })}
+      />,
+    );
+    expect(exitedHtml).toContain('data-testid="terminal-exited-banner"');
+    expect(exitedHtml).toContain('data-testid="terminal-fallback-badge"');
+    expect(exitedHtml).toContain("終了 (コード 1)");
+    expect(exitedHtml).toContain("再起動");
+
+    const errorTerm: TerminalTab = {
+      ...runningTerm,
+      id: "term-err",
+      status: "error",
+      error: "spawn failed",
+    };
+    const errorTab: UnifiedRightPaneTab = {
+      id: makeTerminalUnifiedTabId(errorTerm.id),
+      kind: "terminal",
+      projectScope: PROJ_A.id,
+      title: errorTerm.title,
+      subtitle: errorTerm.cwd,
+      isLoading: false,
+      hasError: true,
+      terminalTab: errorTerm,
+    };
+    const errorHtml = renderToStaticMarkup(
+      <UnifiedRightPane
+        {...makeProps({
+          tabs: [errorTab],
+          activeTab: errorTab,
+          onRestartTerminalTab: vi.fn(),
+        })}
+      />,
+    );
+    expect(errorHtml).toContain('data-testid="terminal-error-state"');
+    expect(errorHtml).toContain("spawn failed");
   });
 });

@@ -9,6 +9,7 @@ import type {
   IntegrationMode,
   PreferredLanguage,
   SendMessagePayload,
+  TerminalCreateOptions,
   VoiceMicPermissionResult,
   VoiceSpeakRequest,
 } from "../shared/types.js";
@@ -23,11 +24,13 @@ import {
 import { registerProjectFileTreeIpcHandlers } from "./project-files.js";
 import { QuitGuard } from "./quit-guard.js";
 import { StateStore } from "./state-store.js";
+import { TerminalManager } from "./terminal-manager.js";
 import { VoiceTtsManager } from "./voice-tts.js";
 
 let mainWindow: BrowserWindow | null = null;
 let browserManager: BrowserManager | null = null;
 let markdownWatcher: MarkdownFileWatcher | null = null;
+let terminalManager: TerminalManager | null = null;
 let controller: ConductorController | null = null;
 let stateStore: StateStore | null = null;
 const voiceTts = new VoiceTtsManager();
@@ -47,6 +50,7 @@ const quitGuard = new QuitGuard({
     voiceTts.stop();
     markdownWatcher?.dispose();
     markdownWatcher = null;
+    terminalManager?.disposeAll();
     browserManager?.destroyAll();
     if (controller) {
       await Promise.race([
@@ -142,6 +146,11 @@ function createApplicationMenu(): void {
           label: "Markdown Viewer に切替",
           accelerator: "CmdOrCtrl+Shift+M",
           click: () => sendToRenderer("conductor:shortcut", "toggle-markdown-viewer"),
+        },
+        {
+          label: "新しいターミナルタブを開く",
+          accelerator: "CmdOrCtrl+Shift+T",
+          click: () => sendToRenderer("conductor:shortcut", "new-terminal"),
         },
         { type: "separator" },
         {
@@ -439,6 +448,28 @@ function registerIpcHandlers(): void {
 
   // Project File Tree read-only IPC (fs:list-dir, fs:read-text-file)
   registerProjectFileTreeIpcHandlers(ipcMain);
+
+  // Interactive Terminal (PTY) IPC
+  terminalManager = new TerminalManager({
+    onData: (event) => sendToRenderer("terminal:data", event),
+    onExit: (event) => sendToRenderer("terminal:exit", event),
+  });
+
+  ipcMain.handle("terminal:create", (_e, options?: TerminalCreateOptions) =>
+    terminalManager?.create(options) ?? { ok: false, error: "Terminal manager not initialized" },
+  );
+  ipcMain.handle("terminal:write", (_e, sessionId: string, data: string) =>
+    terminalManager?.write(sessionId, data) ?? { ok: false, error: "Terminal manager not initialized" },
+  );
+  ipcMain.handle("terminal:resize", (_e, sessionId: string, cols: number, rows: number) =>
+    terminalManager?.resize(sessionId, cols, rows) ?? {
+      ok: false,
+      error: "Terminal manager not initialized",
+    },
+  );
+  ipcMain.handle("terminal:close", (_e, sessionId: string) =>
+    terminalManager?.close(sessionId) ?? { ok: false },
+  );
 }
 
 async function createWindow(): Promise<void> {
@@ -515,6 +546,7 @@ async function createWindow(): Promise<void> {
     voiceTts.stop();
     markdownWatcher?.dispose();
     markdownWatcher = null;
+    terminalManager?.disposeAll();
     browserManager?.destroyAll();
     mainWindow = null;
   });

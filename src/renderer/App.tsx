@@ -13,6 +13,7 @@ import type {
 } from "../shared/types.js";
 import { classifyProjectFile, formatFileTreeIpcError } from "../shared/file-tree.js";
 import { resolveUiLocale, t } from "../shared/i18n.js";
+import { buildTerminalTabTitle } from "../shared/terminal.js";
 import {
   addExplicitMentionTarget,
   removeExplicitMentionTarget,
@@ -74,6 +75,7 @@ import {
   makeCodeUnifiedTabId,
   makeImageUnifiedTabId,
   makeMarkdownUnifiedTabId,
+  makeTerminalUnifiedTabId,
   parseUnifiedTabId,
   reconcileWorkspaceState,
   resolveProjectFromChatText,
@@ -85,8 +87,10 @@ import {
   type CodeViewerTab,
   type ProjectScopeKey,
   type RightPaneWorkspaceState,
+  type TerminalTab,
   type UnifiedRightPaneTab,
 } from "./lib/right-pane-tabs.js";
+import { terminalOutputStore } from "./lib/terminal-session-store.js";
 
 const RECENT_MD_STORAGE_KEY = "conductor:recentMarkdownFiles";
 const VOICE_AUTO_SEND_STORAGE_KEY = "conductor:voiceAutoSend";
@@ -272,6 +276,12 @@ export const App: React.FC = () => {
   // Right-pane Code/Text Viewer state (opened from Project File Tree)
   const [codeTabs, setCodeTabs] = useState<CodeViewerTab[]>([]);
 
+  // Right-pane Interactive Terminal tabs
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
+  const terminalTabsRef = useRef<TerminalTab[]>(terminalTabs);
+  terminalTabsRef.current = terminalTabs;
+  const terminalSeqByScopeRef = useRef<Map<ProjectScopeKey, number>>(new Map());
+
   const snapshotRef = useRef<AppSnapshot | null>(null);
   snapshotRef.current = snapshot;
 
@@ -406,9 +416,33 @@ export const App: React.FC = () => {
     const unsubAtt = window.conductor.onAttachmentFromBrowser((att) => {
       updateAttachments((prev) => [...prev, att]);
     });
+    const unsubTermData = window.conductor.onTerminalData?.((event) => {
+      terminalOutputStore.append(event.sessionId, event.data);
+    });
+    const unsubTermExit = window.conductor.onTerminalExit?.((event) => {
+      setTerminalTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === event.sessionId
+            ? { ...tab, status: "exited", exitCode: event.exitCode ?? null }
+            : tab,
+        ),
+      );
+    });
+
+    const closeAllTerminals = () => {
+      for (const tab of terminalTabsRef.current) {
+        void window.conductor.terminalClose?.(tab.id);
+      }
+      terminalOutputStore.clearAll();
+    };
+    window.addEventListener("beforeunload", closeAllTerminals);
+
     return () => {
+      window.removeEventListener("beforeunload", closeAllTerminals);
       unsubSnap();
       unsubAtt();
+      unsubTermData?.();
+      unsubTermExit?.();
     };
   }, [updateAttachments]);
 
@@ -481,6 +515,7 @@ export const App: React.FC = () => {
         mdTabs,
         imageTabs,
         codeTabs,
+        terminalTabs,
         projects: snapshot.projects,
         tasks: snapshot.tasks,
         pendingMarkdownPaths: pendingRestoreMdPathsRef.current,
@@ -509,6 +544,7 @@ export const App: React.FC = () => {
     mdTabs,
     imageTabs,
     codeTabs,
+    terminalTabs,
     mdRestoreTick,
   ]);
 
@@ -528,9 +564,10 @@ export const App: React.FC = () => {
       mdTabs,
       imageTabs,
       codeTabs,
+      terminalTabs,
       projects: snapshot?.projects ?? [],
     }),
-    [snapshot?.browserTabs, snapshot?.projects, mdTabs, imageTabs, codeTabs],
+    [snapshot?.browserTabs, snapshot?.projects, mdTabs, imageTabs, codeTabs, terminalTabs],
   );
 
   const activeProjectTabs = useMemo(
@@ -1287,6 +1324,192 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const handleNewTerminalTab = useCallback(async () => {
+    const scope = workspaceStateRef.current.activeProjectScope;
+    const projects = snapshotRef.current?.projects ?? [];
+    const activeProject =
+      scope !== GENERAL_PROJECT_SCOPE ? (projects.find((p) => p.id === scope) ?? null) : null;
+    const initialCwd = activeProject?.path ?? null;
+    const projectId = activeProject?.id ?? null;
+
+    const nextSeq = (terminalSeqByScopeRef.current.get(scope) ?? 0) + 1;
+    terminalSeqByScopeRef.current.set(scope, nextSeq);
+
+    const sessionId = `term-${crypto.randomUUID()}`;
+    const defaultLabel = t(uiLocaleRef.current, "terminal.defaultTitle");
+    const placeholderTab: TerminalTab = {
+      id: sessionId,
+      title: buildTerminalTabTitle(null, nextSeq, defaultLabel),
+      cwd: initialCwd ?? "",
+      shell: null,
+      shellName: null,
+      pid: null,
+      backend: null,
+      projectId,
+      status: "starting",
+      exitCode: null,
+      error: null,
+      sequenceNumber: nextSeq,
+    };
+
+    hideBrowserBounds();
+    void window.conductor.setLayout({ showBrowserPane: true });
+    setTerminalTabs((prev) => [...prev, placeholderTab]);
+    setWorkspaceState((prev) =>
+      activateTabInWorkspace(prev, makeTerminalUnifiedTabId(sessionId), scope, {
+        switchProject: true,
+      }),
+    );
+
+    try {
+      const result = await window.conductor.terminalCreate({
+        id: sessionId,
+        cwd: initialCwd,
+        projectId,
+      });
+
+      // If user closed the tab while the shell was starting, kill the newly created PTY immediately
+      if (!terminalTabsRef.current.some((tab) => tab.id === sessionId)) {
+        if (result.ok && result.session) {
+          void window.conductor.terminalClose(result.session.id);
+        }
+        terminalOutputStore.delete(sessionId);
+        return;
+      }
+
+      if (result.ok && result.session) {
+        const session = result.session;
+        setTerminalTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === sessionId
+              ? {
+                  ...tab,
+                  title: buildTerminalTabTitle(session.shellName, tab.sequenceNumber, defaultLabel),
+                  cwd: session.cwd,
+                  shell: session.shell,
+                  shellName: session.shellName,
+                  pid: session.pid,
+                  backend: session.backend,
+                  status: "running",
+                  exitCode: null,
+                  error: null,
+                }
+              : tab,
+          ),
+        );
+      } else {
+        setTerminalTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === sessionId
+              ? {
+                  ...tab,
+                  status: "error",
+                  error: result.error ?? t(uiLocaleRef.current, "terminal.startFailed"),
+                }
+              : tab,
+          ),
+        );
+      }
+    } catch (err) {
+      setTerminalTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === sessionId
+            ? {
+                ...tab,
+                status: "error",
+                error:
+                  err instanceof Error
+                    ? err.message
+                    : t(uiLocaleRef.current, "terminal.startFailed"),
+              }
+            : tab,
+        ),
+      );
+    }
+  }, []);
+
+  const handleRestartTerminalTab = useCallback(async (tabId: string) => {
+    const existing = terminalTabsRef.current.find((tab) => tab.id === tabId);
+    if (!existing) return;
+
+    await window.conductor.terminalClose(tabId);
+    terminalOutputStore.clearBuffer(tabId);
+
+    setTerminalTabs((prev) =>
+      prev.map((tab) =>
+        tab.id === tabId
+          ? { ...tab, status: "starting", exitCode: null, error: null, pid: null }
+          : tab,
+      ),
+    );
+
+    const defaultLabel = t(uiLocaleRef.current, "terminal.defaultTitle");
+    try {
+      const result = await window.conductor.terminalCreate({
+        id: tabId,
+        cwd: existing.cwd || null,
+        projectId: existing.projectId,
+      });
+
+      if (!terminalTabsRef.current.some((tab) => tab.id === tabId)) {
+        if (result.ok && result.session) {
+          void window.conductor.terminalClose(result.session.id);
+        }
+        terminalOutputStore.delete(tabId);
+        return;
+      }
+
+      if (result.ok && result.session) {
+        const session = result.session;
+        setTerminalTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === tabId
+              ? {
+                  ...tab,
+                  title: buildTerminalTabTitle(session.shellName, tab.sequenceNumber, defaultLabel),
+                  cwd: session.cwd,
+                  shell: session.shell,
+                  shellName: session.shellName,
+                  pid: session.pid,
+                  backend: session.backend,
+                  status: "running",
+                  exitCode: null,
+                  error: null,
+                }
+              : tab,
+          ),
+        );
+      } else {
+        setTerminalTabs((prev) =>
+          prev.map((tab) =>
+            tab.id === tabId
+              ? {
+                  ...tab,
+                  status: "error",
+                  error: result.error ?? t(uiLocaleRef.current, "terminal.startFailed"),
+                }
+              : tab,
+          ),
+        );
+      }
+    } catch (err) {
+      setTerminalTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === tabId
+            ? {
+                ...tab,
+                status: "error",
+                error:
+                  err instanceof Error
+                    ? err.message
+                    : t(uiLocaleRef.current, "terminal.startFailed"),
+              }
+            : tab,
+        ),
+      );
+    }
+  }, []);
+
   const handleOpenUrlInBrowser = useCallback(
     async (
       url: string,
@@ -1409,6 +1632,10 @@ export const App: React.FC = () => {
       setMdTabs((prev) => prev.filter((t) => t.filePath !== tab.markdownTab.filePath));
     } else if (tab.kind === "code") {
       setCodeTabs((prev) => prev.filter((t) => t.filePath !== tab.codeTab.filePath));
+    } else if (tab.kind === "terminal") {
+      void window.conductor.terminalClose(tab.terminalTab.id);
+      terminalOutputStore.delete(tab.terminalTab.id);
+      setTerminalTabs((prev) => prev.filter((t) => t.id !== tab.terminalTab.id));
     } else if (tab.kind === "image") {
       imageDiskFallbackAttemptedRef.current.delete(tab.imageTab.id);
       setImageTabs((prev) => {
@@ -1492,6 +1719,9 @@ export const App: React.FC = () => {
         case "toggle-markdown-viewer":
           handleToggleMarkdownViewer();
           break;
+        case "new-terminal":
+          void handleNewTerminalTab();
+          break;
         case "open-markdown-file":
           void handleOpenMarkdownDialog();
           break;
@@ -1516,6 +1746,7 @@ export const App: React.FC = () => {
     captureScreenshot,
     handleToggleMarkdownViewer,
     handleOpenMarkdownDialog,
+    handleNewTerminalTab,
     handleToggleElementPicker,
     handleCloseRightPane,
   ]);
@@ -1858,6 +2089,17 @@ export const App: React.FC = () => {
     void handleNewBrowserTab();
   }, [handleNewBrowserTab]);
 
+  const handleNewTerminalTabClick = useCallback(() => {
+    void handleNewTerminalTab();
+  }, [handleNewTerminalTab]);
+
+  const handleRestartTerminalTabClick = useCallback(
+    (tabId: string) => {
+      void handleRestartTerminalTab(tabId);
+    },
+    [handleRestartTerminalTab],
+  );
+
   const handleBrowserBack = useCallback(() => {
     void window.conductor.browserBack();
   }, []);
@@ -2108,6 +2350,8 @@ export const App: React.FC = () => {
               onOpenProjectFile={handleOpenProjectFile}
               onRefreshActiveCode={handleRefreshActiveCode}
               onAttachCodeFileToChat={handleAttachCodeFile}
+              onNewTerminalTab={handleNewTerminalTabClick}
+              onRestartTerminalTab={handleRestartTerminalTabClick}
               onCloseRightPane={handleCloseRightPane}
               onSelectProjectScope={handleSelectProjectScope}
               onSelectTab={handleSelectUnifiedTab}

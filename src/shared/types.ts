@@ -6,6 +6,17 @@ import type {
   TextFileReadResult,
 } from "./file-tree.js";
 import type { PreferredLanguage } from "./language.js";
+import type {
+  TerminalBackendKind,
+  TerminalCloseResult,
+  TerminalCreateOptions,
+  TerminalCreateResult,
+  TerminalDataEvent,
+  TerminalExitEvent,
+  TerminalResizeResult,
+  TerminalSessionInfo,
+  TerminalWriteResult,
+} from "./terminal.js";
 import type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
 import type {
   VoiceMicPermissionResult,
@@ -21,6 +32,17 @@ export type {
   TextFileReadResult,
 } from "./file-tree.js";
 export type { PreferredLanguage } from "./language.js";
+export type {
+  TerminalBackendKind,
+  TerminalCloseResult,
+  TerminalCreateOptions,
+  TerminalCreateResult,
+  TerminalDataEvent,
+  TerminalExitEvent,
+  TerminalResizeResult,
+  TerminalSessionInfo,
+  TerminalWriteResult,
+} from "./terminal.js";
 export type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
 export type {
   VoiceMicPermissionResult,
@@ -277,7 +299,7 @@ export interface BrowserBounds {
   visible: boolean;
 }
 
-export type RightPaneMode = "browser" | "markdown" | "image" | "code";
+export type RightPaneMode = "browser" | "markdown" | "image" | "code" | "terminal";
 
 export interface ImageReadResult {
   ok: boolean;
@@ -534,6 +556,14 @@ export interface ConductorAPI {
     filePath: string,
     options?: { rootPath?: string },
   ): Promise<TextFileReadResult>;
+
+  // Interactive Terminal (PTY)
+  terminalCreate(options?: TerminalCreateOptions): Promise<TerminalCreateResult>;
+  terminalWrite(sessionId: string, data: string): Promise<TerminalWriteResult>;
+  terminalResize(sessionId: string, cols: number, rows: number): Promise<TerminalResizeResult>;
+  terminalClose(sessionId: string): Promise<TerminalCloseResult>;
+  onTerminalData(listener: (event: TerminalDataEvent) => void): () => void;
+  onTerminalExit(listener: (event: TerminalExitEvent) => void): () => void;
 
   getPathForFile(file: File): string;
 }

@@ -151,13 +151,21 @@ describe("IPC handler registration & preload channel parity", () => {
     const mainDuplicates = allMainHandles.filter((ch, idx) => allMainHandles.indexOf(ch) !== idx);
     expect(mainDuplicates).toEqual([]);
 
-    // Explicit guard for file tree & markdown write channels
+    // Explicit guard for file tree, markdown write & terminal channels
     expect(allMainHandles).toContain("fs:list-dir");
     expect(allMainHandles).toContain("fs:read-text-file");
     expect(allMainHandles).toContain("markdown:write-file");
+    expect(allMainHandles).toContain("terminal:create");
+    expect(allMainHandles).toContain("terminal:write");
+    expect(allMainHandles).toContain("terminal:resize");
+    expect(allMainHandles).toContain("terminal:close");
     expect(preloadInvokes).toContain("fs:list-dir");
     expect(preloadInvokes).toContain("fs:read-text-file");
     expect(preloadInvokes).toContain("markdown:write-file");
+    expect(preloadInvokes).toContain("terminal:create");
+    expect(preloadInvokes).toContain("terminal:write");
+    expect(preloadInvokes).toContain("terminal:resize");
+    expect(preloadInvokes).toContain("terminal:close");
 
     // Exact 1:1 parity between preload ipcRenderer.invoke and main ipcMain.handle
     const mainSet = new Set(allMainHandles);
@@ -181,6 +189,8 @@ describe("IPC handler registration & preload channel parity", () => {
 
     expect([...preloadOnEvents].sort()).toEqual([...mainEvents].sort());
     expect([...preloadOffEvents].sort()).toEqual([...preloadOnEvents].sort());
+    expect(mainEvents.has("terminal:data")).toBe(true);
+    expect(mainEvents.has("terminal:exit")).toBe(true);
   });
 
   it("formats stale main-process IPC handler errors with a restart guidance message", () => {

@@ -320,13 +320,15 @@ export const UI_STRINGS = {
     "rightPane.unsavedChanges": "未保存の変更があります",
     "rightPane.closeTabAria": "{title} を閉じる",
     "rightPane.newBrowserTabTitle": "新しいブラウザタブを開く",
+    "rightPane.newTerminalTabTitle": "新しいターミナルタブを開く (⌘⇧T)",
     "rightPane.openMarkdownTitle": "Markdown ファイルを開く (⌘⌥O)",
     "rightPane.openMarkdownAria": "Markdown ファイルを開く",
     "rightPane.closePanel": "右パネルを閉じる",
     "rightPane.resizeFileTreeTitle": "ドラッグしてファイルツリーの幅を調整",
     "rightPane.emptyDesc":
-      "このプロジェクトで開いているタブはまだありません。ブラウザ・Markdown・画像・コードを1つのタブバーでまとめて管理できます。",
+      "このプロジェクトで開いているタブはまだありません。ブラウザ・ターミナル・Markdown・画像・コードを1つのタブバーでまとめて管理できます。",
     "rightPane.newBrowserTabBtn": "新しいブラウザタブ",
+    "rightPane.newTerminalTabBtn": "新しいターミナル",
     "rightPane.openMarkdownBtn": "Markdown ファイルを開く",
     "rightPane.openFileTreeBtn": "ファイルツリーを開く",
     "rightPane.recentMarkdownHeader": "最近の Markdown ({name})",
@@ -459,6 +461,27 @@ export const UI_STRINGS = {
     "fileTree.noFiles": "表示できるファイルがありません",
     "fileTree.emptyDir": "(空)",
     "fileTree.loadDirError": "ディレクトリを読み込めませんでした。",
+
+    // TerminalPane
+    "terminal.defaultTitle": "ターミナル",
+    "terminal.statusStarting": "起動中...",
+    "terminal.statusRunning": "実行中",
+    "terminal.statusExited": "終了 (コード {code})",
+    "terminal.statusExitedNoCode": "終了",
+    "terminal.statusError": "エラー",
+    "terminal.restartBtn": "再起動",
+    "terminal.restartTitle": "ターミナルを再起動",
+    "terminal.clearTitle": "画面をクリア",
+    "terminal.copyTitle": "選択テキストをコピー",
+    "terminal.pasteTitle": "クリップボードから貼り付け",
+    "terminal.newTabTitle": "新しいターミナルタブを開く",
+    "terminal.fallbackBanner": "フォールバックモード ({backend}) で実行中",
+    "terminal.exitedNotice":
+      "プロセスが終了しました（終了コード: {code}）。「再起動」ボタンまたは Enter で新しいシェルを開始できます。",
+    "terminal.exitedNoticeNoCode":
+      "プロセスが終了しました。「再起動」ボタンまたは Enter で新しいシェルを開始できます。",
+    "terminal.startFailed": "ターミナルの起動に失敗しました。",
+    "terminal.ariaLabel": "インタラクティブターミナル: {title}",
 
     // Main-process TaskEvent & currentStep labels
     "taskEvent.completedReview": "完了（確認待ち）",
@@ -795,13 +818,15 @@ export const UI_STRINGS = {
     "rightPane.unsavedChanges": "Unsaved changes",
     "rightPane.closeTabAria": "Close {title}",
     "rightPane.newBrowserTabTitle": "Open new browser tab",
+    "rightPane.newTerminalTabTitle": "Open new terminal tab (⌘⇧T)",
     "rightPane.openMarkdownTitle": "Open Markdown file (⌘⌥O)",
     "rightPane.openMarkdownAria": "Open Markdown file",
     "rightPane.closePanel": "Close right panel",
     "rightPane.resizeFileTreeTitle": "Drag to resize file tree",
     "rightPane.emptyDesc":
-      "No open tabs for this project yet. Manage Browser, Markdown, Image, and Code tabs together in one strip.",
+      "No open tabs for this project yet. Manage Browser, Terminal, Markdown, Image, and Code tabs together in one strip.",
     "rightPane.newBrowserTabBtn": "New Browser Tab",
+    "rightPane.newTerminalTabBtn": "New Terminal",
     "rightPane.openMarkdownBtn": "Open Markdown File",
     "rightPane.openFileTreeBtn": "Open File Tree",
     "rightPane.recentMarkdownHeader": "Recent Markdown ({name})",
@@ -934,6 +959,27 @@ export const UI_STRINGS = {
     "fileTree.noFiles": "No files to display",
     "fileTree.emptyDir": "(empty)",
     "fileTree.loadDirError": "Failed to load directory.",
+
+    // TerminalPane
+    "terminal.defaultTitle": "Terminal",
+    "terminal.statusStarting": "Starting...",
+    "terminal.statusRunning": "Running",
+    "terminal.statusExited": "Exited (code {code})",
+    "terminal.statusExitedNoCode": "Exited",
+    "terminal.statusError": "Error",
+    "terminal.restartBtn": "Restart",
+    "terminal.restartTitle": "Restart terminal",
+    "terminal.clearTitle": "Clear terminal",
+    "terminal.copyTitle": "Copy selection",
+    "terminal.pasteTitle": "Paste from clipboard",
+    "terminal.newTabTitle": "Open new terminal tab",
+    "terminal.fallbackBanner": "Running in fallback mode ({backend})",
+    "terminal.exitedNotice":
+      "Process exited (code: {code}). Click Restart or press Enter to start a new shell.",
+    "terminal.exitedNoticeNoCode":
+      "Process exited. Click Restart or press Enter to start a new shell.",
+    "terminal.startFailed": "Failed to start terminal.",
+    "terminal.ariaLabel": "Interactive terminal: {title}",
 
     // Main-process TaskEvent & currentStep labels
     "taskEvent.completedReview": "Completed (Needs Review)",

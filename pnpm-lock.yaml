@@ -8,12 +8,21 @@ importers:
 
   .:
     dependencies:
+      '@xterm/addon-fit':
+        specifier: ^0.11.0
+        version: 0.11.0
+      '@xterm/xterm':
+        specifier: ^6.0.0
+        version: 6.0.0
       lucide-react:
         specifier: ^0.511.0
         version: 0.511.0(react@19.3.1)
       mermaid:
         specifier: ^12.3.0
         version: 12.3.0
+      node-pty:
+        specifier: ^1.1.0
+        version: 1.1.0
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
@@ -882,6 +891,12 @@ packages:
   '@xmldom/xmldom@0.8.15':
     resolution: {integrity: sha512-/5NV/vDALVFDXgLmfsy9TRCBlKwO2LNBFzpzvb9iIj+jR+eSc6DLYYvVOdivT/jm7MtU6TebYuRmzEOI7w40UA==}
     engines: {node: '>=10.0.0'}
+
+  '@xterm/addon-fit@0.11.0':
+    resolution: {integrity: sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g==}
+
+  '@xterm/xterm@6.0.0':
+    resolution: {integrity: sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==}
 
   abbrev@4.0.0:
     resolution: {integrity: sha512-a1wflyaL0tHtJSmLSOVybYhy22vRih4eduhhrkcjgrWGnRfrZtovJ2FRjxuTtkkj47O/baf0R86QU5OuYpz8fA==}
@@ -2121,6 +2136,9 @@ packages:
     resolution: {integrity: sha512-sey5XPoGJ2VBCcwtHhvwSbMMkYvXyvZkn+FjHsoFij3bcWjJRN4+3Zt7GsZOkgZ8J0maJFCWsYtralZDJVQncg==}
     engines: {node: '>=22.12.0'}
 
+  node-addon-api@7.1.1:
+    resolution: {integrity: sha512-5m3bsyrjFWE1xf7nz7YXdN4udnVtXK6/Yfgn5qnahL6bCkf2yKt4k3nuTKAtT4r3IG8JNR2ncsIMdZuAzJjHQQ==}
+
   node-api-version@0.2.1:
     resolution: {integrity: sha512-2xP/IGGMmmSQpI1+O/k72jF/ykvZ89JeuKX3TLJAYPDVLUalrshrLHkeVcCCZqG/eEa635cr8IBYzgnDvM2O8Q==}
 
@@ -2131,6 +2149,9 @@ packages:
 
   node-int64@0.4.0:
     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
+
+  node-pty@1.1.0:
+    resolution: {integrity: sha512-20JqtutY6JPXTUnL0ij1uad7Qe1baT46lyolh2sSENDd4sTzKZ4nmAFkeAARDKwmlLjPx6XKRlwRUxwjOy+lUg==}
 
   node-releases@2.0.65:
     resolution: {integrity: sha512-PfvofsGQ+MiOQIPkX9fU8ELUWmy5zL74CdQaph/ismKszfFkfwXaw0cGiwbwym2hT9k5+mdyl8O5WQ1MD8EHmA==}
@@ -3603,6 +3624,10 @@ snapshots:
       tinyrainbow: 2.0.0
 
   '@xmldom/xmldom@0.8.15': {}
+
+  '@xterm/addon-fit@0.11.0': {}
+
+  '@xterm/xterm@6.0.0': {}
 
   abbrev@4.0.0: {}
 
@@ -5211,6 +5236,8 @@ snapshots:
     dependencies:
       semver: 7.8.6
 
+  node-addon-api@7.1.1: {}
+
   node-api-version@0.2.1:
     dependencies:
       semver: 7.8.6
@@ -5229,6 +5256,10 @@ snapshots:
       which: 6.0.1
 
   node-int64@0.4.0: {}
+
+  node-pty@1.1.0:
+    dependencies:
+      node-addon-api: 7.1.1
 
   node-releases@2.0.65: {}
 

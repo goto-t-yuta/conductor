@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, FileCode2, FileText, Globe, Image as ImageIcon, Search, X } from "lucide-react";
+import { Check, ChevronDown, FileCode2, FileText, Globe, Image as ImageIcon, Search, Terminal, X } from "lucide-react";
 import { t, type UiLocale } from "../../shared/i18n.js";
 import type { ProjectScopeKey, ProjectSwitcherItem } from "../lib/right-pane-tabs.js";
 
@@ -111,6 +111,7 @@ export const RightPaneProjectSwitcher: React.FC<RightPaneProjectSwitcherProps> =
             {item.markdownCount > 0 && <FileText className="w-2.5 h-2.5" />}
             {item.imageCount > 0 && <ImageIcon className="w-2.5 h-2.5" />}
             {(item.codeCount ?? 0) > 0 && <FileCode2 className="w-2.5 h-2.5" />}
+            {(item.terminalCount ?? 0) > 0 && <Terminal className="w-2.5 h-2.5" />}
           </span>
           <span className="px-1.5 py-0.25 rounded-full text-[10px] font-semibold tabular-nums bg-indigo-500/15 text-indigo-600 dark:text-indigo-400">
             {item.tabCount}

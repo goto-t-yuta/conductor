@@ -10,6 +10,9 @@ import type {
   MarkdownWatchEvent,
   PreferredLanguage,
   SendMessagePayload,
+  TerminalCreateOptions,
+  TerminalDataEvent,
+  TerminalExitEvent,
   VoiceSpeakRequest,
 } from "../shared/types.js";
 
@@ -125,6 +128,25 @@ const api: ConductorAPI = {
     ipcRenderer.invoke(PROJECT_FILE_TREE_IPC_CHANNELS.listDir, dirPath, options),
   fsReadTextFile: (filePath, options) =>
     ipcRenderer.invoke(PROJECT_FILE_TREE_IPC_CHANNELS.readTextFile, filePath, options),
+
+  terminalCreate: (options?: TerminalCreateOptions) =>
+    ipcRenderer.invoke("terminal:create", options),
+  terminalWrite: (sessionId: string, data: string) =>
+    ipcRenderer.invoke("terminal:write", sessionId, data),
+  terminalResize: (sessionId: string, cols: number, rows: number) =>
+    ipcRenderer.invoke("terminal:resize", sessionId, cols, rows),
+  terminalClose: (sessionId: string) => ipcRenderer.invoke("terminal:close", sessionId),
+  onTerminalData: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: TerminalDataEvent) => listener(event);
+    ipcRenderer.on("terminal:data", handler);
+    return () => ipcRenderer.off("terminal:data", handler);
+  },
+  onTerminalExit: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: TerminalExitEvent) => listener(event);
+    ipcRenderer.on("terminal:exit", handler);
+    return () => ipcRenderer.off("terminal:exit", handler);
+  },
+
   getPathForFile: (file: File) => {
     try {
       return webUtils.getPathForFile(file);

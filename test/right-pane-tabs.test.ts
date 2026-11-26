@@ -17,12 +17,15 @@ import {
   makeBrowserUnifiedTabId,
   makeImageUnifiedTabId,
   makeMarkdownUnifiedTabId,
+  makeTerminalUnifiedTabId,
+  parseUnifiedTabId,
   reconcileWorkspaceState,
   resolveProjectFromChatText,
   selectTabInWorkspace,
   serializeRightPaneWorkspace,
   switchActiveProjectScope,
   type MarkdownViewerTab,
+  type TerminalTab,
 } from "../src/renderer/lib/right-pane-tabs.js";
 
 const PROJECTS: Project[] = [
@@ -455,5 +458,89 @@ describe("Unified project-scoped tab workspace state", () => {
     expect(restored.openMarkdownFiles).toEqual([
       { filePath: mdA.filePath, projectScope: "proj-a" },
     ]);
+  });
+
+  it("supports multiple project-scoped terminal tabs, switcher counts, tab switching, and strips transient terminal tabs on persist", () => {
+    const term1: TerminalTab = {
+      id: "term-1",
+      title: "zsh",
+      cwd: "/Users/dev/work/agent_terminal_2",
+      shell: "/bin/zsh",
+      shellName: "zsh",
+      pid: 1001,
+      backend: "node-pty",
+      projectId: "proj-a",
+      status: "running",
+      exitCode: null,
+      error: null,
+      sequenceNumber: 1,
+    };
+    const term2: TerminalTab = {
+      id: "term-2",
+      title: "zsh #2",
+      cwd: "/Users/dev/work/agent_terminal_2",
+      shell: "/bin/zsh",
+      shellName: "zsh",
+      pid: 1002,
+      backend: "node-pty",
+      projectId: "proj-a",
+      status: "running",
+      exitCode: null,
+      error: null,
+      sequenceNumber: 2,
+    };
+    const termGen: TerminalTab = {
+      id: "term-3",
+      title: "zsh",
+      cwd: "/Users/dev",
+      shell: "/bin/zsh",
+      shellName: "zsh",
+      pid: 1003,
+      backend: "node-pty",
+      projectId: null,
+      status: "running",
+      exitCode: null,
+      error: null,
+      sequenceNumber: 1,
+    };
+
+    const id1 = makeTerminalUnifiedTabId(term1.id);
+    const id2 = makeTerminalUnifiedTabId(term2.id);
+    const idGen = makeTerminalUnifiedTabId(termGen.id);
+    expect(parseUnifiedTabId(id1)).toEqual({ kind: "terminal", rawId: "term-1" });
+
+    let state = createEmptyRightPaneWorkspaceState("proj-a");
+    state = activateTabInWorkspace(state, id1, "proj-a");
+    state = activateTabInWorkspace(state, id2, "proj-a");
+    state = activateTabInWorkspace(state, idGen, GENERAL_PROJECT_SCOPE, { switchProject: false });
+
+    const sources = {
+      browserTabs: [],
+      mdTabs: [],
+      imageTabs: [],
+      terminalTabs: [term1, term2, termGen],
+      projects: PROJECTS,
+    };
+
+    state = reconcileWorkspaceState(state, sources);
+
+    const tabsA = getProjectUnifiedTabs(state, "proj-a", sources);
+    expect(tabsA.map((t) => t.id)).toEqual([id1, id2]);
+    expect(tabsA.every((t) => t.kind === "terminal")).toBe(true);
+    expect(getActiveUnifiedTab(state, sources)?.id).toBe(id2);
+
+    const switcher = buildProjectSwitcherItems(state, sources);
+    const projAItem = switcher.withTabs.find((i) => i.scopeKey === "proj-a");
+    expect(projAItem?.terminalCount).toBe(2);
+    expect(projAItem?.tabCount).toBe(2);
+
+    // Closing active terminal #2 falls back cleanly to terminal #1
+    const closed = closeTabInWorkspace(state, id2);
+    expect(closed.nextActiveTabId).toBe(id1);
+
+    // Transient terminal tabs are stripped from localStorage serialization
+    const serialized = serializeRightPaneWorkspace(state, []);
+    expect(serialized.workspaces["proj-a"]).toBeUndefined();
+    expect(serialized.tabProjects[id1]).toBeUndefined();
   });
 });
