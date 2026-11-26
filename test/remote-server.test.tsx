@@ -20,7 +20,11 @@ import {
 import { StateStore } from "../src/main/state-store.js";
 import { buildQrSvgData } from "../src/renderer/components/QrCodeSvg.js";
 import { SettingsModal } from "../src/renderer/components/SettingsModal.js";
-import { ANDROID_APK_DOWNLOAD_URL } from "../src/shared/remote-access.js";
+import {
+  ANDROID_APK_DOWNLOAD_URL,
+  ANDROID_APK_FILENAME,
+  ANDROID_RELEASES_PAGE_URL,
+} from "../src/shared/remote-access.js";
 import { validateManualTaskStatusTransition } from "../src/shared/task-status.js";
 import type {
   AgentTask,
@@ -330,6 +334,22 @@ describe("Tailscale IP detection & connect URI helpers", () => {
     expect(parseConductorConnectUri("conductor://other?url=http://100.64.0.1:4789&token=abc")).toBeNull();
     expect(parseConductorConnectUri("conductor://connect?url=http://100.64.0.1:4789")).toBeNull();
     expect(parseConductorConnectUri("{invalid-json}")).toBeNull();
+  });
+
+  it("uses the direct latest Android APK download URL matching release.yml", () => {
+    expect(ANDROID_APK_FILENAME).toBe("conductor-android.apk");
+    expect(ANDROID_APK_DOWNLOAD_URL).toBe(
+      "https://github.com/goto-t-yuta/conductor/releases/latest/download/conductor-android.apk",
+    );
+    expect(ANDROID_RELEASES_PAGE_URL).toBe(
+      "https://github.com/goto-t-yuta/conductor/releases/latest",
+    );
+
+    const releaseWorkflow = fs.readFileSync(
+      path.resolve(process.cwd(), ".github/workflows/release.yml"),
+      "utf8",
+    );
+    expect(releaseWorkflow).toContain(`release/${ANDROID_APK_FILENAME}`);
   });
 
   it("generates deterministic offline SVG QR data for APK download and pairing URIs", () => {
@@ -715,7 +735,13 @@ describe("StateStore, ConductorController & SettingsModal Remote Access integrat
     expect(html).toContain('data-testid="remote-access-qr-panel"');
     expect(html).toContain('data-testid="remote-access-qr-download"');
     expect(html).toContain('data-testid="remote-access-qr-pair"');
+    expect(html).toContain(
+      `href="${ANDROID_APK_DOWNLOAD_URL}"`,
+    );
     expect(html).toContain(ANDROID_APK_DOWNLOAD_URL);
+    expect(html).toContain('data-testid="remote-access-releases-link"');
+    expect(html).toContain(`href="${ANDROID_RELEASES_PAGE_URL}"`);
+    expect(html).toContain("GitHub Releases ページを開く");
     expect(html).toContain("100.121.247.7");
     expect(html).toContain("macbook-pro.taile00453.ts.net");
     expect(html).toContain("http://100.121.247.7:4789");
@@ -790,6 +816,8 @@ describe("StateStore, ConductorController & SettingsModal Remote Access integrat
 
     expect(enNoTailscaleHtml).toContain("Android Quick Setup (QR Code)");
     expect(enNoTailscaleHtml).toContain("Download Android App");
+    expect(enNoTailscaleHtml).toContain("Open GitHub Releases page");
+    expect(enNoTailscaleHtml).toContain(`href="${ANDROID_APK_DOWNLOAD_URL}"`);
     expect(enNoTailscaleHtml).toContain("Link with Desktop (Pairing)");
     expect(enNoTailscaleHtml).toContain('data-testid="remote-access-qr-pair"');
     expect(enNoTailscaleHtml).toContain('data-testid="remote-access-qr-tailscale-warning"');

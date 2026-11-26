@@ -2,7 +2,12 @@
  * Shared constants & URI helpers for Android APK download and desktop-mobile QR pairing.
  */
 
+export const ANDROID_APK_FILENAME = "conductor-android.apk";
+
 export const ANDROID_APK_DOWNLOAD_URL =
+  `https://github.com/goto-t-yuta/conductor/releases/latest/download/${ANDROID_APK_FILENAME}`;
+
+export const ANDROID_RELEASES_PAGE_URL =
   "https://github.com/goto-t-yuta/conductor/releases/latest";
 
 export interface ConductorConnectPayload {

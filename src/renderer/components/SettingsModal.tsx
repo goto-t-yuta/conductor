@@ -32,7 +32,10 @@ import {
   type UiLocale,
 } from "../../shared/i18n.js";
 import { DEFAULT_PREFERRED_LANGUAGE, LANGUAGE_OPTIONS } from "../../shared/language.js";
-import { ANDROID_APK_DOWNLOAD_URL } from "../../shared/remote-access.js";
+import {
+  ANDROID_APK_DOWNLOAD_URL,
+  ANDROID_RELEASES_PAGE_URL,
+} from "../../shared/remote-access.js";
 import type {
   AppUpdateState,
   IntegrationMode,
@@ -638,6 +641,7 @@ export interface RemoteAccessSettingsSectionProps {
   onSetRemoteAccessPort?: (port: number) => void;
   onRegenerateRemoteAccessToken?: () => void;
   onRefreshRemoteAccessStatus?: () => void;
+  onOpenExternalUrl?: (url?: string) => void;
 }
 
 export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionProps> = ({
@@ -647,6 +651,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
   onSetRemoteAccessPort,
   onRegenerateRemoteAccessToken,
   onRefreshRemoteAccessStatus,
+  onOpenExternalUrl,
 }) => {
   const [portDraft, setPortDraft] = useState(String(remoteAccess.port || 4789));
   const [showToken, setShowToken] = useState(false);
@@ -680,6 +685,13 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
       : "•".repeat(16);
 
   const canShowPairingQr = Boolean(remoteAccess.running && remoteAccess.connectUri);
+
+  const handleOpenExternalLink = (e: React.MouseEvent<HTMLAnchorElement>, url: string) => {
+    if (onOpenExternalUrl) {
+      e.preventDefault();
+      onOpenExternalUrl(url);
+    }
+  };
 
   return (
     <section
@@ -815,31 +827,48 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               />
             </div>
 
-            <div className="flex items-center gap-1.5">
-              <code
+            <div className="space-y-1.5">
+              <a
+                href={ANDROID_APK_DOWNLOAD_URL}
+                target="_blank"
+                rel="noopener noreferrer"
                 data-testid="remote-access-apk-url"
                 title={ANDROID_APK_DOWNLOAD_URL}
-                className="flex-1 min-w-0 truncate px-2 py-1 rounded-md bg-zinc-100/90 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800 font-mono text-[10px] text-zinc-600 dark:text-zinc-300"
+                onClick={(e) => handleOpenExternalLink(e, ANDROID_APK_DOWNLOAD_URL)}
+                className="block px-2 py-1.5 rounded-md bg-zinc-100/90 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800 hover:border-indigo-500/50 font-mono text-[9.5px] leading-snug break-all text-indigo-600 dark:text-indigo-400 hover:underline"
               >
                 {ANDROID_APK_DOWNLOAD_URL}
-              </code>
-              <button
-                type="button"
-                data-testid="remote-access-apk-copy"
-                onClick={() => copyText("apkUrl", ANDROID_APK_DOWNLOAD_URL)}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-medium bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 text-zinc-700 dark:text-zinc-200 cursor-pointer shrink-0"
-              >
-                {copiedKey === "apkUrl" ? (
-                  <Check className="w-3 h-3 text-emerald-500" />
-                ) : (
-                  <Copy className="w-3 h-3" />
-                )}
-                <span>
-                  {copiedKey === "apkUrl"
-                    ? t(locale, "remote.copiedBtn")
-                    : t(locale, "remote.step1CopyUrl")}
-                </span>
-              </button>
+              </a>
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  data-testid="remote-access-apk-copy"
+                  onClick={() => copyText("apkUrl", ANDROID_APK_DOWNLOAD_URL)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-medium bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 text-zinc-700 dark:text-zinc-200 cursor-pointer shrink-0"
+                >
+                  {copiedKey === "apkUrl" ? (
+                    <Check className="w-3 h-3 text-emerald-500" />
+                  ) : (
+                    <Copy className="w-3 h-3" />
+                  )}
+                  <span>
+                    {copiedKey === "apkUrl"
+                      ? t(locale, "remote.copiedBtn")
+                      : t(locale, "remote.step1CopyUrl")}
+                  </span>
+                </button>
+                <a
+                  href={ANDROID_RELEASES_PAGE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-testid="remote-access-releases-link"
+                  onClick={(e) => handleOpenExternalLink(e, ANDROID_RELEASES_PAGE_URL)}
+                  className="inline-flex items-center gap-1 text-[10px] text-zinc-500 dark:text-zinc-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:underline transition-colors shrink-0"
+                >
+                  <span>{t(locale, "remote.step1ReleasesLink")}</span>
+                  <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                </a>
+              </div>
             </div>
           </div>
 
@@ -1429,6 +1458,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   onSetRemoteAccessPort={onSetRemoteAccessPort}
                   onRegenerateRemoteAccessToken={onRegenerateRemoteAccessToken}
                   onRefreshRemoteAccessStatus={onRefreshRemoteAccessStatus}
+                  onOpenExternalUrl={onOpenUpdateReleasePage}
                 />
               )}
 

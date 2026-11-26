@@ -567,9 +567,10 @@ export const UI_STRINGS = {
     "remote.step1Badge": "Step 1",
     "remote.step1Title": "Android アプリをダウンロード",
     "remote.step1Desc":
-      "スマホのカメラで読み取り、GitHub Releases の最新リリースから APK をインストールします。",
+      "スマホのカメラで読み取り、最新リリースの APK ファイルを直接ダウンロードしてインストールします。",
     "remote.step1QrAria": "Android APK ダウンロード用 QR コード",
     "remote.step1CopyUrl": "URL コピー",
+    "remote.step1ReleasesLink": "GitHub Releases ページを開く",
     "remote.step2Badge": "Step 2",
     "remote.step2Title": "デスクトップとリンク（ペアリング）",
     "remote.step2DescActive":
@@ -1221,9 +1222,10 @@ export const UI_STRINGS = {
     "remote.step1Badge": "Step 1",
     "remote.step1Title": "Download Android App",
     "remote.step1Desc":
-      "Scan with your phone camera to open GitHub Releases and install the latest APK.",
+      "Scan with your phone camera to directly download and install the latest Android APK.",
     "remote.step1QrAria": "QR code for downloading the Android APK",
     "remote.step1CopyUrl": "Copy URL",
+    "remote.step1ReleasesLink": "Open GitHub Releases page",
     "remote.step2Badge": "Step 2",
     "remote.step2Title": "Link with Desktop (Pairing)",
     "remote.step2DescActive":
