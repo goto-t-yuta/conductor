@@ -1813,6 +1813,7 @@ export const App: React.FC = () => {
           defaultIntegrationMode={snapshot.defaultIntegrationMode}
           autoLandOnComplete={snapshot.autoLandOnComplete}
           preferredLanguage={snapshot.preferredLanguage}
+          remoteAccess={snapshot.remoteAccess}
           projects={snapshot.projects}
           initialTab={settingsModalTab}
           usageRecords={snapshot.usageRecords ?? []}
@@ -1829,6 +1830,18 @@ export const App: React.FC = () => {
           }
           onChangePreferredLanguage={(lang) =>
             void window.conductor.setPreferredLanguage(lang)
+          }
+          onSetRemoteAccessEnabled={(enabled) =>
+            void window.conductor.setRemoteAccessEnabled(enabled)
+          }
+          onSetRemoteAccessPort={(port) =>
+            void window.conductor.setRemoteAccessPort(port)
+          }
+          onRegenerateRemoteAccessToken={() =>
+            void window.conductor.regenerateRemoteAccessToken()
+          }
+          onRefreshRemoteAccessStatus={() =>
+            void window.conductor.refreshRemoteAccessStatus()
           }
         />
       )}

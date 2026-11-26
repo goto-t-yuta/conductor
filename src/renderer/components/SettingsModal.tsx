@@ -1,10 +1,24 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { BarChart3, Check, GitBranch, Globe, Search, Settings, X } from "lucide-react";
+import {
+  BarChart3,
+  Check,
+  Copy,
+  Eye,
+  EyeOff,
+  GitBranch,
+  Globe,
+  RefreshCw,
+  Search,
+  Settings,
+  Smartphone,
+  X,
+} from "lucide-react";
 import { DEFAULT_PREFERRED_LANGUAGE, LANGUAGE_OPTIONS } from "../../shared/language.js";
 import type {
   IntegrationMode,
   PreferredLanguage,
   Project,
+  RemoteAccessStatus,
   UsageRecord,
 } from "../../shared/types.js";
 import {
@@ -19,6 +33,7 @@ export interface SettingsModalProps {
   defaultIntegrationMode: IntegrationMode;
   autoLandOnComplete?: boolean;
   preferredLanguage?: PreferredLanguage;
+  remoteAccess?: RemoteAccessStatus;
   projects: Project[];
   initialTab?: SettingsModalTab;
   usageRecords?: UsageRecord[];
@@ -28,6 +43,10 @@ export interface SettingsModalProps {
   onSetAutoLandOnComplete?: (enabled: boolean) => void;
   onSetProjectIntegrationMode: (projectId: string, mode: IntegrationMode | null) => void;
   onChangePreferredLanguage?: (language: PreferredLanguage) => void;
+  onSetRemoteAccessEnabled?: (enabled: boolean) => void;
+  onSetRemoteAccessPort?: (port: number) => void;
+  onRegenerateRemoteAccessToken?: () => void;
+  onRefreshRemoteAccessStatus?: () => void;
 }
 
 export interface LanguageSettingsSectionProps {
@@ -95,10 +114,317 @@ export const LanguageSettingsSection: React.FC<LanguageSettingsSectionProps> = (
   </section>
 );
 
+export interface RemoteAccessSettingsSectionProps {
+  remoteAccess: RemoteAccessStatus;
+  onSetRemoteAccessEnabled?: (enabled: boolean) => void;
+  onSetRemoteAccessPort?: (port: number) => void;
+  onRegenerateRemoteAccessToken?: () => void;
+  onRefreshRemoteAccessStatus?: () => void;
+}
+
+export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionProps> = ({
+  remoteAccess,
+  onSetRemoteAccessEnabled,
+  onSetRemoteAccessPort,
+  onRegenerateRemoteAccessToken,
+  onRefreshRemoteAccessStatus,
+}) => {
+  const [portDraft, setPortDraft] = useState(String(remoteAccess.port || 4789));
+  const [showToken, setShowToken] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    setPortDraft(String(remoteAccess.port || 4789));
+  }, [remoteAccess.port]);
+
+  const copyText = (key: string, value: string | null | undefined) => {
+    if (!value) return;
+    void navigator.clipboard?.writeText(value);
+    setCopiedKey(key);
+    setTimeout(() => {
+      setCopiedKey((prev) => (prev === key ? null : prev));
+    }, 1800);
+  };
+
+  const applyPort = () => {
+    const num = Number(portDraft.trim());
+    if (Number.isInteger(num) && num >= 1 && num <= 65535) {
+      onSetRemoteAccessPort?.(num);
+    } else {
+      setPortDraft(String(remoteAccess.port || 4789));
+    }
+  };
+
+  const maskedToken =
+    remoteAccess.token.length > 8
+      ? `${remoteAccess.token.slice(0, 6)}${"•".repeat(16)}${remoteAccess.token.slice(-4)}`
+      : "•".repeat(16);
+
+  return (
+    <section
+      data-testid="remote-access-section"
+      className="space-y-3 border-t border-zinc-200 dark:border-zinc-800 pt-5"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h3 className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+            <Smartphone className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+            <span>リモートアクセス / Tailscale Mobile Bridge</span>
+          </h3>
+          <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+            Tailscale 経由で Android アプリやモバイルブラウザから Conductor のチャット・タスクをリアルタイム操作します。
+          </p>
+        </div>
+        <button
+          type="button"
+          data-testid="remote-access-refresh"
+          onClick={() => onRefreshRemoteAccessStatus?.()}
+          title="Tailscale ネットワーク情報を再検出"
+          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 cursor-pointer shrink-0"
+        >
+          <RefreshCw className="w-3 h-3" />
+          <span>再検出</span>
+        </button>
+      </div>
+
+      {/* Opt-in Enable Toggle */}
+      <button
+        type="button"
+        role="switch"
+        aria-checked={remoteAccess.enabled}
+        data-testid="remote-access-toggle"
+        onClick={() => onSetRemoteAccessEnabled?.(!remoteAccess.enabled)}
+        className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer flex items-start justify-between gap-3 ${
+          remoteAccess.enabled
+            ? "bg-emerald-500/8 border-emerald-500/40 ring-1 ring-emerald-500/20"
+            : "bg-zinc-50/70 dark:bg-zinc-900/50 border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700"
+        }`}
+      >
+        <div className="space-y-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100">
+              Remote Bridge サーバーを有効化
+            </span>
+            <span
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                remoteAccess.running
+                  ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                  : remoteAccess.error
+                    ? "bg-red-500/15 text-red-600 dark:text-red-300"
+                    : "bg-zinc-200/80 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400"
+              }`}
+            >
+              {remoteAccess.running
+                ? `稼働中 · SSE ${remoteAccess.connectedClients}台`
+                : remoteAccess.error
+                  ? "エラー"
+                  : "停止中"}
+            </span>
+          </div>
+          <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+            ON の間のみ <code className="font-mono text-[10.5px]">0.0.0.0:{remoteAccess.port}</code>{" "}
+            で待受し、すべての API に Bearer Token 認証を必須とします。
+          </p>
+        </div>
+        <span
+          aria-hidden="true"
+          className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors mt-0.5 ${
+            remoteAccess.enabled ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-700"
+          }`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform ${
+              remoteAccess.enabled ? "translate-x-4" : "translate-x-0"
+            }`}
+          />
+        </span>
+      </button>
+
+      {remoteAccess.error && (
+        <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/30 text-[11.5px] text-red-600 dark:text-red-300">
+          {remoteAccess.error}
+        </div>
+      )}
+
+      {/* Connection Details Box */}
+      <div className="p-3.5 rounded-xl bg-zinc-50/80 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800 space-y-3">
+        {/* Port & Tailscale Info */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label
+              htmlFor="remote-access-port"
+              className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400"
+            >
+              ポート番号（既定: 4789）
+            </label>
+            <div className="flex items-center gap-1.5">
+              <input
+                id="remote-access-port"
+                data-testid="remote-access-port-input"
+                type="number"
+                min={1}
+                max={65535}
+                value={portDraft}
+                onChange={(e) => setPortDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyPort();
+                }}
+                className="w-28 px-2.5 py-1 rounded-lg text-[12px] font-mono bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-700 outline-none focus:border-indigo-500/60"
+              />
+              <button
+                type="button"
+                data-testid="remote-access-port-apply"
+                onClick={applyPort}
+                className="px-2.5 py-1 rounded-lg text-[11.5px] font-medium bg-zinc-200/80 dark:bg-zinc-800 hover:bg-zinc-300/80 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 cursor-pointer"
+              >
+                適用
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+              Tailscale 検出結果
+            </div>
+            <div className="text-[11.5px] font-mono text-zinc-800 dark:text-zinc-200 space-y-0.5">
+              <div>
+                IPv4:{" "}
+                <span data-testid="remote-access-tailscale-ip">
+                  {remoteAccess.tailscaleIp ?? "未検出"}
+                </span>
+              </div>
+              {remoteAccess.magicDnsName && (
+                <div className="text-[10.5px] text-zinc-500 dark:text-zinc-400 truncate">
+                  MagicDNS: {remoteAccess.magicDnsName}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Connection URL */}
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+            接続 URL（Android Chrome でもそのまま開けます）
+          </div>
+          <div className="flex items-center gap-1.5">
+            <code
+              data-testid="remote-access-url"
+              className="flex-1 min-w-0 truncate px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono text-[11.5px] text-zinc-800 dark:text-zinc-200"
+            >
+              {remoteAccess.url ?? `http://<tailscale-ip>:${remoteAccess.port}`}
+            </code>
+            <button
+              type="button"
+              onClick={() => copyText("url", remoteAccess.url)}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 cursor-pointer shrink-0"
+            >
+              {copiedKey === "url" ? (
+                <Check className="w-3 h-3 text-emerald-500" />
+              ) : (
+                <Copy className="w-3 h-3" />
+              )}
+              <span>{copiedKey === "url" ? "コピー済み" : "コピー"}</span>
+            </button>
+          </div>
+          {remoteAccess.magicDnsUrl && remoteAccess.magicDnsUrl !== remoteAccess.url && (
+            <div className="flex items-center justify-between gap-2 text-[10.5px] text-zinc-500 dark:text-zinc-400 font-mono">
+              <span className="truncate">MagicDNS URL: {remoteAccess.magicDnsUrl}</span>
+              <button
+                type="button"
+                onClick={() => copyText("magicdns", remoteAccess.magicDnsUrl)}
+                className="text-indigo-500 hover:underline shrink-0 cursor-pointer"
+              >
+                {copiedKey === "magicdns" ? "コピー済み" : "コピー"}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Bearer Token */}
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+            Bearer Token
+          </div>
+          <div className="flex items-center gap-1.5">
+            <code
+              data-testid="remote-access-token"
+              className="flex-1 min-w-0 truncate px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono text-[11.5px] text-zinc-800 dark:text-zinc-200"
+            >
+              {showToken ? remoteAccess.token : maskedToken}
+            </code>
+            <button
+              type="button"
+              onClick={() => setShowToken((v) => !v)}
+              aria-label={showToken ? "トークンを隠す" : "トークンを表示"}
+              className="p-1.5 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 cursor-pointer shrink-0"
+            >
+              {showToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => copyText("token", remoteAccess.token)}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 cursor-pointer shrink-0"
+            >
+              {copiedKey === "token" ? (
+                <Check className="w-3 h-3 text-emerald-500" />
+              ) : (
+                <Copy className="w-3 h-3" />
+              )}
+              <span>{copiedKey === "token" ? "コピー済み" : "コピー"}</span>
+            </button>
+            <button
+              type="button"
+              data-testid="remote-access-regenerate-token"
+              onClick={() => onRegenerateRemoteAccessToken?.()}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 cursor-pointer shrink-0"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>再生成</span>
+            </button>
+          </div>
+        </div>
+
+        {/* One-Paste Android Connection URI */}
+        {remoteAccess.connectUri && (
+          <div className="space-y-1">
+            <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+              Android アプリ一括接続 URI（そのまま貼り付け可能）
+            </div>
+            <div className="flex items-center gap-1.5">
+              <code
+                data-testid="remote-access-connect-uri"
+                className="flex-1 min-w-0 truncate px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono text-[11px] text-indigo-600 dark:text-indigo-300"
+              >
+                {showToken
+                  ? remoteAccess.connectUri
+                  : remoteAccess.connectUri.replace(/token=[^&]+/, "token=••••••••")}
+              </code>
+              <button
+                type="button"
+                onClick={() => copyText("uri", remoteAccess.connectUri)}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-indigo-500 text-white hover:bg-indigo-600 cursor-pointer shrink-0"
+              >
+                {copiedKey === "uri" ? (
+                  <Check className="w-3 h-3" />
+                ) : (
+                  <Copy className="w-3 h-3" />
+                )}
+                <span>{copiedKey === "uri" ? "コピー済み" : "URI コピー"}</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+};
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   defaultIntegrationMode,
   autoLandOnComplete = true,
   preferredLanguage = DEFAULT_PREFERRED_LANGUAGE,
+  remoteAccess,
   projects,
   initialTab = "general",
   usageRecords = [],
@@ -108,6 +434,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSetAutoLandOnComplete,
   onSetProjectIntegrationMode,
   onChangePreferredLanguage,
+  onSetRemoteAccessEnabled,
+  onSetRemoteAccessPort,
+  onRegenerateRemoteAccessToken,
+  onRefreshRemoteAccessStatus,
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsModalTab>(initialTab);
   const [projectSearch, setProjectSearch] = useState("");
@@ -115,6 +445,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   useEffect(() => {
     setActiveTab(initialTab);
   }, [initialTab]);
+
+  useEffect(() => {
+    onRefreshRemoteAccessStatus?.();
+  }, []);
 
   const filteredProjects = useMemo(() => {
     const q = projectSearch.trim().toLowerCase();
@@ -206,6 +540,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 preferredLanguage={preferredLanguage}
                 onChangePreferredLanguage={onChangePreferredLanguage}
               />
+
+              {/* Remote Access / Tailscale Mobile Bridge */}
+              {remoteAccess && (
+                <RemoteAccessSettingsSection
+                  remoteAccess={remoteAccess}
+                  onSetRemoteAccessEnabled={onSetRemoteAccessEnabled}
+                  onSetRemoteAccessPort={onSetRemoteAccessPort}
+                  onRegenerateRemoteAccessToken={onRegenerateRemoteAccessToken}
+                  onRefreshRemoteAccessStatus={onRefreshRemoteAccessStatus}
+                />
+              )}
 
           {/* Global Default Integration Mode */}
           <section className="space-y-2.5 border-t border-zinc-200 dark:border-zinc-800 pt-5">

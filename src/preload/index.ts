@@ -64,6 +64,14 @@ const api: ConductorAPI = {
     ipcRenderer.invoke("conductor:setProjectIntegrationMode", projectId, mode),
   setPreferredLanguage: (language: PreferredLanguage) =>
     ipcRenderer.invoke("conductor:setPreferredLanguage", language),
+  setRemoteAccessEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke("conductor:setRemoteAccessEnabled", enabled),
+  setRemoteAccessPort: (port: number) =>
+    ipcRenderer.invoke("conductor:setRemoteAccessPort", port),
+  regenerateRemoteAccessToken: () =>
+    ipcRenderer.invoke("conductor:regenerateRemoteAccessToken"),
+  refreshRemoteAccessStatus: () =>
+    ipcRenderer.invoke("conductor:refreshRemoteAccessStatus"),
   clearUsageRecords: () => ipcRenderer.invoke("conductor:clearUsageRecords"),
 
   updateTaskStatus: (taskId: string, status: AgentTaskStatus) =>

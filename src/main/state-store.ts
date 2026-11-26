@@ -7,6 +7,20 @@ import { normalizeTaskNumbers } from "../shared/mentions.js";
 import type { PersistedState } from "../shared/types.js";
 import { normalizeUsageRecords } from "../shared/usage.js";
 
+const DEFAULT_REMOTE_ACCESS_PORT = 4789;
+
+function generateRemoteAccessToken(): string {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+function normalizeRemoteAccessPort(value: unknown): number {
+  const num = typeof value === "number" ? value : Number(value);
+  if (Number.isInteger(num) && num >= 1 && num <= 65535) {
+    return num;
+  }
+  return DEFAULT_REMOTE_ACCESS_PORT;
+}
+
 const DEFAULT_STATE: PersistedState = {
   projects: [],
   scanRoots: [],
@@ -26,6 +40,9 @@ const DEFAULT_STATE: PersistedState = {
   defaultIntegrationMode: "feature-branch",
   autoLandOnComplete: true,
   preferredLanguage: DEFAULT_PREFERRED_LANGUAGE,
+  remoteAccessEnabled: false,
+  remoteAccessPort: DEFAULT_REMOTE_ACCESS_PORT,
+  remoteAccessToken: "",
   usageRecords: [],
 };
 
@@ -48,7 +65,10 @@ export class StateStore {
   load(): PersistedState {
     try {
       if (!fs.existsSync(this.stateFile)) {
-        return { ...DEFAULT_STATE };
+        return {
+          ...DEFAULT_STATE,
+          remoteAccessToken: generateRemoteAccessToken(),
+        };
       }
       const raw = fs.readFileSync(this.stateFile, "utf8");
       const parsed = JSON.parse(raw) as Partial<PersistedState>;
@@ -63,6 +83,10 @@ export class StateStore {
       const activeChat = normalizedChats.chatSessions.find(
         (s) => s.id === normalizedChats.activeChatSessionId,
       );
+      const existingToken =
+        typeof parsed.remoteAccessToken === "string" ? parsed.remoteAccessToken.trim() : "";
+      const hasValidToken = existingToken.length >= 16;
+      const remoteAccessToken = hasValidToken ? existingToken : generateRemoteAccessToken();
       const state: PersistedState = {
         ...DEFAULT_STATE,
         ...parsed,
@@ -79,14 +103,21 @@ export class StateStore {
         preferredLanguage: isValidPreferredLanguage(parsed.preferredLanguage)
           ? parsed.preferredLanguage
           : DEFAULT_PREFERRED_LANGUAGE,
+        remoteAccessEnabled:
+          typeof parsed.remoteAccessEnabled === "boolean" ? parsed.remoteAccessEnabled : false,
+        remoteAccessPort: normalizeRemoteAccessPort(parsed.remoteAccessPort),
+        remoteAccessToken,
         usageRecords: normalizeUsageRecords(parsed.usageRecords),
       };
-      if (normalized.changed || normalizedChats.changed) {
+      if (normalized.changed || normalizedChats.changed || !hasValidToken) {
         this.save(state);
       }
       return state;
     } catch {
-      return { ...DEFAULT_STATE };
+      return {
+        ...DEFAULT_STATE,
+        remoteAccessToken: generateRemoteAccessToken(),
+      };
     }
   }
 

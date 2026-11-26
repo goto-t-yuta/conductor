@@ -281,6 +281,18 @@ function registerIpcHandlers(): void {
   ipcMain.handle("conductor:setPreferredLanguage", (_e, language: PreferredLanguage) =>
     controller?.setPreferredLanguage(language),
   );
+  ipcMain.handle("conductor:setRemoteAccessEnabled", (_e, enabled: boolean) =>
+    controller?.setRemoteAccessEnabled(Boolean(enabled)),
+  );
+  ipcMain.handle("conductor:setRemoteAccessPort", (_e, port: number) =>
+    controller?.setRemoteAccessPort(Number(port)),
+  );
+  ipcMain.handle("conductor:regenerateRemoteAccessToken", () =>
+    controller?.regenerateRemoteAccessToken(),
+  );
+  ipcMain.handle("conductor:refreshRemoteAccessStatus", () =>
+    controller?.refreshRemoteAccessStatus(),
+  );
   ipcMain.handle("conductor:clearUsageRecords", () => controller?.clearUsageRecords());
 
   ipcMain.handle("conductor:updateTaskStatus", (_e, taskId: string, status: AgentTaskStatus) =>

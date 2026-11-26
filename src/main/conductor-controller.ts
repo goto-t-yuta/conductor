@@ -18,6 +18,7 @@ import type {
   PreferredLanguage,
   Project,
   ProviderStatus,
+  RemoteAccessStatus,
   SendMessagePayload,
   TaskStatusUpdateResult,
   TaskWorktreeStatus,
@@ -104,6 +105,13 @@ import {
   type MCPToolResult,
 } from "./local-mcp-server.js";
 import { mergeDiscoveredProjects, scanLocalProjectSeeds } from "./project-discovery.js";
+import {
+  DEFAULT_REMOTE_ACCESS_PORT,
+  RemoteBridgeServer,
+  generateRemoteAccessToken,
+  normalizeRemoteAccessPort,
+  type TailscaleNetworkInfo,
+} from "./remote-server.js";
 import {
   canonicalDirectory,
   getGitBranch,
@@ -401,6 +409,9 @@ export class ConductorController {
   private defaultIntegrationMode: IntegrationMode = "feature-branch";
   private autoLandOnComplete = true;
   private preferredLanguage: PreferredLanguage = DEFAULT_PREFERRED_LANGUAGE;
+  private remoteAccessEnabled = false;
+  private remoteAccessPort = DEFAULT_REMOTE_ACCESS_PORT;
+  private remoteAccessToken = generateRemoteAccessToken();
   private usageRecords: UsageRecord[] = [];
   private readonly codexThreadLastTotalUsage = new Map<string, NormalizedRawUsage>();
   private readonly codexWorkerPendingUsage = new Map<string, TokenUsage>();
@@ -409,6 +420,8 @@ export class ConductorController {
   private readonly activeConflictResolveTaskIds = new Set<string>();
 
   private mcpServer: LocalMCPServer | null = null;
+  private remoteServer: RemoteBridgeServer | null = null;
+  private readonly detectRemoteNetwork?: () => TailscaleNetworkInfo;
   private claudeMcpConfigPath: string | null = null;
   private agyMcpConfig: AgyAcpMcpServerConfig | null = null;
   private readonly orchestratorClient = new CodexAppServerClient("orchestrator");
@@ -444,6 +457,7 @@ export class ConductorController {
       runClaudeTurn?: typeof runClaudeTurn;
     };
     agyBrainBaseDir?: string;
+    detectRemoteNetwork?: () => TailscaleNetworkInfo;
   }) {
     this.store = options.store;
     this.browser = options.browser;
@@ -456,8 +470,15 @@ export class ConductorController {
     };
     this.agyBrainBaseDir =
       options.agyBrainBaseDir ?? path.join(os.homedir(), ".gemini", "antigravity-cli", "brain");
+    this.detectRemoteNetwork = options.detectRemoteNetwork;
 
     this.loadPersisted();
+    this.remoteServer = new RemoteBridgeServer(this, {
+      port: this.remoteAccessPort,
+      token: this.remoteAccessToken,
+      detectNetwork: this.detectRemoteNetwork,
+      onClientsChanged: () => this.scheduleBroadcast(),
+    });
 
     this.orchestratorClient.onNotification((n) => this.handleOrchestratorNotification(n));
     this.orchestratorClient.onDisconnect((reason) => {
@@ -512,6 +533,10 @@ export class ConductorController {
       defaultIntegrationMode: this.defaultIntegrationMode,
       autoLandOnComplete: this.autoLandOnComplete,
       preferredLanguage: this.preferredLanguage,
+      remoteAccessEnabled: this.remoteAccessEnabled,
+      remoteAccessPort: this.remoteAccessPort,
+      remoteAccessToken: this.remoteAccessToken,
+      remoteAccess: this.getRemoteAccessStatus(),
       usageRecords: this.usageRecords,
       lastErrorBanner: this.lastErrorBanner,
     };
@@ -584,6 +609,12 @@ export class ConductorController {
       this.isConnected = readyLabels.length > 0;
       this.connectionStatus =
         readyLabels.length > 0 ? `${readyLabels.join(" / ")} 利用可能` : "利用可能なCLIなし";
+      if (this.remoteAccessEnabled && this.remoteServer && !this.remoteServer.isRunning()) {
+        await this.remoteServer.start({
+          port: this.remoteAccessPort,
+          token: this.remoteAccessToken,
+        });
+      }
       this.persist();
       this.broadcastSnapshot();
 
@@ -888,6 +919,9 @@ export class ConductorController {
     this.agyOrchestratorClient.stop();
     this.orchestratorClient.stop();
     this.workerClient.stop();
+    if (this.remoteServer) {
+      await this.remoteServer.stop();
+    }
     if (this.mcpServer) {
       await this.mcpServer.stop();
     }
@@ -997,6 +1031,84 @@ export class ConductorController {
     this.usageRecords = [];
     this.persist();
     this.broadcastSnapshot();
+  }
+
+  public getRemoteAccessStatus(): RemoteAccessStatus {
+    if (this.remoteServer) {
+      return this.remoteServer.getStatus(this.remoteAccessEnabled);
+    }
+    return {
+      enabled: this.remoteAccessEnabled,
+      running: false,
+      port: this.remoteAccessPort,
+      token: this.remoteAccessToken,
+      bindHost: null,
+      tailscaleIp: null,
+      magicDnsName: null,
+      lanIp: null,
+      url: null,
+      magicDnsUrl: null,
+      connectUri: null,
+      connectedClients: 0,
+      error: null,
+    };
+  }
+
+  public async setRemoteAccessEnabled(enabled: boolean): Promise<RemoteAccessStatus> {
+    const next = Boolean(enabled);
+    this.remoteAccessEnabled = next;
+    if (this.remoteServer) {
+      if (next) {
+        await this.remoteServer.start({
+          port: this.remoteAccessPort,
+          token: this.remoteAccessToken,
+        });
+      } else {
+        await this.remoteServer.stop();
+      }
+    }
+    this.persist();
+    this.broadcastSnapshot();
+    return this.getRemoteAccessStatus();
+  }
+
+  public async setRemoteAccessPort(port: number): Promise<RemoteAccessStatus> {
+    const normalized = normalizeRemoteAccessPort(port, this.remoteAccessPort);
+    this.remoteAccessPort = normalized;
+    if (this.remoteServer) {
+      if (this.remoteAccessEnabled) {
+        await this.remoteServer.start({
+          port: this.remoteAccessPort,
+          token: this.remoteAccessToken,
+        });
+      } else {
+        // Recreate stopped server instance config with updated port
+        await this.remoteServer.stop();
+        this.remoteServer = new RemoteBridgeServer(this, {
+          port: this.remoteAccessPort,
+          token: this.remoteAccessToken,
+          detectNetwork: this.detectRemoteNetwork,
+          onClientsChanged: () => this.scheduleBroadcast(),
+        });
+      }
+    }
+    this.persist();
+    this.broadcastSnapshot();
+    return this.getRemoteAccessStatus();
+  }
+
+  public regenerateRemoteAccessToken(): RemoteAccessStatus {
+    this.remoteAccessToken = generateRemoteAccessToken();
+    this.remoteServer?.setToken(this.remoteAccessToken);
+    this.persist();
+    this.broadcastSnapshot();
+    return this.getRemoteAccessStatus();
+  }
+
+  public refreshRemoteAccessStatus(): RemoteAccessStatus {
+    this.remoteServer?.refreshNetwork();
+    this.broadcastSnapshot();
+    return this.getRemoteAccessStatus();
   }
 
   private recordTurnUsage(input: {
@@ -5621,6 +5733,13 @@ export class ConductorController {
     this.preferredLanguage = isValidPreferredLanguage(saved.preferredLanguage)
       ? saved.preferredLanguage
       : DEFAULT_PREFERRED_LANGUAGE;
+    this.remoteAccessEnabled =
+      typeof saved.remoteAccessEnabled === "boolean" ? saved.remoteAccessEnabled : false;
+    this.remoteAccessPort = normalizeRemoteAccessPort(saved.remoteAccessPort);
+    this.remoteAccessToken =
+      typeof saved.remoteAccessToken === "string" && saved.remoteAccessToken.trim().length >= 16
+        ? saved.remoteAccessToken.trim()
+        : generateRemoteAccessToken();
     this.usageRecords = normalizeUsageRecords(saved.usageRecords);
     this.browser.restore(saved.browserTabs, saved.activeBrowserTabId);
     if (normalized.changed || normalizedChats.changed || resumePrep.changed) {
@@ -5656,6 +5775,9 @@ export class ConductorController {
       defaultIntegrationMode: this.defaultIntegrationMode,
       autoLandOnComplete: this.autoLandOnComplete,
       preferredLanguage: this.preferredLanguage,
+      remoteAccessEnabled: this.remoteAccessEnabled,
+      remoteAccessPort: this.remoteAccessPort,
+      remoteAccessToken: this.remoteAccessToken,
       usageRecords: this.usageRecords,
     });
   }
@@ -5673,6 +5795,8 @@ export class ConductorController {
       clearTimeout(this.snapshotTimer);
       this.snapshotTimer = null;
     }
-    this.emitSnapshot(this.getSnapshot());
+    const snapshot = this.getSnapshot();
+    this.emitSnapshot(snapshot);
+    this.remoteServer?.publishSnapshot(snapshot);
   }
 }

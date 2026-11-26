@@ -318,6 +318,22 @@ export interface ModelOption {
   isDefault: boolean;
 }
 
+export interface RemoteAccessStatus {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  token: string;
+  bindHost: string | null;
+  tailscaleIp: string | null;
+  magicDnsName: string | null;
+  lanIp: string | null;
+  url: string | null;
+  magicDnsUrl: string | null;
+  connectUri: string | null;
+  connectedClients: number;
+  error: string | null;
+}
+
 export interface AppSnapshot {
   projects: Project[];
   scanRoots: string[];
@@ -344,6 +360,10 @@ export interface AppSnapshot {
   defaultIntegrationMode: IntegrationMode;
   autoLandOnComplete: boolean;
   preferredLanguage: PreferredLanguage;
+  remoteAccessEnabled?: boolean;
+  remoteAccessPort?: number;
+  remoteAccessToken?: string;
+  remoteAccess?: RemoteAccessStatus;
   usageRecords?: UsageRecord[];
   lastErrorBanner: string | null;
 }
@@ -369,6 +389,9 @@ export interface PersistedState {
   defaultIntegrationMode?: IntegrationMode;
   autoLandOnComplete?: boolean;
   preferredLanguage?: PreferredLanguage;
+  remoteAccessEnabled?: boolean;
+  remoteAccessPort?: number;
+  remoteAccessToken?: string;
   usageRecords?: UsageRecord[];
 }
 
@@ -442,6 +465,10 @@ export interface ConductorAPI {
   setAutoLandOnComplete(enabled: boolean): Promise<void>;
   setProjectIntegrationMode(projectId: string, mode: IntegrationMode | null): Promise<void>;
   setPreferredLanguage(language: PreferredLanguage): Promise<void>;
+  setRemoteAccessEnabled(enabled: boolean): Promise<RemoteAccessStatus>;
+  setRemoteAccessPort(port: number): Promise<RemoteAccessStatus>;
+  regenerateRemoteAccessToken(): Promise<RemoteAccessStatus>;
+  refreshRemoteAccessStatus(): Promise<RemoteAccessStatus>;
   clearUsageRecords(): Promise<void>;
 
   // Tasks
