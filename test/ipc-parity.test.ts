@@ -151,11 +151,13 @@ describe("IPC handler registration & preload channel parity", () => {
     const mainDuplicates = allMainHandles.filter((ch, idx) => allMainHandles.indexOf(ch) !== idx);
     expect(mainDuplicates).toEqual([]);
 
-    // Explicit guard for file tree channels
+    // Explicit guard for file tree & markdown write channels
     expect(allMainHandles).toContain("fs:list-dir");
     expect(allMainHandles).toContain("fs:read-text-file");
+    expect(allMainHandles).toContain("markdown:write-file");
     expect(preloadInvokes).toContain("fs:list-dir");
     expect(preloadInvokes).toContain("fs:read-text-file");
+    expect(preloadInvokes).toContain("markdown:write-file");
 
     // Exact 1:1 parity between preload ipcRenderer.invoke and main ipcMain.handle
     const mainSet = new Set(allMainHandles);

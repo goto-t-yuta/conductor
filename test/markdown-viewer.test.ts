@@ -4,10 +4,25 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
+  MAX_MARKDOWN_FILE_BYTES,
   MarkdownFileWatcher,
   readLocalMarkdownFile,
   resolveLocalMarkdownPath,
+  writeLocalMarkdownFile,
 } from "../src/main/markdown-viewer.js";
+import {
+  applyMarkdownDiskDeleted,
+  applyMarkdownDiskReload,
+  applyMarkdownDraftEdit,
+  applyTextareaIndent,
+  beginMarkdownSave,
+  completeMarkdownSave,
+  discardMarkdownDraft,
+  dismissMarkdownExternalChange,
+  getEffectiveMarkdownContent,
+  setMarkdownTabViewMode,
+} from "../src/renderer/lib/markdown-editor-state.js";
+import type { MarkdownViewerTab } from "../src/renderer/lib/right-pane-tabs.js";
 import { MarkdownImageCache } from "../src/renderer/lib/markdown-image-cache.js";
 import {
   classifyLinkHref,
@@ -146,6 +161,287 @@ describe("Local Markdown Viewer (main service)", () => {
       watcher.dispose();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it("writes UTF-8 markdown files safely, returns updated metadata, and enforces security boundaries", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "conductor-md-write-"));
+    try {
+      const mdPath = path.join(tmpDir, "notes.md");
+      fs.writeFileSync(mdPath, "# Initial\n", "utf8");
+
+      const updatedContent = "# 更新済みタイトル\n\n本文テキスト 🚀\n";
+      const writeRes = writeLocalMarkdownFile(mdPath, updatedContent);
+      expect(writeRes.ok).toBe(true);
+      expect(writeRes.filePath).toBe(mdPath);
+      expect(writeRes.document?.fileName).toBe("notes.md");
+      expect(writeRes.document?.content).toBe(updatedContent);
+      expect(writeRes.document?.sizeBytes).toBe(Buffer.byteLength(updatedContent, "utf8"));
+      expect(writeRes.document?.mtimeMs).toBeGreaterThan(0);
+      expect(fs.readFileSync(mdPath, "utf8")).toBe(updatedContent);
+
+      // Writes via file:// URL cleanly
+      const fileUrlRes = writeLocalMarkdownFile(pathToFileURL(mdPath).toString(), "# Via URL\n");
+      expect(fileUrlRes.ok).toBe(true);
+      expect(fs.readFileSync(mdPath, "utf8")).toBe("# Via URL\n");
+
+      // Allows writing through a symlink pointing to a valid .md target
+      const targetMd = path.join(tmpDir, "real-target.md");
+      fs.writeFileSync(targetMd, "# Real\n", "utf8");
+      const validLink = path.join(tmpDir, "alias.md");
+      fs.symlinkSync(targetMd, validLink);
+      const validLinkRes = writeLocalMarkdownFile(validLink, "# Updated via link\n");
+      expect(validLinkRes.ok).toBe(true);
+      expect(fs.readFileSync(targetMd, "utf8")).toBe("# Updated via link\n");
+      expect(fs.lstatSync(validLink).isSymbolicLink()).toBe(true);
+
+      // Blocks symlinks pointing to non-markdown files
+      const secretTxt = path.join(tmpDir, "secret.txt");
+      fs.writeFileSync(secretTxt, "keep-untouched", "utf8");
+      const evilLink = path.join(tmpDir, "evil.md");
+      fs.symlinkSync(secretTxt, evilLink);
+      const blockedSymlink = writeLocalMarkdownFile(evilLink, "pwned");
+      expect(blockedSymlink.ok).toBe(false);
+      expect(fs.readFileSync(secretTxt, "utf8")).toBe("keep-untouched");
+
+      // Blocks broken symlinks
+      const brokenLink = path.join(tmpDir, "broken.md");
+      fs.symlinkSync(path.join(tmpDir, "nonexistent.txt"), brokenLink);
+      const blockedBroken = writeLocalMarkdownFile(brokenLink, "# Nope\n");
+      expect(blockedBroken.ok).toBe(false);
+
+      // Blocks non-markdown extensions, relative paths, null bytes, directories, and oversized payloads
+      expect(writeLocalMarkdownFile(path.join(tmpDir, "plain.txt"), "hello").ok).toBe(false);
+      expect(writeLocalMarkdownFile("relative.md", "# rel").ok).toBe(false);
+      expect(writeLocalMarkdownFile(path.join(tmpDir, "bad\0.md"), "# bad").ok).toBe(false);
+      const dirWithMdExt = path.join(tmpDir, "folder.md");
+      fs.mkdirSync(dirWithMdExt);
+      expect(writeLocalMarkdownFile(dirWithMdExt, "# dir").ok).toBe(false);
+
+      const oversized = "a".repeat(MAX_MARKDOWN_FILE_BYTES + 1);
+      expect(writeLocalMarkdownFile(mdPath, oversized).ok).toBe(false);
+
+      // Can recreate a deleted .md file when its parent directory exists
+      fs.unlinkSync(mdPath);
+      const recreated = writeLocalMarkdownFile(mdPath, "# Recreated\n");
+      expect(recreated.ok).toBe(true);
+      expect(fs.readFileSync(mdPath, "utf8")).toBe("# Recreated\n");
+
+      // Rejects when parent directory does not exist
+      const missingParent = path.join(tmpDir, "missing-dir", "doc.md");
+      expect(writeLocalMarkdownFile(missingParent, "# No parent\n").ok).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("suppresses self-triggered watcher events via recordKnownDocument while still emitting external edits", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "conductor-md-selfsave-"));
+    const mdPath = path.join(tmpDir, "doc.md");
+    fs.writeFileSync(mdPath, "# V1\n", "utf8");
+
+    const events: MarkdownWatchEvent[] = [];
+    const watcher = new MarkdownFileWatcher((ev) => events.push(ev), 40);
+
+    try {
+      expect(watcher.watch(mdPath).ok).toBe(true);
+
+      // Self-write followed by recordKnownDocument should NOT emit a watcher change event
+      const saved = writeLocalMarkdownFile(mdPath, "# Saved by Conductor\n");
+      expect(saved.ok).toBe(true);
+      watcher.recordKnownDocument(saved.document!);
+
+      await new Promise((r) => setTimeout(r, 150));
+      expect(events).toHaveLength(0);
+
+      // Subsequent external write MUST still emit a change event
+      fs.writeFileSync(mdPath, "# Edited externally\n", "utf8");
+      await waitFor(() =>
+        events.some((e) => e.kind === "changed" && e.document?.content.includes("Edited externally")),
+      );
+    } finally {
+      watcher.dispose();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Local Markdown Editor State (draft, dirty, save, discard, auto-reload safety)", () => {
+  const makeBaseTab = (content = "# Title\n\nBody\n"): MarkdownViewerTab => ({
+    filePath: "/repo/docs/spec.md",
+    fileName: "spec.md",
+    document: {
+      filePath: "/repo/docs/spec.md",
+      fileName: "spec.md",
+      content,
+      mtimeMs: 1_700_000_000_000,
+      sizeBytes: Buffer.byteLength(content, "utf8"),
+    },
+    error: null,
+    deletedOnDisk: false,
+    isLoading: false,
+    lastReloadedAt: 1_700_000_000_000,
+  });
+
+  it("tracks draft edits, clears dirty when reverted back to saved content, and preserves viewMode", () => {
+    const initial = setMarkdownTabViewMode(makeBaseTab(), "raw");
+    expect(getEffectiveMarkdownContent(initial)).toBe("# Title\n\nBody\n");
+    expect(initial.isDirty).toBeFalsy();
+
+    const edited = applyMarkdownDraftEdit(initial, "# Title\n\nEdited Body\n");
+    expect(edited.isDirty).toBe(true);
+    expect(edited.draftContent).toBe("# Title\n\nEdited Body\n");
+    expect(getEffectiveMarkdownContent(edited)).toBe("# Title\n\nEdited Body\n");
+    expect(edited.viewMode).toBe("raw");
+
+    // Toggling to preview preserves draft & dirty state
+    const previewed = setMarkdownTabViewMode(edited, "rendered");
+    expect(previewed.isDirty).toBe(true);
+    expect(getEffectiveMarkdownContent(previewed)).toBe("# Title\n\nEdited Body\n");
+
+    // Editing back to exact saved content automatically clears dirty state
+    const reverted = applyMarkdownDraftEdit(previewed, "# Title\n\nBody\n");
+    expect(reverted.isDirty).toBe(false);
+    expect(reverted.draftContent).toBeNull();
+  });
+
+  it("handles save lifecycle cleanly including failure recovery and concurrent edits during save", () => {
+    const edited = applyMarkdownDraftEdit(makeBaseTab(), "# Saved Draft\n");
+    const saving = beginMarkdownSave(edited);
+    expect(saving.isSaving).toBe(true);
+
+    // Failed save retains draft & dirty state and exposes saveError
+    const failed = completeMarkdownSave(
+      saving,
+      { ok: false, filePath: edited.filePath, error: "EACCES: permission denied" },
+      1_700_000_005_000,
+    );
+    expect(failed.isSaving).toBe(false);
+    expect(failed.isDirty).toBe(true);
+    expect(failed.saveError).toBe("EACCES: permission denied");
+    expect(getEffectiveMarkdownContent(failed)).toBe("# Saved Draft\n");
+
+    // Successful save clears dirty state and records lastSavedAt
+    const savedDoc = {
+      filePath: edited.filePath,
+      fileName: edited.fileName,
+      content: "# Saved Draft\n",
+      mtimeMs: 1_700_000_010_000,
+      sizeBytes: 14,
+    };
+    const saved = completeMarkdownSave(
+      beginMarkdownSave(failed),
+      { ok: true, filePath: edited.filePath, document: savedDoc },
+      1_700_000_010_000,
+    );
+    expect(saved.isSaving).toBe(false);
+    expect(saved.isDirty).toBe(false);
+    expect(saved.draftContent).toBeNull();
+    expect(saved.saveError).toBeNull();
+    expect(saved.lastSavedAt).toBe(1_700_000_010_000);
+    expect(saved.document).toEqual(savedDoc);
+
+    // Concurrent edit typed while save was in flight is preserved as dirty!
+    const typingWhileSaving = applyMarkdownDraftEdit(
+      beginMarkdownSave(edited),
+      "# Saved Draft\n+ extra typing\n",
+    );
+    const afterInflightSave = completeMarkdownSave(
+      typingWhileSaving,
+      { ok: true, filePath: edited.filePath, document: savedDoc },
+      1_700_000_010_000,
+    );
+    expect(afterInflightSave.isDirty).toBe(true);
+    expect(afterInflightSave.document).toEqual(savedDoc);
+    expect(getEffectiveMarkdownContent(afterInflightSave)).toBe("# Saved Draft\n+ extra typing\n");
+  });
+
+  it("protects unsaved drafts from watcher auto-reload, ignores self-save echoes, and allows explicit discard/reload", () => {
+    const base = makeBaseTab("# V1\n");
+
+    // Clean tab auto-reloads normally on external change
+    const v2Doc = {
+      ...base.document!,
+      content: "# V2 external\n",
+      mtimeMs: 1_700_000_020_000,
+      sizeBytes: 14,
+    };
+    const cleanReload = applyMarkdownDiskReload(base, v2Doc, 1_700_000_020_000);
+    expect(cleanReload.didReload).toBe(true);
+    expect(cleanReload.hasExternalConflict).toBe(false);
+    expect(cleanReload.tab.document?.content).toBe("# V2 external\n");
+
+    // Dirty tab ignores self-save echo cleanly (even if user typed more edits right after saving)
+    const dirtyAfterSave = applyMarkdownDraftEdit(cleanReload.tab, "# V2 external\nmore edits\n");
+    const echoResult = applyMarkdownDiskReload(dirtyAfterSave, v2Doc, 1_700_000_020_100, {
+      lastSelfSavedDoc: v2Doc,
+    });
+    expect(echoResult.ignoredSelfSave).toBe(true);
+    expect(echoResult.didReload).toBe(false);
+    expect(echoResult.hasExternalConflict).toBe(false);
+    expect(echoResult.tab.externalChange).toBeFalsy();
+    expect(getEffectiveMarkdownContent(echoResult.tab)).toBe("# V2 external\nmore edits\n");
+
+    // External change while dirty MUST NOT overwrite draft; sets non-destructive externalChange banner
+    const v3ExternalDoc = {
+      ...base.document!,
+      content: "# V3 from another editor\n",
+      mtimeMs: 1_700_000_030_000,
+      sizeBytes: 25,
+    };
+    const conflictResult = applyMarkdownDiskReload(dirtyAfterSave, v3ExternalDoc, 1_700_000_030_000);
+    expect(conflictResult.didReload).toBe(false);
+    expect(conflictResult.hasExternalConflict).toBe(true);
+    expect(conflictResult.tab.isDirty).toBe(true);
+    expect(getEffectiveMarkdownContent(conflictResult.tab)).toBe("# V2 external\nmore edits\n");
+    expect(conflictResult.tab.externalChange?.kind).toBe("changed");
+    expect(conflictResult.tab.externalChange?.document).toEqual(v3ExternalDoc);
+
+    // Dismissing banner keeps draft intact
+    const dismissed = dismissMarkdownExternalChange(conflictResult.tab);
+    expect(dismissed.externalChange).toBeNull();
+    expect(dismissed.isDirty).toBe(true);
+
+    // Explicit force reload / discard replaces draft with disk document
+    const forced = applyMarkdownDiskReload(conflictResult.tab, v3ExternalDoc, 1_700_000_040_000, {
+      force: true,
+    });
+    expect(forced.didReload).toBe(true);
+    expect(forced.tab.isDirty).toBe(false);
+    expect(forced.tab.draftContent).toBeNull();
+    expect(forced.tab.externalChange).toBeNull();
+    expect(getEffectiveMarkdownContent(forced.tab)).toBe("# V3 from another editor\n");
+
+    // External deletion while dirty preserves draft so user can still save/recreate
+    const dirtyAgain = applyMarkdownDraftEdit(forced.tab, "# Keep my draft\n");
+    const deletedWhileDirty = applyMarkdownDiskDeleted(dirtyAgain, undefined, 1_700_000_050_000);
+    expect(deletedWhileDirty.deletedOnDisk).toBe(true);
+    expect(deletedWhileDirty.isDirty).toBe(true);
+    expect(deletedWhileDirty.externalChange?.kind).toBe("deleted");
+    expect(getEffectiveMarkdownContent(deletedWhileDirty)).toBe("# Keep my draft\n");
+
+    // Discard with fresh disk doc restores clean state
+    const discarded = discardMarkdownDraft(dirtyAgain, v3ExternalDoc, 1_700_000_060_000);
+    expect(discarded.isDirty).toBe(false);
+    expect(discarded.draftContent).toBeNull();
+    expect(getEffectiveMarkdownContent(discarded)).toBe("# V3 from another editor\n");
+  });
+
+  it("indents and unindents single lines and multi-line selections cleanly with Tab / Shift+Tab", () => {
+    // Caret insert
+    const single = applyTextareaIndent("- item", 0, 0, false);
+    expect(single).toEqual({ value: "  - item", selectionStart: 2, selectionEnd: 2 });
+
+    // Multi-line indent
+    const multi = applyTextareaIndent("line1\nline2\nline3", 0, 11, false);
+    expect(multi.value).toBe("  line1\n  line2\nline3");
+    expect(multi.selectionStart).toBe(2);
+    expect(multi.selectionEnd).toBe(15);
+
+    // Multi-line Shift+Tab outdent
+    const outdented = applyTextareaIndent("  line1\n  line2\nline3", 2, 15, true);
+    expect(outdented.value).toBe("line1\nline2\nline3");
+    expect(outdented.selectionStart).toBe(0);
+    expect(outdented.selectionEnd).toBe(11);
   });
 });
 

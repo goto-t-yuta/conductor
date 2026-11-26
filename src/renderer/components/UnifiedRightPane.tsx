@@ -60,6 +60,12 @@ export interface UnifiedRightPaneProps {
   onRemoveRecentMd: (filePath: string) => void;
   onAttachMdFileToChat: (filePath: string, fileName: string) => void;
   onOpenMarkdownImage?: (image: MarkdownOpenedImage) => void;
+  onMarkdownDraftChange?: (filePath: string, nextContent: string) => void;
+  onSaveActiveMd?: () => Promise<void> | void;
+  onDiscardActiveMd?: () => Promise<void> | void;
+  onReloadExternalMdChange?: () => Promise<void> | void;
+  onDismissExternalMdChange?: () => void;
+  onChangeMdViewMode?: (filePath: string, mode: "rendered" | "raw") => void;
   // Image props
   onRetryImageTab: (tabId: string) => void;
   onImageLoadError: (tabId: string) => void;
@@ -109,6 +115,12 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
   onRemoveRecentMd,
   onAttachMdFileToChat,
   onOpenMarkdownImage,
+  onMarkdownDraftChange,
+  onSaveActiveMd,
+  onDiscardActiveMd,
+  onReloadExternalMdChange,
+  onDismissExternalMdChange,
+  onChangeMdViewMode,
   onRetryImageTab,
   onImageLoadError,
   onOpenProjectFile,
@@ -361,6 +373,14 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
                 }`}
               >
                 {renderTabIcon(tab, isActive)}
+                {tab.kind === "markdown" && tab.markdownTab.isDirty && (
+                  <span
+                    data-testid="markdown-tab-dirty-dot"
+                    title="未保存の変更があります"
+                    aria-label="未保存の変更があります"
+                    className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0"
+                  />
+                )}
                 <span className="truncate flex-1">{tab.title}</span>
                 <button
                   type="button"
@@ -571,6 +591,12 @@ export const UnifiedRightPane: React.FC<UnifiedRightPaneProps> = ({
               onOpenImage={onOpenMarkdownImage}
               onAttachFileToChat={onAttachMdFileToChat}
               onRevealInFinder={onRevealInFinder}
+              onDraftChange={onMarkdownDraftChange}
+              onSaveActive={onSaveActiveMd}
+              onDiscardActive={onDiscardActiveMd}
+              onReloadExternalChange={onReloadExternalMdChange}
+              onDismissExternalChange={onDismissExternalMdChange}
+              onChangeViewMode={onChangeMdViewMode}
             />
           ) : activeTab.kind === "code" ? (
             <CodeViewerPane

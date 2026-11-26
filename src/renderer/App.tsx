@@ -6,6 +6,7 @@ import type {
   ChatAttachment,
   ChatMessage,
   ExplicitMentionTarget,
+  MarkdownDocument,
   Project,
   ProjectFileEntry,
   RightPaneMode,
@@ -30,6 +31,17 @@ import {
   upsertImageTab,
   type ImageViewerTab,
 } from "./lib/image-viewer.js";
+import {
+  applyMarkdownDiskDeleted,
+  applyMarkdownDiskReload,
+  applyMarkdownDraftEdit,
+  beginMarkdownSave,
+  completeMarkdownSave,
+  discardMarkdownDraft,
+  dismissMarkdownExternalChange,
+  getEffectiveMarkdownContent,
+  setMarkdownTabViewMode,
+} from "./lib/markdown-editor-state.js";
 import { extractHash, isMarkdownPathOrUrl } from "./lib/markdown-utils.js";
 import {
   deriveQuestionItems,
@@ -168,6 +180,9 @@ export const App: React.FC = () => {
 
   // Local Markdown Viewer state
   const [mdTabs, setMdTabs] = useState<MarkdownViewerTab[]>([]);
+  const mdTabsRef = useRef<MarkdownViewerTab[]>(mdTabs);
+  mdTabsRef.current = mdTabs;
+  const lastSelfSavedMdDocsRef = useRef<Map<string, MarkdownDocument>>(new Map());
   const [recentMdFiles, setRecentMdFiles] = useState<string[]>(() => loadRecentMarkdownFiles());
   const [mdAutoReload, setMdAutoReload] = useState(true);
   const [mdIsWatching, setMdIsWatching] = useState(false);
@@ -476,6 +491,7 @@ export const App: React.FC = () => {
         anchor?: string | null;
         fallbackProjectId?: string | null;
         message?: ChatMessage | null;
+        forceDiscardDraft?: boolean;
       },
     ) => {
       const anchor = options?.anchor !== undefined ? options.anchor : extractHash(pathOrUrl);
@@ -512,6 +528,14 @@ export const App: React.FC = () => {
         const doc = result.document;
         setMdTabs((prev) => {
           const existingIdx = prev.findIndex((t) => t.filePath === doc.filePath);
+          if (existingIdx >= 0) {
+            const copy = [...prev];
+            copy[existingIdx] = applyMarkdownDiskReload(copy[existingIdx], doc, now, {
+              force: options?.forceDiscardDraft,
+              lastSelfSavedDoc: lastSelfSavedMdDocsRef.current.get(doc.filePath) ?? null,
+            }).tab;
+            return copy;
+          }
           const nextTab: MarkdownViewerTab = {
             filePath: doc.filePath,
             fileName: doc.fileName,
@@ -521,11 +545,6 @@ export const App: React.FC = () => {
             isLoading: false,
             lastReloadedAt: now,
           };
-          if (existingIdx >= 0) {
-            const copy = [...prev];
-            copy[existingIdx] = nextTab;
-            return copy;
-          }
           return [...prev, nextTab];
         });
         recordRecentMarkdownFile(doc.filePath);
@@ -605,6 +624,8 @@ export const App: React.FC = () => {
 
   const handleRefreshActiveMd = useCallback(() => {
     if (!activeMdPath) return;
+    const currentTab = mdTabsRef.current.find((t) => t.filePath === activeMdPath);
+    const wasDirty = Boolean(currentTab?.isDirty);
     setMdTabs((prev) =>
       prev.map((t) => (t.filePath === activeMdPath ? { ...t, isLoading: true } : t)),
     );
@@ -613,9 +634,123 @@ export const App: React.FC = () => {
       activateTab: false,
       anchor: null,
     }).then(() => {
-      setMdJustReloadedAt(Date.now());
+      if (!wasDirty) {
+        setMdJustReloadedAt(Date.now());
+      }
     });
   }, [activeMdPath, loadMarkdownIntoTab]);
+
+  const handleMarkdownDraftChange = useCallback((filePath: string, nextContent: string) => {
+    setMdTabs((prev) =>
+      prev.map((t) => (t.filePath === filePath ? applyMarkdownDraftEdit(t, nextContent) : t)),
+    );
+  }, []);
+
+  const handleChangeMarkdownViewMode = useCallback(
+    (filePath: string, mode: "rendered" | "raw") => {
+      setMdTabs((prev) =>
+        prev.map((t) => (t.filePath === filePath ? setMarkdownTabViewMode(t, mode) : t)),
+      );
+    },
+    [],
+  );
+
+  const handleSaveActiveMarkdown = useCallback(async () => {
+    if (!activeMdPath) return;
+    const tab = mdTabsRef.current.find((t) => t.filePath === activeMdPath);
+    if (!tab || tab.isSaving || (!tab.isDirty && !tab.deletedOnDisk)) return;
+
+    const targetPath = tab.filePath;
+    const contentToSave = getEffectiveMarkdownContent(tab);
+
+    setMdTabs((prev) =>
+      prev.map((t) => (t.filePath === targetPath ? beginMarkdownSave(t) : t)),
+    );
+
+    try {
+      const result = await window.conductor.markdownWriteFile(targetPath, contentToSave);
+      if (result.ok && result.document) {
+        lastSelfSavedMdDocsRef.current.set(result.document.filePath, result.document);
+      }
+      const savedAt = Date.now();
+      setMdTabs((prev) =>
+        prev.map((t) => (t.filePath === targetPath ? completeMarkdownSave(t, result, savedAt) : t)),
+      );
+    } catch (err) {
+      const savedAt = Date.now();
+      const message =
+        err instanceof Error ? err.message : "ファイルの保存に失敗しました。";
+      setMdTabs((prev) =>
+        prev.map((t) =>
+          t.filePath === targetPath
+            ? completeMarkdownSave(t, { ok: false, filePath: targetPath, error: message }, savedAt)
+            : t,
+        ),
+      );
+    }
+  }, [activeMdPath]);
+
+  const handleDiscardActiveMarkdown = useCallback(async () => {
+    if (!activeMdPath) return;
+    const targetPath = activeMdPath;
+    setMdTabs((prev) =>
+      prev.map((t) => (t.filePath === targetPath ? { ...t, isLoading: true } : t)),
+    );
+    try {
+      const result = await window.conductor.markdownReadFile(targetPath);
+      const now = Date.now();
+      if (result.ok && result.document) {
+        setMdTabs((prev) =>
+          prev.map((t) =>
+            t.filePath === targetPath
+              ? { ...discardMarkdownDraft(t, result.document, now), isLoading: false }
+              : t,
+          ),
+        );
+        setMdJustReloadedAt(now);
+      } else {
+        setMdTabs((prev) =>
+          prev.map((t) =>
+            t.filePath === targetPath
+              ? {
+                  ...discardMarkdownDraft(t),
+                  error: result.error ?? t.error,
+                  isLoading: false,
+                }
+              : t,
+          ),
+        );
+      }
+    } catch {
+      setMdTabs((prev) =>
+        prev.map((t) =>
+          t.filePath === targetPath ? { ...discardMarkdownDraft(t), isLoading: false } : t,
+        ),
+      );
+    }
+  }, [activeMdPath]);
+
+  const handleReloadExternalMarkdownChange = useCallback(async () => {
+    if (!activeMdPath) return;
+    const targetPath = activeMdPath;
+    setMdTabs((prev) =>
+      prev.map((t) => (t.filePath === targetPath ? { ...t, isLoading: true } : t)),
+    );
+    await loadMarkdownIntoTab(targetPath, {
+      switchToViewer: false,
+      activateTab: false,
+      anchor: null,
+      forceDiscardDraft: true,
+    });
+    setMdJustReloadedAt(Date.now());
+  }, [activeMdPath, loadMarkdownIntoTab]);
+
+  const handleDismissExternalMarkdownChange = useCallback(() => {
+    if (!activeMdPath) return;
+    setMdTabs((prev) =>
+      prev.map((t) => (t.filePath === activeMdPath ? dismissMarkdownExternalChange(t) : t)),
+    );
+  }, [activeMdPath]);
 
   // Subscribe to main-process file watcher live-reload events
   useEffect(() => {
@@ -623,32 +758,26 @@ export const App: React.FC = () => {
       if (event.kind === "changed" && event.document) {
         const doc = event.document;
         const now = Date.now();
+        const lastSelfSavedDoc = lastSelfSavedMdDocsRef.current.get(event.filePath) ?? null;
+        const existing = mdTabsRef.current.find((t) => t.filePath === event.filePath);
+        if (existing) {
+          const preview = applyMarkdownDiskReload(existing, doc, now, { lastSelfSavedDoc });
+          if (preview.didReload) {
+            setMdJustReloadedAt(now);
+          }
+        }
         setMdTabs((prev) =>
           prev.map((t) =>
             t.filePath === event.filePath
-              ? {
-                  ...t,
-                  document: doc,
-                  error: null,
-                  deletedOnDisk: false,
-                  isLoading: false,
-                  lastReloadedAt: now,
-                }
+              ? applyMarkdownDiskReload(t, doc, now, { lastSelfSavedDoc }).tab
               : t,
           ),
         );
-        setMdJustReloadedAt(now);
       } else if (event.kind === "deleted") {
+        const now = Date.now();
         setMdTabs((prev) =>
           prev.map((t) =>
-            t.filePath === event.filePath
-              ? {
-                  ...t,
-                  deletedOnDisk: true,
-                  error: event.error ?? "ファイルが削除または移動されました。",
-                  isLoading: false,
-                }
-              : t,
+            t.filePath === event.filePath ? applyMarkdownDiskDeleted(t, event.error, now) : t,
           ),
         );
       } else if (event.kind === "error") {
@@ -1156,6 +1285,7 @@ export const App: React.FC = () => {
     if (tab.kind === "browser") {
       void window.conductor.browserCloseTab(tab.browserTab.id);
     } else if (tab.kind === "markdown") {
+      lastSelfSavedMdDocsRef.current.delete(tab.markdownTab.filePath);
       setMdTabs((prev) => prev.filter((t) => t.filePath !== tab.markdownTab.filePath));
     } else if (tab.kind === "code") {
       setCodeTabs((prev) => prev.filter((t) => t.filePath !== tab.codeTab.filePath));
@@ -1618,6 +1748,12 @@ export const App: React.FC = () => {
               }}
               onAttachMdFileToChat={handleAttachMarkdownFile}
               onOpenMarkdownImage={handleOpenMarkdownImage}
+              onMarkdownDraftChange={handleMarkdownDraftChange}
+              onSaveActiveMd={handleSaveActiveMarkdown}
+              onDiscardActiveMd={handleDiscardActiveMarkdown}
+              onReloadExternalMdChange={handleReloadExternalMarkdownChange}
+              onDismissExternalMdChange={handleDismissExternalMarkdownChange}
+              onChangeMdViewMode={handleChangeMarkdownViewMode}
               onRetryImageTab={handleRetryImageTab}
               onImageLoadError={handleImageLoadError}
               onOpenProjectFile={handleOpenProjectFile}

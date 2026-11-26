@@ -10,10 +10,24 @@ import type {
 } from "../../shared/types.js";
 import type { ImageViewerTab } from "./image-viewer.js";
 
+export interface MarkdownExternalChange {
+  kind: "changed" | "deleted";
+  document?: MarkdownDocument;
+  detectedAt: number;
+  message?: string;
+}
+
 export interface MarkdownViewerTab {
   filePath: string;
   fileName: string;
   document: MarkdownDocument | null;
+  draftContent?: string | null;
+  isDirty?: boolean;
+  isSaving?: boolean;
+  saveError?: string | null;
+  lastSavedAt?: number | null;
+  externalChange?: MarkdownExternalChange | null;
+  viewMode?: "rendered" | "raw";
   error: string | null;
   deletedOnDisk?: boolean;
   isLoading: boolean;

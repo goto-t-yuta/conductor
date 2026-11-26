@@ -94,6 +94,8 @@ const api: ConductorAPI = {
   markdownOpenDialog: () => ipcRenderer.invoke("markdown:openDialog"),
   markdownReadFile: (filePathOrUrl, baseFilePath) =>
     ipcRenderer.invoke("markdown:readFile", filePathOrUrl, baseFilePath),
+  markdownWriteFile: (filePath, content) =>
+    ipcRenderer.invoke("markdown:write-file", filePath, content),
   markdownWatchFile: (filePathOrUrl) => ipcRenderer.invoke("markdown:watchFile", filePathOrUrl),
   markdownUnwatch: () => ipcRenderer.invoke("markdown:unwatch"),
   onMarkdownFileChanged: (listener) => {

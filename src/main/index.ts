@@ -13,7 +13,11 @@ import type {
 import { BrowserManager } from "./browser-manager.js";
 import { ConductorController } from "./conductor-controller.js";
 import { readLocalImageFile } from "./image-viewer.js";
-import { MarkdownFileWatcher, readLocalMarkdownFile } from "./markdown-viewer.js";
+import {
+  MarkdownFileWatcher,
+  readLocalMarkdownFile,
+  writeLocalMarkdownFile,
+} from "./markdown-viewer.js";
 import { registerProjectFileTreeIpcHandlers } from "./project-files.js";
 import { QuitGuard } from "./quit-guard.js";
 import { StateStore } from "./state-store.js";
@@ -347,6 +351,17 @@ function registerIpcHandlers(): void {
     "markdown:readFile",
     (_e, filePathOrUrl: string, baseFilePath?: string) =>
       readLocalMarkdownFile(filePathOrUrl, baseFilePath),
+  );
+
+  ipcMain.handle(
+    "markdown:write-file",
+    (_e, filePathOrUrl: string, content: string) => {
+      const result = writeLocalMarkdownFile(filePathOrUrl, content);
+      if (result.ok && result.document) {
+        markdownWatcher?.recordKnownDocument(result.document);
+      }
+      return result;
+    },
   );
 
   ipcMain.handle("markdown:watchFile", (_e, filePathOrUrl: string) => {

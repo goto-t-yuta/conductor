@@ -292,6 +292,13 @@ export interface MarkdownReadResult {
   error?: string;
 }
 
+export interface MarkdownWriteResult {
+  ok: boolean;
+  filePath: string;
+  document?: MarkdownDocument;
+  error?: string;
+}
+
 export interface MarkdownWatchEvent {
   filePath: string;
   kind: "changed" | "deleted" | "error";
@@ -460,6 +467,7 @@ export interface ConductorAPI {
   // Local Markdown Viewer
   markdownOpenDialog(): Promise<string[]>;
   markdownReadFile(filePathOrUrl: string, baseFilePath?: string): Promise<MarkdownReadResult>;
+  markdownWriteFile(filePath: string, content: string): Promise<MarkdownWriteResult>;
   markdownWatchFile(filePathOrUrl: string): Promise<{ ok: boolean; filePath?: string; error?: string }>;
   markdownUnwatch(): Promise<void>;
   onMarkdownFileChanged(listener: (event: MarkdownWatchEvent) => void): () => void;
