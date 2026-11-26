@@ -40,6 +40,23 @@ import type {
   VoiceSpeakRequest,
   VoiceSpeakResult,
 } from "./voice.js";
+import type {
+  AppUpdateDownloadProgress,
+  AppUpdateErrorCode,
+  AppUpdateReleaseAsset,
+  AppUpdateReleaseInfo,
+  AppUpdateState,
+  AppUpdateStatus,
+} from "./updater.js";
+
+export type {
+  AppUpdateDownloadProgress,
+  AppUpdateErrorCode,
+  AppUpdateReleaseAsset,
+  AppUpdateReleaseInfo,
+  AppUpdateState,
+  AppUpdateStatus,
+} from "./updater.js";
 
 export type {
   ListDirectoryResult,
@@ -603,6 +620,16 @@ export interface ConductorAPI {
   terminalClose(sessionId: string): Promise<TerminalCloseResult>;
   onTerminalData(listener: (event: TerminalDataEvent) => void): () => void;
   onTerminalExit(listener: (event: TerminalExitEvent) => void): () => void;
+
+  // App Updates (GitHub Releases)
+  updaterGetState(): Promise<AppUpdateState>;
+  updaterCheckForUpdates(): Promise<AppUpdateState>;
+  updaterDownloadAndOpen(): Promise<AppUpdateState>;
+  updaterCancelDownload(): Promise<AppUpdateState>;
+  updaterOpenDownloaded(): Promise<{ ok: boolean; error?: string }>;
+  updaterShowInFolder(): Promise<{ ok: boolean; error?: string }>;
+  updaterOpenReleasePage(url?: string): Promise<void>;
+  onUpdaterStateChanged(listener: (state: AppUpdateState) => void): () => void;
 
   getPathForFile(file: File): string;
 }

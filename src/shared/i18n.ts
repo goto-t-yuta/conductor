@@ -677,6 +677,57 @@ export const UI_STRINGS = {
     "usage.subscriptionNoteAfterCode": " を返したターンは実測値を使用します）。",
     "usage.resetBtn": "履歴をリセット",
     "usage.resetConfirmBtn": "リセット実行",
+
+    // App Updates (GitHub Releases)
+    "chat.settingsTitleWithUpdate": "設定（新しいアップデート {tag} があります）",
+    "update.title": "アプリのアップデート",
+    "update.desc":
+      "GitHub Releases（goto-t-yuta/conductor）から最新バージョンを確認・ダウンロードします。",
+    "update.checkBtn": "アップデートを確認",
+    "update.checkingBtn": "確認中...",
+    "update.currentVersionLabel": "現在のバージョン",
+    "update.latestVersionLabel": "最新リリース",
+    "update.lastChecked": "最終確認: {time}",
+    "update.notCheckedYet": "未確認",
+    "update.devModeBadge": "開発モード (pnpm dev)",
+    "update.devModeHint":
+      "開発モードで実行中です。最新リリースの確認やインストーラーのダウンロード動作はそのままテストできます。",
+    "update.statusAvailable": "アップデートあり",
+    "update.statusUpToDate": "最新です",
+    "update.statusDownloading": "ダウンロード中",
+    "update.statusDownloaded": "ダウンロード完了",
+    "update.statusError": "確認エラー",
+    "update.upToDateMessage": "お使いの Conductor は最新バージョンです。",
+    "update.releaseNotesTitle": "リリースノート抜粋",
+    "update.selectedAssetLabel": "対象インストーラー",
+    "update.noAssetForPlatform":
+      "現在の環境 ({platform}) 向けの自動選択アセットが見つかりませんでした。リリースページから手動でダウンロードしてください。",
+    "update.downloadAndOpenBtn": "今すぐダウンロードして開く",
+    "update.openReleasePageBtn": "リリースページを開く",
+    "update.cancelDownloadBtn": "ダウンロード中止",
+    "update.openInstallerBtn": "インストーラーを開く",
+    "update.showInFolderBtn": "フォルダで表示",
+    "update.downloadingProgress": "ダウンロード中… {percent}% ({downloaded} / {total})",
+    "update.downloadingProgressIndeterminate": "ダウンロード中… {downloaded}",
+    "update.downloadedOpenedHint":
+      "インストーラーを開きました。macOS で未署名アプリの警告が出た場合は、フォルダ内のファイルを右クリック→「開く」で起動してください。",
+    "update.downloadedManualHint":
+      "ダウンロードが完了しました。下のボタンからインストーラーを開くか、フォルダで表示してください。",
+    "update.errorNetwork":
+      "GitHub Releases への接続に失敗しました。ネットワーク接続を確認するか、リリースページを直接開いてください。",
+    "update.errorRateLimit":
+      "GitHub API のレート制限に達しました。しばらく待ってから再確認するか、リリースページを開いてください。",
+    "update.errorNoRelease": "公開済みのリリースがまだ見つかりませんでした。",
+    "update.errorDownloadFailed":
+      "インストーラーのダウンロードに失敗しました。再試行するか、リリースページから直接ダウンロードしてください。",
+    "update.errorOpenFailed":
+      "インストーラーを自動で開けませんでした。フォルダで表示して手動で起動してください。",
+    "update.bannerAvailable": "新しいバージョン {tag} が利用可能です",
+    "update.bannerDownloading": "アップデート ({tag}) をダウンロード中… {percent}%",
+    "update.bannerDownloadingIndeterminate": "アップデート ({tag}) をダウンロード中…",
+    "update.bannerDownloaded": "アップデート ({tag}) のダウンロードが完了しました",
+    "update.bannerDetailsBtn": "詳細",
+    "update.bannerDismissAria": "アップデート通知を閉じる",
   },
   en: {
     // Common & App
@@ -1272,6 +1323,57 @@ export const UI_STRINGS = {
     "usage.subscriptionNoteAfterCode": " use the exact reported cost).",
     "usage.resetBtn": "Reset History",
     "usage.resetConfirmBtn": "Confirm Reset",
+
+    // App Updates (GitHub Releases)
+    "chat.settingsTitleWithUpdate": "Settings (Update {tag} available)",
+    "update.title": "App Updates",
+    "update.desc":
+      "Check for and download the latest Conductor releases from GitHub Releases (goto-t-yuta/conductor).",
+    "update.checkBtn": "Check for Updates",
+    "update.checkingBtn": "Checking...",
+    "update.currentVersionLabel": "Current Version",
+    "update.latestVersionLabel": "Latest Release",
+    "update.lastChecked": "Last checked: {time}",
+    "update.notCheckedYet": "Not checked yet",
+    "update.devModeBadge": "Dev Mode (pnpm dev)",
+    "update.devModeHint":
+      "Running in development mode. You can still check releases and test downloading installers.",
+    "update.statusAvailable": "Update Available",
+    "update.statusUpToDate": "Up to Date",
+    "update.statusDownloading": "Downloading",
+    "update.statusDownloaded": "Ready to Install",
+    "update.statusError": "Check Error",
+    "update.upToDateMessage": "You are running the latest version of Conductor.",
+    "update.releaseNotesTitle": "Release Notes",
+    "update.selectedAssetLabel": "Installer Asset",
+    "update.noAssetForPlatform":
+      "No matching installer asset was found for your environment ({platform}). Please download manually from the release page.",
+    "update.downloadAndOpenBtn": "Download & Open",
+    "update.openReleasePageBtn": "Open Release Page",
+    "update.cancelDownloadBtn": "Cancel Download",
+    "update.openInstallerBtn": "Open Installer",
+    "update.showInFolderBtn": "Show in Folder",
+    "update.downloadingProgress": "Downloading… {percent}% ({downloaded} / {total})",
+    "update.downloadingProgressIndeterminate": "Downloading… {downloaded}",
+    "update.downloadedOpenedHint":
+      "Installer opened. On macOS, if Gatekeeper warns about an unsigned build, right-click the app in Finder and choose Open.",
+    "update.downloadedManualHint":
+      "Download complete. Open the installer below or reveal it in your folder.",
+    "update.errorNetwork":
+      "Could not connect to GitHub Releases. Check your network connection or open the release page directly.",
+    "update.errorRateLimit":
+      "GitHub API rate limit reached. Please wait and retry, or open the release page directly.",
+    "update.errorNoRelease": "No published release was found yet.",
+    "update.errorDownloadFailed":
+      "Failed to download the installer. Retry or download directly from the release page.",
+    "update.errorOpenFailed":
+      "Could not open the installer automatically. Reveal it in your folder to launch it manually.",
+    "update.bannerAvailable": "New version {tag} is available",
+    "update.bannerDownloading": "Downloading update ({tag})… {percent}%",
+    "update.bannerDownloadingIndeterminate": "Downloading update ({tag})…",
+    "update.bannerDownloaded": "Update ({tag}) downloaded and ready",
+    "update.bannerDetailsBtn": "Details",
+    "update.bannerDismissAria": "Dismiss update notification",
   },
 } as const satisfies Record<UiLocale, Record<string, string>>;
 

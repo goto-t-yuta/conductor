@@ -3,6 +3,7 @@ import { PROJECT_FILE_TREE_IPC_CHANNELS } from "../shared/file-tree.js";
 import type {
   AgentTaskStatus,
   AppSnapshot,
+  AppUpdateState,
   BrowserBounds,
   ChatAttachment,
   ConductorAPI,
@@ -149,6 +150,19 @@ const api: ConductorAPI = {
     const handler = (_event: Electron.IpcRendererEvent, event: TerminalExitEvent) => listener(event);
     ipcRenderer.on("terminal:exit", handler);
     return () => ipcRenderer.off("terminal:exit", handler);
+  },
+
+  updaterGetState: () => ipcRenderer.invoke("updater:getState"),
+  updaterCheckForUpdates: () => ipcRenderer.invoke("updater:check"),
+  updaterDownloadAndOpen: () => ipcRenderer.invoke("updater:downloadAndOpen"),
+  updaterCancelDownload: () => ipcRenderer.invoke("updater:cancelDownload"),
+  updaterOpenDownloaded: () => ipcRenderer.invoke("updater:openDownloaded"),
+  updaterShowInFolder: () => ipcRenderer.invoke("updater:showInFolder"),
+  updaterOpenReleasePage: (url?: string) => ipcRenderer.invoke("updater:openReleasePage", url),
+  onUpdaterStateChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: AppUpdateState) => listener(state);
+    ipcRenderer.on("updater:stateChanged", handler);
+    return () => ipcRenderer.off("updater:stateChanged", handler);
   },
 
   getPathForFile: (file: File) => {

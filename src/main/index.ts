@@ -14,6 +14,7 @@ import type {
   VoiceMicPermissionResult,
   VoiceSpeakRequest,
 } from "../shared/types.js";
+import { AppUpdater } from "./app-updater.js";
 import { BrowserManager } from "./browser-manager.js";
 import { ConductorController } from "./conductor-controller.js";
 import { readLocalImageFile } from "./image-viewer.js";
@@ -34,7 +35,35 @@ let markdownWatcher: MarkdownFileWatcher | null = null;
 let terminalManager: TerminalManager | null = null;
 let controller: ConductorController | null = null;
 let stateStore: StateStore | null = null;
+let appUpdater: AppUpdater | null = null;
+let startupUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+let hasRunStartupUpdateCheck = false;
 const voiceTts = new VoiceTtsManager();
+
+function getAppUpdater(): AppUpdater {
+  if (appUpdater) return appUpdater;
+  const buildVersion = process.env.CONDUCTOR_BUILD_VERSION?.trim() || app.getVersion() || "0.1.0";
+  const buildTag = process.env.CONDUCTOR_BUILD_TAG?.trim() || null;
+  const buildSha = process.env.CONDUCTOR_BUILD_SHA?.trim() || null;
+  const rawRunNumber = process.env.CONDUCTOR_BUILD_RUN_NUMBER?.trim() || "";
+  const buildRunNumber = /^\d+$/.test(rawRunNumber) ? Number(rawRunNumber) : null;
+  const isDevMode = !app.isPackaged || Boolean(process.env.CONDUCTOR_DEV_SERVER_URL);
+  const downloadsDir = path.join(app.getPath("downloads"), "Conductor-Updates");
+
+  appUpdater = new AppUpdater({
+    currentVersion: buildVersion,
+    currentTag: buildTag,
+    currentCommitSha: buildSha,
+    currentRunNumber: buildRunNumber,
+    isDevMode,
+    downloadsDir,
+    openPath: (filePath) => shell.openPath(filePath),
+    showItemInFolder: (filePath) => shell.showItemInFolder(filePath),
+    openExternal: (url) => shell.openExternal(url),
+    onStateChange: (state) => sendToRenderer("updater:stateChanged", state),
+  });
+  return appUpdater;
+}
 
 const SHUTDOWN_TIMEOUT_MS = 3_000;
 
@@ -48,6 +77,11 @@ const quitGuard = new QuitGuard({
     return result.response === 1;
   },
   performShutdown: async () => {
+    if (startupUpdateTimer) {
+      clearTimeout(startupUpdateTimer);
+      startupUpdateTimer = null;
+    }
+    appUpdater?.dispose();
     voiceTts.stop();
     markdownWatcher?.dispose();
     markdownWatcher = null;
@@ -478,6 +512,17 @@ function registerIpcHandlers(): void {
   ipcMain.handle("terminal:close", (_e, sessionId: string) =>
     terminalManager?.close(sessionId) ?? { ok: false },
   );
+
+  // App Updates (GitHub Releases) IPC
+  ipcMain.handle("updater:getState", () => getAppUpdater().getState());
+  ipcMain.handle("updater:check", () => getAppUpdater().checkForUpdates({ silent: false }));
+  ipcMain.handle("updater:downloadAndOpen", () => getAppUpdater().downloadAndOpen());
+  ipcMain.handle("updater:cancelDownload", () => getAppUpdater().cancelDownload());
+  ipcMain.handle("updater:openDownloaded", () => getAppUpdater().openDownloaded());
+  ipcMain.handle("updater:showInFolder", () => getAppUpdater().showDownloadedInFolder());
+  ipcMain.handle("updater:openReleasePage", (_e, url?: string) =>
+    getAppUpdater().openReleasePage(url),
+  );
 }
 
 async function createWindow(): Promise<void> {
@@ -560,6 +605,16 @@ async function createWindow(): Promise<void> {
   });
 
   void controller.start();
+
+  // Check for updates once in the background shortly after startup (silently ignores network failures)
+  if (!hasRunStartupUpdateCheck) {
+    hasRunStartupUpdateCheck = true;
+    startupUpdateTimer = setTimeout(() => {
+      startupUpdateTimer = null;
+      void getAppUpdater().checkForUpdates({ silent: true });
+    }, 3_000);
+    startupUpdateTimer.unref?.();
+  }
 }
 
 app.setName("Conductor");

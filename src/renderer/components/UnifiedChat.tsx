@@ -12,6 +12,9 @@ import {
   ChevronDown,
   ChevronRight,
   Crosshair,
+  Download,
+  ExternalLink,
+  FolderOpen,
   FolderPlus,
   GitMerge,
   GitPullRequest,
@@ -40,6 +43,7 @@ import type {
   AgentTask,
   AgentTaskStatus,
   AppSnapshot,
+  AppUpdateState,
   ChatAttachment,
   ChatMessage,
   ExplicitMentionTarget,
@@ -193,6 +197,13 @@ interface UnifiedChatProps {
   onToggleVoiceReadback?: () => void;
   onStopSpeaking?: () => void;
   onToggleVoiceAutoSend?: () => void;
+  appUpdate?: AppUpdateState | null;
+  updateBannerDismissed?: boolean;
+  onDismissUpdateBanner?: () => void;
+  onDownloadAndOpenUpdate?: () => void;
+  onOpenDownloadedUpdate?: () => void;
+  onShowDownloadedUpdateInFolder?: () => void;
+  onOpenUpdateReleasePage?: (url?: string) => void;
 }
 
 export const UnifiedChat: React.FC<UnifiedChatProps> = ({
@@ -248,6 +259,13 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   onToggleVoiceReadback,
   onStopSpeaking,
   onToggleVoiceAutoSend,
+  appUpdate = null,
+  updateBannerDismissed = false,
+  onDismissUpdateBanner,
+  onDownloadAndOpenUpdate,
+  onOpenDownloadedUpdate,
+  onShowDownloadedUpdateInFolder,
+  onOpenUpdateReleasePage,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const contentContainerRef = useRef<HTMLDivElement>(null);
@@ -1362,10 +1380,28 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
                 type="button"
                 data-testid="open-settings-btn"
                 onClick={onOpenSettings}
-                title={t(activeLocale, "chat.settingsTitle")}
-                className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
+                title={
+                  appUpdate?.updateAvailable && appUpdate.latestRelease
+                    ? t(activeLocale, "chat.settingsTitleWithUpdate", {
+                        tag: appUpdate.latestRelease.tagName,
+                      })
+                    : t(activeLocale, "chat.settingsTitle")
+                }
+                className="relative p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer shrink-0"
               >
                 <Settings className="w-4 h-4" />
+                {appUpdate &&
+                  (appUpdate.updateAvailable ||
+                    appUpdate.status === "downloading" ||
+                    appUpdate.status === "downloaded") && (
+                    <span
+                      data-testid="settings-update-badge"
+                      aria-hidden="true"
+                      className={`absolute top-1 right-1 w-2 h-2 rounded-full ring-2 ring-white dark:ring-[#0f1115] ${
+                        appUpdate.status === "downloaded" ? "bg-emerald-500" : "bg-indigo-500"
+                      }`}
+                    />
+                  )}
               </button>
             )}
 
@@ -1409,6 +1445,120 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
           </div>
         </div>
       </header>
+
+      {/* Subtle App Update Banner */}
+      {appUpdate &&
+        appUpdate.latestRelease &&
+        !updateBannerDismissed &&
+        (appUpdate.status === "available" ||
+          appUpdate.status === "downloading" ||
+          appUpdate.status === "downloaded") && (
+          <div
+            data-testid="app-update-banner"
+            className="flex items-center gap-2 px-4 py-1.5 text-[11.5px] bg-indigo-500/8 dark:bg-indigo-500/12 text-indigo-700 dark:text-indigo-200 border-b border-indigo-500/20 shrink-0"
+          >
+            {appUpdate.status === "downloading" ? (
+              <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin text-indigo-500" />
+            ) : appUpdate.status === "downloaded" ? (
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+            ) : (
+              <Download className="w-3.5 h-3.5 shrink-0 text-indigo-500" />
+            )}
+
+            <span className="flex-1 min-w-0 truncate font-medium">
+              {appUpdate.status === "downloading"
+                ? appUpdate.downloadProgress?.percent !== null &&
+                  appUpdate.downloadProgress?.percent !== undefined
+                  ? t(activeLocale, "update.bannerDownloading", {
+                      tag: appUpdate.latestRelease.tagName,
+                      percent: appUpdate.downloadProgress.percent,
+                    })
+                  : t(activeLocale, "update.bannerDownloadingIndeterminate", {
+                      tag: appUpdate.latestRelease.tagName,
+                    })
+                : appUpdate.status === "downloaded"
+                  ? t(activeLocale, "update.bannerDownloaded", {
+                      tag: appUpdate.latestRelease.tagName,
+                    })
+                  : t(activeLocale, "update.bannerAvailable", {
+                      tag: appUpdate.latestRelease.tagName,
+                    })}
+            </span>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {appUpdate.status === "available" &&
+                appUpdate.latestRelease.selectedAsset &&
+                onDownloadAndOpenUpdate && (
+                  <button
+                    type="button"
+                    data-testid="app-update-banner-download-btn"
+                    onClick={onDownloadAndOpenUpdate}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
+                  >
+                    <Download className="w-3 h-3" />
+                    <span>{t(activeLocale, "update.downloadAndOpenBtn")}</span>
+                  </button>
+                )}
+
+              {appUpdate.status === "downloaded" && onOpenDownloadedUpdate && (
+                <button
+                  type="button"
+                  data-testid="app-update-banner-open-btn"
+                  onClick={onOpenDownloadedUpdate}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors cursor-pointer"
+                >
+                  <Download className="w-3 h-3" />
+                  <span>{t(activeLocale, "update.openInstallerBtn")}</span>
+                </button>
+              )}
+
+              {appUpdate.status === "downloaded" && onShowDownloadedUpdateInFolder && (
+                <button
+                  type="button"
+                  onClick={onShowDownloadedUpdateInFolder}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-white/80 dark:bg-zinc-800/80 border border-indigo-500/25 hover:border-indigo-500/50 transition-colors cursor-pointer"
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  <span>{t(activeLocale, "update.showInFolderBtn")}</span>
+                </button>
+              )}
+
+              {onOpenSettings && (
+                <button
+                  type="button"
+                  data-testid="app-update-banner-details-btn"
+                  onClick={onOpenSettings}
+                  className="px-2 py-0.5 rounded-md text-[11px] font-medium hover:bg-indigo-500/15 transition-colors cursor-pointer"
+                >
+                  {t(activeLocale, "update.bannerDetailsBtn")}
+                </button>
+              )}
+
+              {onOpenUpdateReleasePage && (
+                <button
+                  type="button"
+                  onClick={() => onOpenUpdateReleasePage(appUpdate.latestRelease?.htmlUrl)}
+                  title={t(activeLocale, "update.openReleasePageBtn")}
+                  className="p-1 rounded hover:bg-indigo-500/15 transition-colors cursor-pointer"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                </button>
+              )}
+
+              {onDismissUpdateBanner && appUpdate.status !== "downloading" && (
+                <button
+                  type="button"
+                  data-testid="app-update-banner-dismiss-btn"
+                  onClick={onDismissUpdateBanner}
+                  aria-label={t(activeLocale, "update.bannerDismissAria")}
+                  className="p-0.5 rounded hover:bg-indigo-500/15 transition-colors cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
       {/* Error banner */}
       {snapshot.lastErrorBanner && (

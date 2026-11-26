@@ -159,6 +159,10 @@ describe("IPC handler registration & preload channel parity", () => {
     expect(allMainHandles).toContain("terminal:write");
     expect(allMainHandles).toContain("terminal:resize");
     expect(allMainHandles).toContain("terminal:close");
+    expect(allMainHandles).toContain("updater:getState");
+    expect(allMainHandles).toContain("updater:check");
+    expect(allMainHandles).toContain("updater:downloadAndOpen");
+    expect(allMainHandles).toContain("updater:openReleasePage");
     expect(preloadInvokes).toContain("fs:list-dir");
     expect(preloadInvokes).toContain("fs:read-text-file");
     expect(preloadInvokes).toContain("markdown:write-file");
@@ -191,6 +195,7 @@ describe("IPC handler registration & preload channel parity", () => {
     expect([...preloadOffEvents].sort()).toEqual([...preloadOnEvents].sort());
     expect(mainEvents.has("terminal:data")).toBe(true);
     expect(mainEvents.has("terminal:exit")).toBe(true);
+    expect(mainEvents.has("updater:stateChanged")).toBe(true);
   });
 
   it("formats stale main-process IPC handler errors with a restart guidance message", () => {

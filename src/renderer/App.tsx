@@ -3,6 +3,7 @@ import type {
   AgentTask,
   AgentTaskStatus,
   AppSnapshot,
+  AppUpdateState,
   ChatAttachment,
   ChatMessage,
   ExplicitMentionTarget,
@@ -158,6 +159,8 @@ export const App: React.FC = () => {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [settingsModalTab, setSettingsModalTab] = useState<SettingsModalTab | null>(null);
+  const [appUpdate, setAppUpdate] = useState<AppUpdateState | null>(null);
+  const [dismissedUpdateTag, setDismissedUpdateTag] = useState<string | null>(null);
   const [voiceAutoSend, setVoiceAutoSend] = useState<boolean>(() => loadVoiceAutoSend());
   const [isSpeaking, setIsSpeaking] = useState(false);
   const voiceTrackerRef = useRef(createInitialVoiceReadbackTracker());
@@ -428,6 +431,12 @@ export const App: React.FC = () => {
         ),
       );
     });
+    void window.conductor.updaterGetState?.().then((state) => {
+      if (state) setAppUpdate(state);
+    });
+    const unsubUpdater = window.conductor.onUpdaterStateChanged?.((state) => {
+      setAppUpdate(state);
+    });
 
     const closeAllTerminals = () => {
       for (const tab of terminalTabsRef.current) {
@@ -443,6 +452,7 @@ export const App: React.FC = () => {
       unsubAtt();
       unsubTermData?.();
       unsubTermExit?.();
+      unsubUpdater?.();
     };
   }, [updateAttachments]);
 
@@ -2152,6 +2162,43 @@ export const App: React.FC = () => {
     void window.conductor.openPathInFinder(fp);
   }, []);
 
+  const handleCheckForUpdates = useCallback(() => {
+    void window.conductor.updaterCheckForUpdates?.().then((state) => {
+      if (state) setAppUpdate(state);
+    });
+  }, []);
+
+  const handleDownloadAndOpenUpdate = useCallback(() => {
+    setDismissedUpdateTag(null);
+    void window.conductor.updaterDownloadAndOpen?.().then((state) => {
+      if (state) setAppUpdate(state);
+    });
+  }, []);
+
+  const handleCancelUpdateDownload = useCallback(() => {
+    void window.conductor.updaterCancelDownload?.().then((state) => {
+      if (state) setAppUpdate(state);
+    });
+  }, []);
+
+  const handleOpenDownloadedUpdate = useCallback(() => {
+    void window.conductor.updaterOpenDownloaded?.();
+  }, []);
+
+  const handleShowDownloadedUpdateInFolder = useCallback(() => {
+    void window.conductor.updaterShowInFolder?.();
+  }, []);
+
+  const handleOpenUpdateReleasePage = useCallback((url?: string) => {
+    void window.conductor.updaterOpenReleasePage?.(url);
+  }, []);
+
+  const handleDismissUpdateBanner = useCallback(() => {
+    if (appUpdate?.latestRelease?.tagName) {
+      setDismissedUpdateTag(appUpdate.latestRelease.tagName);
+    }
+  }, [appUpdate?.latestRelease?.tagName]);
+
   if (!snapshot) {
     return (
       <div className="h-full w-full flex items-center justify-center text-[13px] text-zinc-400">
@@ -2296,6 +2343,16 @@ export const App: React.FC = () => {
           onToggleVoiceReadback={handleToggleVoiceReadback}
           onStopSpeaking={handleStopSpeaking}
           onToggleVoiceAutoSend={handleToggleVoiceAutoSend}
+          appUpdate={appUpdate}
+          updateBannerDismissed={
+            Boolean(dismissedUpdateTag) &&
+            dismissedUpdateTag === appUpdate?.latestRelease?.tagName
+          }
+          onDismissUpdateBanner={handleDismissUpdateBanner}
+          onDownloadAndOpenUpdate={handleDownloadAndOpenUpdate}
+          onOpenDownloadedUpdate={handleOpenDownloadedUpdate}
+          onShowDownloadedUpdateInFolder={handleShowDownloadedUpdateInFolder}
+          onOpenUpdateReleasePage={handleOpenUpdateReleasePage}
         />
       </div>
 
@@ -2444,6 +2501,13 @@ export const App: React.FC = () => {
           onRefreshRemoteAccessStatus={() =>
             void window.conductor.refreshRemoteAccessStatus()
           }
+          appUpdate={appUpdate}
+          onCheckForUpdates={handleCheckForUpdates}
+          onDownloadAndOpenUpdate={handleDownloadAndOpenUpdate}
+          onCancelUpdateDownload={handleCancelUpdateDownload}
+          onOpenDownloadedUpdate={handleOpenDownloadedUpdate}
+          onShowDownloadedUpdateInFolder={handleShowDownloadedUpdateInFolder}
+          onOpenUpdateReleasePage={handleOpenUpdateReleasePage}
         />
       )}
     </div>
