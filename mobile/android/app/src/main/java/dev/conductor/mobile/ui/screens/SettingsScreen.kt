@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -69,6 +70,7 @@ fun SettingsScreen(
     snapshot: AppSnapshot?,
     isTesting: Boolean,
     lastTestResult: ConnectionTestResult?,
+    onOpenQrScanner: () -> Unit,
     onReconnect: () -> Unit,
     onTestConnection: (url: String, token: String) -> Unit,
     onSaveConfig: (url: String, token: String) -> Unit,
@@ -202,6 +204,19 @@ fun SettingsScreen(
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("URI 貼付")
                         }
+                    }
+
+                    OutlinedButton(
+                        onClick = onOpenQrScanner,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(
+                            Icons.Default.QrCodeScanner,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("QRコードをスキャンしてリンク")
                     }
 
                     OutlinedTextField(

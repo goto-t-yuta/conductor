@@ -1,13 +1,18 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   BarChart3,
   Check,
   Copy,
+  Download,
   Eye,
   EyeOff,
   GitBranch,
   Globe,
+  Link2,
   Mic,
+  Power,
+  QrCode,
   RefreshCw,
   Search,
   Settings,
@@ -22,6 +27,7 @@ import {
   type UiLocale,
 } from "../../shared/i18n.js";
 import { DEFAULT_PREFERRED_LANGUAGE, LANGUAGE_OPTIONS } from "../../shared/language.js";
+import { ANDROID_APK_DOWNLOAD_URL } from "../../shared/remote-access.js";
 import type {
   IntegrationMode,
   PreferredLanguage,
@@ -37,6 +43,7 @@ import {
   getIntegrationModeOption,
   getIntegrationModeOptions,
 } from "../lib/integration-mode.js";
+import { QrCodeSvg } from "./QrCodeSvg.js";
 import { UsagePanel } from "./UsagePanel.js";
 
 export type SettingsModalTab = "general" | "usage";
@@ -139,6 +146,7 @@ export const LanguageSettingsSection: React.FC<LanguageSettingsSectionProps> = (
 
 export interface RemoteAccessSettingsSectionProps {
   remoteAccess: RemoteAccessStatus;
+  locale?: UiLocale;
   onSetRemoteAccessEnabled?: (enabled: boolean) => void;
   onSetRemoteAccessPort?: (port: number) => void;
   onRegenerateRemoteAccessToken?: () => void;
@@ -147,6 +155,7 @@ export interface RemoteAccessSettingsSectionProps {
 
 export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionProps> = ({
   remoteAccess,
+  locale = "ja",
   onSetRemoteAccessEnabled,
   onSetRemoteAccessPort,
   onRegenerateRemoteAccessToken,
@@ -183,6 +192,8 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
       ? `${remoteAccess.token.slice(0, 6)}${"•".repeat(16)}${remoteAccess.token.slice(-4)}`
       : "•".repeat(16);
 
+  const canShowPairingQr = Boolean(remoteAccess.running && remoteAccess.connectUri);
+
   return (
     <section
       data-testid="remote-access-section"
@@ -192,21 +203,21 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         <div>
           <h3 className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
             <Smartphone className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-            <span>リモートアクセス / Tailscale Mobile Bridge</span>
+            <span>{t(locale, "remote.title")}</span>
           </h3>
           <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-            Tailscale 経由で Android アプリやモバイルブラウザから Conductor のチャット・タスクをリアルタイム操作します。
+            {t(locale, "remote.desc")}
           </p>
         </div>
         <button
           type="button"
           data-testid="remote-access-refresh"
           onClick={() => onRefreshRemoteAccessStatus?.()}
-          title="Tailscale ネットワーク情報を再検出"
+          title={t(locale, "remote.refreshTitle")}
           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 cursor-pointer shrink-0"
         >
           <RefreshCw className="w-3 h-3" />
-          <span>再検出</span>
+          <span>{t(locale, "remote.refreshBtn")}</span>
         </button>
       </div>
 
@@ -226,7 +237,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         <div className="space-y-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100">
-              Remote Bridge サーバーを有効化
+              {t(locale, "remote.toggleTitle")}
             </span>
             <span
               className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
@@ -238,15 +249,16 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               }`}
             >
               {remoteAccess.running
-                ? `稼働中 · SSE ${remoteAccess.connectedClients}台`
+                ? t(locale, "remote.statusRunning", { count: remoteAccess.connectedClients })
                 : remoteAccess.error
-                  ? "エラー"
-                  : "停止中"}
+                  ? t(locale, "remote.statusError")
+                  : t(locale, "remote.statusStopped")}
             </span>
           </div>
           <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-            ON の間のみ <code className="font-mono text-[10.5px]">0.0.0.0:{remoteAccess.port}</code>{" "}
-            で待受し、すべての API に Bearer Token 認証を必須とします。
+            {t(locale, "remote.toggleDescBeforeCode")}
+            <code className="font-mono text-[10.5px]">0.0.0.0:{remoteAccess.port}</code>
+            {t(locale, "remote.toggleDescAfterCode")}
           </p>
         </div>
         <span
@@ -269,6 +281,149 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         </div>
       )}
 
+      {/* 2-Step Android QR Quick Setup */}
+      <div
+        data-testid="remote-access-qr-panel"
+        className="p-3.5 rounded-xl bg-zinc-50/80 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800 space-y-3"
+      >
+        <div className="flex items-start gap-2">
+          <QrCode className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <h4 className="text-[12px] font-semibold text-zinc-900 dark:text-zinc-100">
+              {t(locale, "remote.qrHeading")}
+            </h4>
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+              {t(locale, "remote.qrSubheading")}
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Step 1: Android APK Download QR */}
+          <div
+            data-testid="remote-access-qr-download-card"
+            className="flex flex-col justify-between gap-2.5 p-3 rounded-xl bg-white dark:bg-zinc-950/80 border border-zinc-200 dark:border-zinc-800"
+          >
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-300">
+                  <Download className="w-2.5 h-2.5" />
+                  <span>{t(locale, "remote.step1Badge")}</span>
+                </span>
+                <span className="text-[12px] font-semibold text-zinc-900 dark:text-zinc-100">
+                  {t(locale, "remote.step1Title")}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                {t(locale, "remote.step1Desc")}
+              </p>
+            </div>
+
+            <div className="flex justify-center py-1">
+              <QrCodeSvg
+                value={ANDROID_APK_DOWNLOAD_URL}
+                size={136}
+                ariaLabel={t(locale, "remote.step1QrAria")}
+                testId="remote-access-qr-download"
+              />
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <code
+                data-testid="remote-access-apk-url"
+                title={ANDROID_APK_DOWNLOAD_URL}
+                className="flex-1 min-w-0 truncate px-2 py-1 rounded-md bg-zinc-100/90 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800 font-mono text-[10px] text-zinc-600 dark:text-zinc-300"
+              >
+                {ANDROID_APK_DOWNLOAD_URL}
+              </code>
+              <button
+                type="button"
+                data-testid="remote-access-apk-copy"
+                onClick={() => copyText("apkUrl", ANDROID_APK_DOWNLOAD_URL)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-medium bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 text-zinc-700 dark:text-zinc-200 cursor-pointer shrink-0"
+              >
+                {copiedKey === "apkUrl" ? (
+                  <Check className="w-3 h-3 text-emerald-500" />
+                ) : (
+                  <Copy className="w-3 h-3" />
+                )}
+                <span>
+                  {copiedKey === "apkUrl"
+                    ? t(locale, "remote.copiedBtn")
+                    : t(locale, "remote.step1CopyUrl")}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {/* Step 2: Desktop Pairing QR */}
+          <div
+            data-testid="remote-access-qr-pair-card"
+            className="flex flex-col justify-between gap-2.5 p-3 rounded-xl bg-white dark:bg-zinc-950/80 border border-zinc-200 dark:border-zinc-800"
+          >
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-500/12 text-emerald-700 dark:text-emerald-300">
+                  <Link2 className="w-2.5 h-2.5" />
+                  <span>{t(locale, "remote.step2Badge")}</span>
+                </span>
+                <span className="text-[12px] font-semibold text-zinc-900 dark:text-zinc-100">
+                  {t(locale, "remote.step2Title")}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                {canShowPairingQr
+                  ? t(locale, "remote.step2DescActive")
+                  : t(locale, "remote.step2DisabledDesc")}
+              </p>
+            </div>
+
+            {canShowPairingQr && remoteAccess.connectUri ? (
+              <>
+                <div className="flex justify-center py-1">
+                  <QrCodeSvg
+                    value={remoteAccess.connectUri}
+                    size={136}
+                    ariaLabel={t(locale, "remote.step2QrAria")}
+                    testId="remote-access-qr-pair"
+                  />
+                </div>
+                <div className="space-y-1">
+                  {!remoteAccess.tailscaleIp && (
+                    <div
+                      data-testid="remote-access-qr-tailscale-warning"
+                      className="flex items-start gap-1.5 px-2 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[10px] text-amber-700 dark:text-amber-300 leading-snug"
+                    >
+                      <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+                      <span>{t(locale, "remote.step2TailscaleWarning")}</span>
+                    </div>
+                  )}
+                  <p className="text-[10px] text-zinc-500 dark:text-zinc-400 leading-snug">
+                    {t(locale, "remote.step2TokenHint")}
+                  </p>
+                </div>
+              </>
+            ) : (
+              <div
+                data-testid="remote-access-qr-pair-disabled"
+                className="flex-1 flex flex-col items-center justify-center gap-2.5 py-4 px-3 rounded-xl border border-dashed border-zinc-300 dark:border-zinc-700 bg-zinc-50/70 dark:bg-zinc-900/50 text-center"
+              >
+                <QrCode className="w-8 h-8 text-zinc-400 dark:text-zinc-600" />
+                <button
+                  type="button"
+                  data-testid="remote-access-qr-enable-btn"
+                  onClick={() => onSetRemoteAccessEnabled?.(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-xs transition-colors cursor-pointer"
+                >
+                  <Power className="w-3.5 h-3.5" />
+                  <span>{t(locale, "remote.step2EnableBtn")}</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* Connection Details Box */}
       <div className="p-3.5 rounded-xl bg-zinc-50/80 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800 space-y-3">
         {/* Port & Tailscale Info */}
@@ -278,7 +433,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               htmlFor="remote-access-port"
               className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400"
             >
-              ポート番号（既定: 4789）
+              {t(locale, "remote.portLabel")}
             </label>
             <div className="flex items-center gap-1.5">
               <input
@@ -300,20 +455,20 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
                 onClick={applyPort}
                 className="px-2.5 py-1 rounded-lg text-[11.5px] font-medium bg-zinc-200/80 dark:bg-zinc-800 hover:bg-zinc-300/80 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 cursor-pointer"
               >
-                適用
+                {t(locale, "remote.applyBtn")}
               </button>
             </div>
           </div>
 
           <div className="space-y-1">
             <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-              Tailscale 検出結果
+              {t(locale, "remote.tailscaleDetection")}
             </div>
             <div className="text-[11.5px] font-mono text-zinc-800 dark:text-zinc-200 space-y-0.5">
               <div>
                 IPv4:{" "}
                 <span data-testid="remote-access-tailscale-ip">
-                  {remoteAccess.tailscaleIp ?? "未検出"}
+                  {remoteAccess.tailscaleIp ?? t(locale, "remote.notDetected")}
                 </span>
               </div>
               {remoteAccess.magicDnsName && (
@@ -328,7 +483,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         {/* Connection URL */}
         <div className="space-y-1">
           <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-            接続 URL（Android Chrome でもそのまま開けます）
+            {t(locale, "remote.urlLabel")}
           </div>
           <div className="flex items-center gap-1.5">
             <code
@@ -347,7 +502,9 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               ) : (
                 <Copy className="w-3 h-3" />
               )}
-              <span>{copiedKey === "url" ? "コピー済み" : "コピー"}</span>
+              <span>
+                {copiedKey === "url" ? t(locale, "remote.copiedBtn") : t(locale, "remote.copyBtn")}
+              </span>
             </button>
           </div>
           {remoteAccess.magicDnsUrl && remoteAccess.magicDnsUrl !== remoteAccess.url && (
@@ -358,7 +515,9 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
                 onClick={() => copyText("magicdns", remoteAccess.magicDnsUrl)}
                 className="text-indigo-500 hover:underline shrink-0 cursor-pointer"
               >
-                {copiedKey === "magicdns" ? "コピー済み" : "コピー"}
+                {copiedKey === "magicdns"
+                  ? t(locale, "remote.copiedBtn")
+                  : t(locale, "remote.copyBtn")}
               </button>
             </div>
           )}
@@ -367,7 +526,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         {/* Bearer Token */}
         <div className="space-y-1">
           <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-            Bearer Token
+            {t(locale, "remote.bearerTokenLabel")}
           </div>
           <div className="flex items-center gap-1.5">
             <code
@@ -379,7 +538,9 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
             <button
               type="button"
               onClick={() => setShowToken((v) => !v)}
-              aria-label={showToken ? "トークンを隠す" : "トークンを表示"}
+              aria-label={
+                showToken ? t(locale, "remote.hideTokenAria") : t(locale, "remote.showTokenAria")
+              }
               className="p-1.5 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 cursor-pointer shrink-0"
             >
               {showToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
@@ -394,7 +555,11 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               ) : (
                 <Copy className="w-3 h-3" />
               )}
-              <span>{copiedKey === "token" ? "コピー済み" : "コピー"}</span>
+              <span>
+                {copiedKey === "token"
+                  ? t(locale, "remote.copiedBtn")
+                  : t(locale, "remote.copyBtn")}
+              </span>
             </button>
             <button
               type="button"
@@ -403,7 +568,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 cursor-pointer shrink-0"
             >
               <RefreshCw className="w-3 h-3" />
-              <span>再生成</span>
+              <span>{t(locale, "remote.regenerateBtn")}</span>
             </button>
           </div>
         </div>
@@ -412,7 +577,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         {remoteAccess.connectUri && (
           <div className="space-y-1">
             <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-              Android アプリ一括接続 URI（そのまま貼り付け可能）
+              {t(locale, "remote.connectUriLabel")}
             </div>
             <div className="flex items-center gap-1.5">
               <code
@@ -433,7 +598,11 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
                 ) : (
                   <Copy className="w-3 h-3" />
                 )}
-                <span>{copiedKey === "uri" ? "コピー済み" : "URI コピー"}</span>
+                <span>
+                  {copiedKey === "uri"
+                    ? t(locale, "remote.copiedBtn")
+                    : t(locale, "remote.copyUriBtn")}
+                </span>
               </button>
             </div>
           </div>
@@ -725,6 +894,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {remoteAccess && (
                 <RemoteAccessSettingsSection
                   remoteAccess={remoteAccess}
+                  locale={activeLocale}
                   onSetRemoteAccessEnabled={onSetRemoteAccessEnabled}
                   onSetRemoteAccessPort={onSetRemoteAccessPort}
                   onRegenerateRemoteAccessToken={onRegenerateRemoteAccessToken}

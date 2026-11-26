@@ -5,8 +5,9 @@ Mac 上の **Conductor** デスクトップアプリに **Tailscale** 経由で�
 ## 主な機能
 
 - **Setup / 接続画面**:
-  - Tailscale URL (`http://100.x.x.x:4789`) + Bearer Token 入力
-  - `conductor://connect?url=...&token=...` の一括貼り付け解析＆ディープリンク対応
+  - **QRコードスキャンでワンタップリンク**: デスクトップの「設定 → リモートアクセス → Step 2」QRコードを読み取るだけで URL・Bearer Token を自動保存して即座に接続（CameraX + ZXing、Google Play 開発者サービス不要）
+  - システムカメラで読み取った `conductor://connect?...` / `conductor://link?...` ディープリンクからの自動リンク対応
+  - Tailscale URL (`http://100.x.x.x:4789`) + Bearer Token 入力・URI 一括貼り付け
   - 接続テスト（`/api/health` + `/api/snapshot`）と Jetpack DataStore への永続保存
 - **Chat**:
   - SSE (`/api/events`) によるリアルタイムストリーム同期 + 自動再接続 / フォールバックポーリング

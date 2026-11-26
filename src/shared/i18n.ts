@@ -510,6 +510,53 @@ export const UI_STRINGS = {
     "settings.voiceReadbackDescAfterCode": " で自動読み上げします。",
     "settings.voiceAutoSendTitle": "発話終了時に自動送信 (Auto-send on speech end)",
     "settings.voiceAutoSendDesc": "ON にすると音声入力の認識完了後すぐにチャットを送信します（OFF の場合は送信前に入力内容を確認・編集できます）。",
+
+    // Remote Access & Android QR Setup
+    "remote.title": "リモートアクセス / Tailscale Mobile Bridge",
+    "remote.desc":
+      "Tailscale 経由で Android アプリやモバイルブラウザから Conductor のチャット・タスクをリアルタイム操作します。",
+    "remote.refreshTitle": "Tailscale ネットワーク情報を再検出",
+    "remote.refreshBtn": "再検出",
+    "remote.toggleTitle": "Remote Bridge サーバーを有効化",
+    "remote.statusRunning": "稼働中 · SSE {count}台",
+    "remote.statusError": "エラー",
+    "remote.statusStopped": "停止中",
+    "remote.toggleDescBeforeCode": "ON の間のみ ",
+    "remote.toggleDescAfterCode": " で待受し、すべての API に Bearer Token 認証を必須とします。",
+    "remote.qrHeading": "Android クイックセットアップ（QRコード）",
+    "remote.qrSubheading":
+      "2ステップで Android アプリの導入からデスクトップとのリンク設定まで完了します。",
+    "remote.step1Badge": "Step 1",
+    "remote.step1Title": "Android アプリをダウンロード",
+    "remote.step1Desc":
+      "スマホのカメラで読み取り、GitHub Releases の最新リリースから APK をインストールします。",
+    "remote.step1QrAria": "Android APK ダウンロード用 QR コード",
+    "remote.step1CopyUrl": "URL コピー",
+    "remote.step2Badge": "Step 2",
+    "remote.step2Title": "デスクトップとリンク（ペアリング）",
+    "remote.step2DescActive":
+      "Android アプリの「QRコードをスキャンしてリンク」または標準カメラで読み取ると、URL とトークンが自動設定されて即座に接続します。",
+    "remote.step2QrAria": "デスクトップ連携用 QR コード",
+    "remote.step2TailscaleWarning":
+      "Tailscale IP が未検出です。Mac と Android の両方で Tailscale を ON にして「再検出」を押してください。",
+    "remote.step2TokenHint":
+      "認証トークンを含むため画面共有時はご注意ください。「再生成」で以前の QR を無効化できます。",
+    "remote.step2DisabledDesc":
+      "リンク用 QR コードを表示するには、Remote Bridge サーバーを有効化してください。",
+    "remote.step2EnableBtn": "Remote Bridge を有効化して QR を表示",
+    "remote.portLabel": "ポート番号（既定: 4789）",
+    "remote.applyBtn": "適用",
+    "remote.tailscaleDetection": "Tailscale 検出結果",
+    "remote.notDetected": "未検出",
+    "remote.urlLabel": "接続 URL（Android Chrome でもそのまま開けます）",
+    "remote.copyBtn": "コピー",
+    "remote.copiedBtn": "コピー済み",
+    "remote.bearerTokenLabel": "Bearer Token",
+    "remote.hideTokenAria": "トークンを隠す",
+    "remote.showTokenAria": "トークンを表示",
+    "remote.regenerateBtn": "再生成",
+    "remote.connectUriLabel": "Android アプリ一括接続 URI（そのまま貼り付け可能）",
+    "remote.copyUriBtn": "URI コピー",
   },
   en: {
     // Common & App
@@ -938,6 +985,53 @@ export const UI_STRINGS = {
     "settings.voiceReadbackDescAfterCode": ".",
     "settings.voiceAutoSendTitle": "Auto-send on speech end",
     "settings.voiceAutoSendDesc": "When ON, sends the message immediately after speech recognition finishes (when OFF, lets you review and edit before sending).",
+
+    // Remote Access & Android QR Setup
+    "remote.title": "Remote Access / Tailscale Mobile Bridge",
+    "remote.desc":
+      "Control Conductor chat and tasks in real time from the Android app or mobile browser over Tailscale.",
+    "remote.refreshTitle": "Redetect Tailscale network info",
+    "remote.refreshBtn": "Redetect",
+    "remote.toggleTitle": "Enable Remote Bridge Server",
+    "remote.statusRunning": "Running · {count} SSE",
+    "remote.statusError": "Error",
+    "remote.statusStopped": "Stopped",
+    "remote.toggleDescBeforeCode": "Listens on ",
+    "remote.toggleDescAfterCode": " only while ON, requiring Bearer Token authentication on all API endpoints.",
+    "remote.qrHeading": "Android Quick Setup (QR Code)",
+    "remote.qrSubheading":
+      "Install the Android app and pair it with this desktop in 2 quick steps.",
+    "remote.step1Badge": "Step 1",
+    "remote.step1Title": "Download Android App",
+    "remote.step1Desc":
+      "Scan with your phone camera to open GitHub Releases and install the latest APK.",
+    "remote.step1QrAria": "QR code for downloading the Android APK",
+    "remote.step1CopyUrl": "Copy URL",
+    "remote.step2Badge": "Step 2",
+    "remote.step2Title": "Link with Desktop (Pairing)",
+    "remote.step2DescActive":
+      "Scan using \"Scan QR to Link\" in the Android app or your system camera to auto-save the URL & token and connect immediately.",
+    "remote.step2QrAria": "QR code for pairing with desktop Conductor",
+    "remote.step2TailscaleWarning":
+      "Tailscale IP not detected. Turn on Tailscale on both Mac and Android, then click Redetect.",
+    "remote.step2TokenHint":
+      "Contains your auth token — keep private when screen sharing. Click Regenerate to invalidate older QR codes.",
+    "remote.step2DisabledDesc":
+      "Enable the Remote Bridge server to generate a pairing QR code for your Android device.",
+    "remote.step2EnableBtn": "Enable Remote Bridge & Show QR",
+    "remote.portLabel": "Port (Default: 4789)",
+    "remote.applyBtn": "Apply",
+    "remote.tailscaleDetection": "Tailscale Detection",
+    "remote.notDetected": "Not detected",
+    "remote.urlLabel": "Connection URL (also works in Android Chrome)",
+    "remote.copyBtn": "Copy",
+    "remote.copiedBtn": "Copied",
+    "remote.bearerTokenLabel": "Bearer Token",
+    "remote.hideTokenAria": "Hide token",
+    "remote.showTokenAria": "Show token",
+    "remote.regenerateBtn": "Regenerate",
+    "remote.connectUriLabel": "Android One-Paste Connect URI",
+    "remote.copyUriBtn": "Copy URI",
   },
 } as const satisfies Record<UiLocale, Record<string, string>>;
 

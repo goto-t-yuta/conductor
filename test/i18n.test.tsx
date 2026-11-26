@@ -561,6 +561,22 @@ describe("English UI rendering has zero leaked Japanese strings across all major
         defaultIntegrationMode="feature-branch"
         autoLandOnComplete={true}
         preferredLanguage="en"
+        remoteAccess={{
+          enabled: true,
+          running: true,
+          port: 4789,
+          token: "abcdef0123456789abcdef0123456789",
+          bindHost: "0.0.0.0",
+          tailscaleIp: "100.121.247.7",
+          magicDnsName: "macbook-pro.taile00453.ts.net",
+          lanIp: "192.168.1.5",
+          url: "http://100.121.247.7:4789",
+          magicDnsUrl: "http://macbook-pro.taile00453.ts.net:4789",
+          connectUri:
+            "conductor://connect?url=http%3A%2F%2F100.121.247.7%3A4789&token=abcdef0123456789abcdef0123456789",
+          connectedClients: 1,
+          error: null,
+        }}
         projects={[SAMPLE_PROJECT]}
         onClose={vi.fn()}
         onSetDefaultIntegrationMode={vi.fn()}
@@ -571,9 +587,13 @@ describe("English UI rendering has zero leaked Japanese strings across all major
     );
     expect(settingsHtml).toContain("Conductor Settings");
     expect(settingsHtml).toContain("Language / Output Language");
+    expect(settingsHtml).toContain("Remote Access / Tailscale Mobile Bridge");
+    expect(settingsHtml).toContain("Android Quick Setup (QR Code)");
     expect(settingsHtml).toContain("Git Worktree Integration Mode (Global Default)");
     expect(settingsHtml).toContain("Per-Project Overrides");
     expect(settingsHtml).toContain("Close");
+    expect(settingsHtml).not.toContain("リモートアクセス");
+    expect(settingsHtml).not.toContain("稼働中");
 
     const taskEventHtml = renderToStaticMarkup(
       <TaskEventCard
