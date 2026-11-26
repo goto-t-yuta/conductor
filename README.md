@@ -89,6 +89,21 @@ flowchart LR
 
 ---
 
+## Downloads & Releases
+
+Prebuilt desktop binaries for **macOS**, **Windows**, and **Linux** — along with the **Android** companion APK — are automatically built and published to [GitHub Releases](https://github.com/goto-t-yuta/conductor/releases) on every push/merge to `main` (and via manual `workflow_dispatch`):
+
+| Platform | Artifacts |
+| --- | --- |
+| **macOS** | `.dmg` / `.zip` (`arm64` Apple Silicon & `x64` Intel) |
+| **Windows** | NSIS installer (`*-setup.exe`) / Portable (`*-portable.exe`) (`x64`) |
+| **Linux** | `.AppImage` / `.deb` (`x64`) |
+| **Android** | Companion app `.apk` (`Conductor-<version>-android.apk`, see [mobile/android/README.md](./mobile/android/README.md)) |
+
+> **Note**: Unless code-signing secrets (`CSC_LINK` / `WIN_CSC_LINK`) are configured in repository settings, desktop CI releases are unsigned and macOS Gatekeeper or Windows SmartScreen may prompt for confirmation on first launch. The Android APK is built with debug signing so it can be sideloaded directly onto Android devices without a release keystore.
+
+---
+
 ## Prerequisites
 
 - **OS**: macOS (built and tuned for macOS with `hiddenInset` titlebar & native menus)
@@ -116,11 +131,14 @@ pnpm dev
 ### Build & Verification Commands
 
 ```bash
-pnpm typecheck   # Type-check main & renderer TypeScript projects
-pnpm test        # Run Vitest unit & UI test suite
-pnpm build       # Bundle main, preload, and renderer into dist/
-pnpm check       # Run typecheck + test + build together
-pnpm start       # Build and launch the Electron app
+pnpm typecheck      # Type-check main & renderer TypeScript projects
+pnpm test           # Run Vitest unit & UI test suite
+pnpm build          # Bundle main, preload, and renderer into dist/
+pnpm check          # Run typecheck + test + build together
+pnpm start          # Build and launch the Electron app
+pnpm package:mac    # Package macOS .dmg & .zip into release/
+pnpm package:win    # Package Windows NSIS .exe & portable .exe into release/
+pnpm package:linux  # Package Linux .AppImage & .deb into release/
 ```
 
 ---
