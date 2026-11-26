@@ -19,9 +19,28 @@ export interface ResolvedImageSource {
   localPathToLoad: string | null;
 }
 
-export const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4] as const;
+export const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 5] as const;
 export const MIN_ZOOM = ZOOM_STEPS[0];
 export const MAX_ZOOM = ZOOM_STEPS[ZOOM_STEPS.length - 1];
+export const WHEEL_ZOOM_SENSITIVITY = 0.01;
+export const IMAGE_VIEWPORT_PADDING_PX = 16;
+
+export interface CursorAnchoredScrollParams {
+  prevScale: number;
+  nextScale: number;
+  naturalWidth: number;
+  naturalHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  scrollLeft: number;
+  scrollTop: number;
+  /** Cursor X coordinate relative to the viewport's left edge. */
+  cursorX: number;
+  /** Cursor Y coordinate relative to the viewport's top edge. */
+  cursorY: number;
+  /** Uniform inner padding around the image inside the scroll content wrapper. */
+  padding?: number;
+}
 
 const WINDOWS_DRIVE_PATH_RE = /^[a-zA-Z]:[\\/]/;
 const DIRECT_URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
@@ -215,4 +234,143 @@ export function stepZoom(currentScale: number, direction: "in" | "out"): number 
 export function formatZoomLabel(mode: ImageZoomMode, scale: number): string {
   if (mode === "fit") return "Fit";
   return `${Math.round(clampZoom(scale) * 100)}%`;
+}
+
+/**
+ * macOS Chromium/Electron dispatches trackpad pinch-to-zoom gestures as wheel events with
+ * `ctrlKey === true`. Also supports Cmd/Ctrl + wheel for mouse-wheel zooming.
+ */
+export function isPinchOrZoomWheelEvent(event: { ctrlKey: boolean; metaKey: boolean }): boolean {
+  return Boolean(event.ctrlKey || event.metaKey);
+}
+
+/**
+ * Normalizes WheelEvent.deltaY into CSS pixel units across pixel, line, and page delta modes.
+ */
+export function normalizeWheelDeltaY(deltaY: number, deltaMode = 0): number {
+  if (!Number.isFinite(deltaY) || deltaY === 0) return 0;
+  if (deltaMode === 1) return deltaY * 16;
+  if (deltaMode === 2) return deltaY * 400;
+  return deltaY;
+}
+
+/**
+ * Computes the rendered scale of an image in "fit" mode (`max-w-full max-h-full object-contain`),
+ * which shrinks large images to fit inside the available area without upscaling small images past 1x.
+ */
+export function computeFitScale(
+  naturalWidth: number,
+  naturalHeight: number,
+  availableWidth: number,
+  availableHeight: number,
+): number {
+  if (
+    !Number.isFinite(naturalWidth) ||
+    !Number.isFinite(naturalHeight) ||
+    !Number.isFinite(availableWidth) ||
+    !Number.isFinite(availableHeight) ||
+    naturalWidth <= 0 ||
+    naturalHeight <= 0 ||
+    availableWidth <= 0 ||
+    availableHeight <= 0
+  ) {
+    return 1;
+  }
+  return Math.min(1, availableWidth / naturalWidth, availableHeight / naturalHeight);
+}
+
+/**
+ * Computes the next smooth zoom scale from a wheel/pinch `deltaY` using an exponential factor
+ * (`Math.exp(-deltaY * sensitivity)`), clamped cleanly to `[MIN_ZOOM, MAX_ZOOM]`.
+ */
+export function computeNextWheelZoom(
+  currentScale: number,
+  deltaY: number,
+  options?: { deltaMode?: number; sensitivity?: number },
+): number {
+  if (!Number.isFinite(currentScale) || currentScale <= 0) return 1;
+  const normalizedDelta = normalizeWheelDeltaY(deltaY, options?.deltaMode ?? 0);
+  if (normalizedDelta === 0) return clampZoom(currentScale);
+
+  const sensitivity =
+    options?.sensitivity !== undefined &&
+    Number.isFinite(options.sensitivity) &&
+    options.sensitivity > 0
+      ? options.sensitivity
+      : WHEEL_ZOOM_SENSITIVITY;
+
+  // Cap exponent so extreme deltas never overflow Math.exp to Infinity before clamping.
+  const exponent = Math.max(-10, Math.min(10, -normalizedDelta * sensitivity));
+  return clampZoom(currentScale * Math.exp(exponent));
+}
+
+/**
+ * Computes the scroll offsets that keep the image pixel currently under `(cursorX, cursorY)`
+ * anchored in place after scaling from `prevScale` to `nextScale`.
+ */
+export function computeCursorAnchoredScroll(
+  params: CursorAnchoredScrollParams,
+): { scrollLeft: number; scrollTop: number } {
+  const {
+    prevScale,
+    nextScale,
+    naturalWidth,
+    naturalHeight,
+    viewportWidth,
+    viewportHeight,
+    scrollLeft,
+    scrollTop,
+    cursorX,
+    cursorY,
+    padding = IMAGE_VIEWPORT_PADDING_PX,
+  } = params;
+
+  const fallbackLeft = Number.isFinite(scrollLeft) ? Math.max(0, scrollLeft) : 0;
+  const fallbackTop = Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0;
+
+  if (
+    !Number.isFinite(prevScale) ||
+    !Number.isFinite(nextScale) ||
+    prevScale <= 0 ||
+    nextScale <= 0 ||
+    !Number.isFinite(naturalWidth) ||
+    !Number.isFinite(naturalHeight) ||
+    naturalWidth <= 0 ||
+    naturalHeight <= 0 ||
+    !Number.isFinite(viewportWidth) ||
+    !Number.isFinite(viewportHeight) ||
+    viewportWidth <= 0 ||
+    viewportHeight <= 0
+  ) {
+    return { scrollLeft: fallbackLeft, scrollTop: fallbackTop };
+  }
+
+  const pad = Number.isFinite(padding) ? Math.max(0, padding) : 0;
+  const safeCursorX = Number.isFinite(cursorX) ? cursorX : viewportWidth / 2;
+  const safeCursorY = Number.isFinite(cursorY) ? cursorY : viewportHeight / 2;
+
+  const prevImgW = naturalWidth * prevScale;
+  const prevImgH = naturalHeight * prevScale;
+  const nextImgW = naturalWidth * nextScale;
+  const nextImgH = naturalHeight * nextScale;
+
+  const prevOffsetX = Math.max(pad, (viewportWidth - prevImgW) / 2);
+  const prevOffsetY = Math.max(pad, (viewportHeight - prevImgH) / 2);
+  const nextOffsetX = Math.max(pad, (viewportWidth - nextImgW) / 2);
+  const nextOffsetY = Math.max(pad, (viewportHeight - nextImgH) / 2);
+
+  const ratio = nextScale / prevScale;
+  const pointInImgX = fallbackLeft + safeCursorX - prevOffsetX;
+  const pointInImgY = fallbackTop + safeCursorY - prevOffsetY;
+
+  const rawNextScrollLeft = nextOffsetX + pointInImgX * ratio - safeCursorX;
+  const rawNextScrollTop = nextOffsetY + pointInImgY * ratio - safeCursorY;
+
+  const maxScrollLeft = Math.max(0, nextImgW + pad * 2 - viewportWidth);
+  const maxScrollTop = Math.max(0, nextImgH + pad * 2 - viewportHeight);
+
+  return {
+    scrollLeft: Math.min(maxScrollLeft, Math.max(0, rawNextScrollLeft)),
+    scrollTop: Math.min(maxScrollTop, Math.max(0, rawNextScrollTop)),
+  };
 }

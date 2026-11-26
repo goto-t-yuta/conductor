@@ -12,13 +12,19 @@ import {
   buildImageTabFromAttachment,
   clampZoom,
   closeImageTab,
+  computeCursorAnchoredScroll,
+  computeFitScale,
+  computeNextWheelZoom,
   extractImageFileName,
   formatZoomLabel,
+  IMAGE_VIEWPORT_PADDING_PX,
   isDirectRenderableImageUrl,
   isLocalImagePathOrFileUrl,
+  isPinchOrZoomWheelEvent,
   isViewableImageAttachment,
   MAX_ZOOM,
   MIN_ZOOM,
+  normalizeWheelDeltaY,
   resolveImageSource,
   stepZoom,
   upsertImageTab,
@@ -319,5 +325,141 @@ describe("Image Viewer (renderer source resolution & tabs)", () => {
     expect(clampZoom(10)).toBe(MAX_ZOOM);
     expect(clampZoom(0.01)).toBe(MIN_ZOOM);
     expect(clampZoom(Number.NaN)).toBe(1);
+    expect(MIN_ZOOM).toBe(0.25);
+    expect(MAX_ZOOM).toBe(5);
+  });
+
+  it("computes smooth trackpad pinch / wheel zoom scales with clamping and symmetry", () => {
+    // Detects trackpad pinch (ctrlKey) and Cmd/Ctrl+wheel while ignoring normal two-finger scroll
+    expect(isPinchOrZoomWheelEvent({ ctrlKey: true, metaKey: false })).toBe(true);
+    expect(isPinchOrZoomWheelEvent({ ctrlKey: false, metaKey: true })).toBe(true);
+    expect(isPinchOrZoomWheelEvent({ ctrlKey: false, metaKey: false })).toBe(false);
+
+    // Normalizes pixel, line, and page delta modes
+    expect(normalizeWheelDeltaY(-10, 0)).toBe(-10);
+    expect(normalizeWheelDeltaY(-3, 1)).toBe(-48);
+    expect(normalizeWheelDeltaY(1, 2)).toBe(400);
+    expect(normalizeWheelDeltaY(Number.NaN, 0)).toBe(0);
+
+    // Negative deltaY zooms in; positive deltaY zooms out smoothly and reversibly
+    const zoomedIn = computeNextWheelZoom(1, -10);
+    expect(zoomedIn).toBeCloseTo(Math.exp(0.1), 6);
+    expect(computeNextWheelZoom(zoomedIn, 10)).toBeCloseTo(1, 6);
+
+    // Transitions cleanly from a rendered fit scale (e.g. 0.5) without jumping to 1.0
+    const fromFit = computeNextWheelZoom(0.5, -5);
+    expect(fromFit).toBeCloseTo(0.5 * Math.exp(0.05), 6);
+
+    // Clamps cleanly to [0.25, 5.0] even for extreme wheel deltas
+    expect(computeNextWheelZoom(4.5, -100)).toBe(MAX_ZOOM);
+    expect(computeNextWheelZoom(1, -100_000)).toBe(MAX_ZOOM);
+    expect(computeNextWheelZoom(0.3, 100)).toBe(MIN_ZOOM);
+    expect(computeNextWheelZoom(1, 100_000)).toBe(MIN_ZOOM);
+    expect(computeNextWheelZoom(1.5, 0)).toBe(1.5);
+    expect(computeNextWheelZoom(Number.NaN, -10)).toBe(1);
+
+    // Computes fit scale without upscaling small images past 100%
+    expect(computeFitScale(1000, 800, 468, 368)).toBeCloseTo(0.46, 6);
+    expect(computeFitScale(200, 100, 500, 400)).toBe(1);
+    expect(computeFitScale(0, 100, 500, 400)).toBe(1);
+  });
+
+  it("computes cursor-anchored scroll offsets across fit-to-custom and zoomed transitions", () => {
+    // 1. Center-anchored zoom from fit (0.46) to 2x fit (0.92) centers the scrollbars exactly
+    const centered = computeCursorAnchoredScroll({
+      prevScale: 0.46,
+      nextScale: 0.92,
+      naturalWidth: 1000,
+      naturalHeight: 800,
+      viewportWidth: 500,
+      viewportHeight: 400,
+      scrollLeft: 0,
+      scrollTop: 0,
+      cursorX: 250,
+      cursorY: 200,
+      padding: IMAGE_VIEWPORT_PADDING_PX,
+    });
+    // Content size becomes (920 + 32) x (736 + 32) => maxScroll = 452 x 368 => half = 226 x 184
+    expect(centered.scrollLeft).toBeCloseTo(226, 4);
+    expect(centered.scrollTop).toBeCloseTo(184, 4);
+
+    // 2. Arbitrary cursor point stays fixed on the exact same relative image coordinate
+    const prevScale = 1.0;
+    const nextScale = 1.5;
+    const cursorX = 300;
+    const cursorY = 220;
+    const scrollLeft = 150;
+    const scrollTop = 100;
+    const anchored = computeCursorAnchoredScroll({
+      prevScale,
+      nextScale,
+      naturalWidth: 1000,
+      naturalHeight: 800,
+      viewportWidth: 500,
+      viewportHeight: 400,
+      scrollLeft,
+      scrollTop,
+      cursorX,
+      cursorY,
+      padding: IMAGE_VIEWPORT_PADDING_PX,
+    });
+    expect(anchored.scrollLeft).toBeCloseTo(367, 4);
+    expect(anchored.scrollTop).toBeCloseTo(252, 4);
+
+    // Verify image fraction under cursor before and after zoom is identical
+    const prevFracX = (scrollLeft + cursorX - IMAGE_VIEWPORT_PADDING_PX) / (1000 * prevScale);
+    const nextFracX = (anchored.scrollLeft + cursorX - IMAGE_VIEWPORT_PADDING_PX) / (1000 * nextScale);
+    const prevFracY = (scrollTop + cursorY - IMAGE_VIEWPORT_PADDING_PX) / (800 * prevScale);
+    const nextFracY = (anchored.scrollTop + cursorY - IMAGE_VIEWPORT_PADDING_PX) / (800 * nextScale);
+    expect(nextFracX).toBeCloseTo(prevFracX, 6);
+    expect(nextFracY).toBeCloseTo(prevFracY, 6);
+
+    // 3. Top-left cursor clamps at 0; bottom-right cursor clamps at maxScroll
+    const topLeft = computeCursorAnchoredScroll({
+      prevScale: 0.46,
+      nextScale: 0.92,
+      naturalWidth: 1000,
+      naturalHeight: 800,
+      viewportWidth: 500,
+      viewportHeight: 400,
+      scrollLeft: 0,
+      scrollTop: 0,
+      cursorX: 20,
+      cursorY: 16,
+      padding: IMAGE_VIEWPORT_PADDING_PX,
+    });
+    expect(topLeft).toEqual({ scrollLeft: 0, scrollTop: 0 });
+
+    const bottomRight = computeCursorAnchoredScroll({
+      prevScale: 0.46,
+      nextScale: 0.92,
+      naturalWidth: 1000,
+      naturalHeight: 800,
+      viewportWidth: 500,
+      viewportHeight: 400,
+      scrollLeft: 0,
+      scrollTop: 0,
+      cursorX: 480,
+      cursorY: 384,
+      padding: IMAGE_VIEWPORT_PADDING_PX,
+    });
+    expect(bottomRight.scrollLeft).toBeCloseTo(452, 4);
+    expect(bottomRight.scrollTop).toBeCloseTo(368, 4);
+
+    // 4. When scaled image still fits inside viewport, scroll remains (0, 0)
+    const fitsViewport = computeCursorAnchoredScroll({
+      prevScale: 0.25,
+      nextScale: 0.4,
+      naturalWidth: 500,
+      naturalHeight: 400,
+      viewportWidth: 600,
+      viewportHeight: 500,
+      scrollLeft: 0,
+      scrollTop: 0,
+      cursorX: 300,
+      cursorY: 250,
+      padding: IMAGE_VIEWPORT_PADDING_PX,
+    });
+    expect(fitsViewport).toEqual({ scrollLeft: 0, scrollTop: 0 });
   });
 });
