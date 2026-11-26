@@ -2,7 +2,84 @@ import type { AgentProvider } from "./types.js";
 
 export type UsageSource = "chat" | "worker";
 
-export type UsagePeriod = "today" | "month" | "all";
+export type UsagePeriod = "today" | "week" | "month" | "all";
+
+export type UsageBudgetUnit = "usd" | "tokens";
+
+export interface UsageBudgetLimit {
+  unit: UsageBudgetUnit;
+  /** Positive numeric limit: USD amount when unit === "usd", token count when unit === "tokens". */
+  limit: number;
+}
+
+export interface UsageBudgetSettings {
+  weekly: UsageBudgetLimit;
+  monthly: UsageBudgetLimit;
+}
+
+export type UsageQuotaSeverity = "ok" | "warning" | "exceeded";
+
+export interface UsageBudgetStatus {
+  unit: UsageBudgetUnit;
+  used: number;
+  limit: number;
+  remaining: number;
+  overage: number;
+  /** Exact consumption percentage (can exceed 100, e.g. 124.5). */
+  percent: number;
+  /** Clamped 0..100 value for rendering progress bar fill width. */
+  barPercent: number;
+  severity: UsageQuotaSeverity;
+}
+
+export interface ProviderQuotaWindow {
+  /** Window identifier (e.g. "primary", "secondary", "five_hour", "seven_day"). */
+  id: string;
+  /** Window duration in minutes when known (e.g. 300 = 5h, 10080 = 7d). */
+  windowDurationMins: number | null;
+  /** Percentage of quota consumed (0..100+). */
+  usedPercent: number;
+  /** Remaining percentage (0..100). */
+  remainingPercent: number;
+  /** ISO-8601 reset timestamp when known. */
+  resetsAt: string | null;
+}
+
+export interface ProviderQuotaCredits {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+}
+
+export interface ProviderQuotaSnapshot {
+  provider: AgentProvider;
+  status: "live" | "unavailable";
+  planType?: string | null;
+  limitName?: string | null;
+  credits?: ProviderQuotaCredits | null;
+  windows: ProviderQuotaWindow[];
+  updatedAt: string;
+  note?: string | null;
+}
+
+export type ProviderQuotasMap = Partial<Record<AgentProvider, ProviderQuotaSnapshot>>;
+
+export type UsageTrendGranularity = "daily" | "weekly";
+
+export interface UsageTrendBucket {
+  /** Local YYYY-MM-DD key (for daily) or Monday YYYY-MM-DD key (for weekly). */
+  key: string;
+  /** Short human label for chart axis (e.g. "11/26"). */
+  label: string;
+  startDateKey: string;
+  endDateKey: string;
+  turnCount: number;
+  totalTokens: number;
+  costUsd: number;
+  byProviderCostUsd: Record<AgentProvider, number>;
+  byProviderTokens: Record<AgentProvider, number>;
+  isCurrent: boolean;
+}
 
 export interface TokenUsage {
   /** Non-cached (fresh) input tokens. */
@@ -87,6 +164,24 @@ export const MAX_USAGE_RECORDS = 2000;
 export const COMPACT_RECENT_WINDOW = 1500;
 export const GENERAL_CHAT_PROJECT_KEY = "__chat__";
 export const GENERAL_CHAT_PROJECT_LABEL = "一般チャット";
+
+export const DEFAULT_USAGE_BUDGETS: UsageBudgetSettings = {
+  weekly: { unit: "usd", limit: 25 },
+  monthly: { unit: "usd", limit: 100 },
+};
+
+export const DEFAULT_TOKEN_BUDGET_LIMITS: Record<"weekly" | "monthly", number> = {
+  weekly: 5_000_000,
+  monthly: 20_000_000,
+};
+
+export const DEFAULT_USD_BUDGET_LIMITS: Record<"weekly" | "monthly", number> = {
+  weekly: 25,
+  monthly: 100,
+};
+
+export const USAGE_WARNING_THRESHOLD_PERCENT = 80;
+export const USAGE_EXCEEDED_THRESHOLD_PERCENT = 100;
 
 export const PROVIDER_LABELS: Record<AgentProvider, string> = {
   codex: "Codex",
@@ -669,12 +764,46 @@ export function appendUsageRecord(
   return compactUsageRecords([...records, record], maxRecords);
 }
 
+export function getLocalWeekRange(now: Date = new Date()): { start: Date; end: Date } {
+  const dayOfWeek = now.getDay(); // 0 = Sun, 1 = Mon, ...
+  const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const start = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() - diffToMonday,
+    0,
+    0,
+    0,
+    0,
+  );
+  const end = new Date(
+    start.getFullYear(),
+    start.getMonth(),
+    start.getDate() + 7,
+    0,
+    0,
+    0,
+    0,
+  );
+  return { start, end };
+}
+
 export function filterUsageRecordsByPeriod(
   records: readonly UsageRecord[],
   period: UsagePeriod,
   now: Date = new Date(),
 ): UsageRecord[] {
   if (period === "all") return [...records];
+
+  if (period === "week") {
+    const { start, end } = getLocalWeekRange(now);
+    const startMs = start.getTime();
+    const endMs = end.getTime();
+    return records.filter((rec) => {
+      const ms = Date.parse(rec.timestamp);
+      return !Number.isNaN(ms) && ms >= startMs && ms < endMs;
+    });
+  }
 
   const targetYear = now.getFullYear();
   const targetMonth = now.getMonth();
@@ -832,9 +961,267 @@ export function summarizeAllUsagePeriods(
 ): Record<UsagePeriod, UsageSummary> {
   return {
     today: summarizeUsage(records, "today", now),
+    week: summarizeUsage(records, "week", now),
     month: summarizeUsage(records, "month", now),
     all: summarizeUsage(records, "all", now),
   };
+}
+
+export function normalizeUsageBudgetLimit(
+  raw: unknown,
+  fallback: UsageBudgetLimit,
+): UsageBudgetLimit {
+  const rec = asRecord(raw);
+  if (!rec) return { ...fallback };
+  const unit: UsageBudgetUnit =
+    rec.unit === "usd" || rec.unit === "tokens" ? rec.unit : fallback.unit;
+  const rawLimit = typeof rec.limit === "number" ? rec.limit : Number(rec.limit);
+  if (!Number.isFinite(rawLimit) || rawLimit <= 0) {
+    return { unit, limit: fallback.limit };
+  }
+  const normalizedLimit =
+    unit === "tokens"
+      ? Math.max(1, Math.round(rawLimit))
+      : Math.max(0.01, Math.round(rawLimit * 100) / 100);
+  return { unit, limit: normalizedLimit };
+}
+
+export function normalizeUsageBudgetSettings(raw: unknown): UsageBudgetSettings {
+  const rec = asRecord(raw);
+  if (!rec) {
+    return {
+      weekly: { ...DEFAULT_USAGE_BUDGETS.weekly },
+      monthly: { ...DEFAULT_USAGE_BUDGETS.monthly },
+    };
+  }
+  return {
+    weekly: normalizeUsageBudgetLimit(rec.weekly, DEFAULT_USAGE_BUDGETS.weekly),
+    monthly: normalizeUsageBudgetLimit(rec.monthly, DEFAULT_USAGE_BUDGETS.monthly),
+  };
+}
+
+export function classifyQuotaSeverity(percent: number): UsageQuotaSeverity {
+  if (!Number.isFinite(percent) || percent < USAGE_WARNING_THRESHOLD_PERCENT) {
+    return "ok";
+  }
+  if (percent >= USAGE_EXCEEDED_THRESHOLD_PERCENT) {
+    return "exceeded";
+  }
+  return "warning";
+}
+
+export function evaluateUsageBudget(
+  usedUsd: number,
+  usedTokens: number,
+  budget: UsageBudgetLimit,
+): UsageBudgetStatus {
+  const safeLimit =
+    Number.isFinite(budget.limit) && budget.limit > 0
+      ? budget.limit
+      : budget.unit === "tokens"
+        ? DEFAULT_TOKEN_BUDGET_LIMITS.weekly
+        : DEFAULT_USD_BUDGET_LIMITS.weekly;
+  const rawUsed = budget.unit === "tokens" ? usedTokens : usedUsd;
+  const used = Math.max(0, Number.isFinite(rawUsed) ? rawUsed : 0);
+  const percent = (used / safeLimit) * 100;
+  const barPercent = Math.min(100, Math.max(0, percent));
+  const remaining = Math.max(0, safeLimit - used);
+  const overage = Math.max(0, used - safeLimit);
+
+  return {
+    unit: budget.unit,
+    used,
+    limit: safeLimit,
+    remaining,
+    overage,
+    percent,
+    barPercent,
+    severity: classifyQuotaSeverity(percent),
+  };
+}
+
+export function mergeProviderQuotaSnapshot(
+  prev: ProviderQuotaSnapshot | undefined,
+  next: ProviderQuotaSnapshot,
+): ProviderQuotaSnapshot {
+  if (!prev || prev.provider !== next.provider) {
+    return next;
+  }
+
+  // Merge windows by id while preserving order from next (or prev for untouched windows)
+  const mergedWindowsMap = new Map<string, ProviderQuotaWindow>();
+  for (const w of prev.windows) {
+    mergedWindowsMap.set(w.id, w);
+  }
+  for (const w of next.windows) {
+    const existing = mergedWindowsMap.get(w.id);
+    mergedWindowsMap.set(w.id, {
+      id: w.id,
+      windowDurationMins: w.windowDurationMins ?? existing?.windowDurationMins ?? null,
+      usedPercent: w.usedPercent,
+      remainingPercent: w.remainingPercent,
+      resetsAt: w.resetsAt ?? existing?.resetsAt ?? null,
+    });
+  }
+
+  return {
+    provider: next.provider,
+    status: next.status === "live" || prev.status === "live" ? "live" : next.status,
+    planType: next.planType ?? prev.planType ?? null,
+    limitName: next.limitName ?? prev.limitName ?? null,
+    credits: next.credits ?? prev.credits ?? null,
+    windows: next.windows.length > 0 ? [...mergedWindowsMap.values()] : prev.windows,
+    updatedAt: next.updatedAt,
+    note: next.note ?? prev.note ?? null,
+  };
+}
+
+function emptyProviderNumbers(): Record<AgentProvider, number> {
+  return { codex: 0, agy: 0, claude: 0 };
+}
+
+function formatMonthDayLabel(date: Date): string {
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+export function buildDailyUsageTrend(
+  records: readonly UsageRecord[],
+  days = 14,
+  now: Date = new Date(),
+): UsageTrendBucket[] {
+  const count = Math.max(1, Math.min(60, Math.round(days)));
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const buckets: UsageTrendBucket[] = [];
+  const byKey = new Map<string, UsageTrendBucket>();
+
+  for (let offset = count - 1; offset >= 0; offset -= 1) {
+    const d = new Date(
+      todayStart.getFullYear(),
+      todayStart.getMonth(),
+      todayStart.getDate() - offset,
+      0,
+      0,
+      0,
+      0,
+    );
+    const key = localDateKey(d);
+    const bucket: UsageTrendBucket = {
+      key,
+      label: formatMonthDayLabel(d),
+      startDateKey: key,
+      endDateKey: key,
+      turnCount: 0,
+      totalTokens: 0,
+      costUsd: 0,
+      byProviderCostUsd: emptyProviderNumbers(),
+      byProviderTokens: emptyProviderNumbers(),
+      isCurrent: offset === 0,
+    };
+    buckets.push(bucket);
+    byKey.set(key, bucket);
+  }
+
+  for (const rec of records) {
+    const dt = new Date(rec.timestamp);
+    if (Number.isNaN(dt.getTime())) continue;
+    const key = localDateKey(dt);
+    const bucket = byKey.get(key);
+    if (!bucket) continue;
+    const tokens = getUsageTotalTokens(rec);
+    const turns = Math.max(1, rec.turnCount ?? 1);
+    bucket.turnCount += turns;
+    bucket.totalTokens += tokens;
+    bucket.costUsd += rec.costUsd;
+    bucket.byProviderCostUsd[rec.provider] += rec.costUsd;
+    bucket.byProviderTokens[rec.provider] += tokens;
+  }
+
+  return buckets;
+}
+
+export function buildWeeklyUsageTrend(
+  records: readonly UsageRecord[],
+  weeks = 8,
+  now: Date = new Date(),
+): UsageTrendBucket[] {
+  const count = Math.max(1, Math.min(26, Math.round(weeks)));
+  const { start: currentWeekStart } = getLocalWeekRange(now);
+  const buckets: UsageTrendBucket[] = [];
+  const byKey = new Map<string, UsageTrendBucket>();
+
+  for (let offset = count - 1; offset >= 0; offset -= 1) {
+    const weekStart = new Date(
+      currentWeekStart.getFullYear(),
+      currentWeekStart.getMonth(),
+      currentWeekStart.getDate() - offset * 7,
+      0,
+      0,
+      0,
+      0,
+    );
+    const weekEnd = new Date(
+      weekStart.getFullYear(),
+      weekStart.getMonth(),
+      weekStart.getDate() + 6,
+      0,
+      0,
+      0,
+      0,
+    );
+    const startKey = localDateKey(weekStart);
+    const endKey = localDateKey(weekEnd);
+    const bucket: UsageTrendBucket = {
+      key: startKey,
+      label: formatMonthDayLabel(weekStart),
+      startDateKey: startKey,
+      endDateKey: endKey,
+      turnCount: 0,
+      totalTokens: 0,
+      costUsd: 0,
+      byProviderCostUsd: emptyProviderNumbers(),
+      byProviderTokens: emptyProviderNumbers(),
+      isCurrent: offset === 0,
+    };
+    buckets.push(bucket);
+    byKey.set(startKey, bucket);
+  }
+
+  for (const rec of records) {
+    const dt = new Date(rec.timestamp);
+    if (Number.isNaN(dt.getTime())) continue;
+    const { start: recWeekStart } = getLocalWeekRange(dt);
+    const key = localDateKey(recWeekStart);
+    const bucket = byKey.get(key);
+    if (!bucket) continue;
+    const tokens = getUsageTotalTokens(rec);
+    const turns = Math.max(1, rec.turnCount ?? 1);
+    bucket.turnCount += turns;
+    bucket.totalTokens += tokens;
+    bucket.costUsd += rec.costUsd;
+    bucket.byProviderCostUsd[rec.provider] += rec.costUsd;
+    bucket.byProviderTokens[rec.provider] += tokens;
+  }
+
+  return buckets;
+}
+
+export function formatUsagePercent(percent: number): string {
+  const safe = Math.max(0, Number.isFinite(percent) ? percent : 0);
+  if (safe === 0) return "0%";
+  if (safe < 1) return `${safe.toFixed(1)}%`;
+  if (safe >= 100) return `${Math.round(safe)}%`;
+  return Number.isInteger(safe) ? `${safe}%` : `${safe.toFixed(1)}%`;
+}
+
+export function formatBudgetValue(
+  value: number,
+  unit: UsageBudgetUnit,
+  options?: { estimated?: boolean; compact?: boolean },
+): string {
+  if (unit === "tokens") {
+    return `${formatTokenCount(value)} tokens`;
+  }
+  return formatUsdCost(value, options);
 }
 
 export function formatTokenCount(tokens: number): string {

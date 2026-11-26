@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { ModelOption } from "../shared/types.js";
+import type { ModelOption, ProviderQuotaWindow } from "../shared/types.js";
 import { normalizeRawTokenUsage, type NormalizedRawUsage } from "../shared/usage.js";
 import {
   enrichedEnvironment,
@@ -15,6 +15,7 @@ export interface CliTurnCallbacks {
   onSessionId?: (sessionId: string) => void;
   onTextDelta?: (delta: string) => void;
   onReasoningDelta?: (delta: string) => void;
+  onRateLimit?: (window: ProviderQuotaWindow) => void;
   onToolEvent?: (event: {
     id: string;
     name: string;
@@ -183,6 +184,56 @@ export function extractClaudeStreamJsonUsage(
     reasoningTokens: 0,
     ...(costUsd !== undefined ? { costUsd } : {}),
     ...(effectiveModel ? { model: effectiveModel } : {}),
+  };
+}
+
+/**
+ * Extracts a normalized quota window from a Claude Code `stream-json` `rate_limit_event` payload.
+ */
+export function extractClaudeRateLimitEvent(
+  parsed: Record<string, unknown>,
+): ProviderQuotaWindow | null {
+  if (asString(parsed.type) !== "rate_limit_event") return null;
+  const info = asRecord(parsed.rate_limit_info ?? parsed.rateLimitInfo);
+  if (!info) return null;
+
+  const rawUtil = asNonNegNumber(info.utilization ?? info.used_percent ?? info.usedPercent);
+  const status = (asString(info.status) ?? "").toLowerCase();
+  let usedPercent: number | null = null;
+  if (rawUtil !== null) {
+    // Claude stream-json utilization is typically 0..1 (e.g. 0.42), though some variants may send 0..100
+    const scaled = rawUtil <= 1 && info.utilization !== undefined ? rawUtil * 100 : rawUtil;
+    usedPercent = Math.max(0, Math.round(scaled * 10) / 10);
+  } else if (status === "rejected" || status === "rate_limited") {
+    usedPercent = 100;
+  }
+  if (usedPercent === null) return null;
+
+  const rateLimitType =
+    asString(info.rateLimitType ?? info.rate_limit_type) ?? "primary";
+  let windowDurationMins: number | null = null;
+  if (rateLimitType === "five_hour") windowDurationMins = 300;
+  else if (rateLimitType === "seven_day" || rateLimitType === "seven_day_opus" || rateLimitType === "seven_day_sonnet") {
+    windowDurationMins = 10_080;
+  } else if (rateLimitType === "monthly" || rateLimitType === "thirty_day") {
+    windowDurationMins = 43_200;
+  }
+
+  const rawResets = info.resetsAt ?? info.resets_at;
+  let resetsAt: string | null = null;
+  if (typeof rawResets === "number" && Number.isFinite(rawResets) && rawResets > 0) {
+    const ms = rawResets > 1_000_000_000_000 ? rawResets : rawResets * 1000;
+    resetsAt = new Date(ms).toISOString();
+  } else if (typeof rawResets === "string" && !Number.isNaN(Date.parse(rawResets))) {
+    resetsAt = new Date(Date.parse(rawResets)).toISOString();
+  }
+
+  return {
+    id: rateLimitType,
+    windowDurationMins,
+    usedPercent,
+    remainingPercent: Math.max(0, Math.round((100 - usedPercent) * 10) / 10),
+    resetsAt,
   };
 }
 
@@ -832,6 +883,14 @@ export function runClaudeTurn(
             });
           }
         }
+      }
+      return;
+    }
+
+    if (type === "rate_limit_event") {
+      const rateLimitWindow = extractClaudeRateLimitEvent(parsed);
+      if (rateLimitWindow) {
+        callbacks.onRateLimit?.(rateLimitWindow);
       }
       return;
     }

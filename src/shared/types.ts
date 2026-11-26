@@ -17,7 +17,24 @@ import type {
   TerminalSessionInfo,
   TerminalWriteResult,
 } from "./terminal.js";
-import type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
+import type {
+  ProviderQuotaCredits,
+  ProviderQuotaSnapshot,
+  ProviderQuotasMap,
+  ProviderQuotaWindow,
+  TokenUsage,
+  UsageBudgetLimit,
+  UsageBudgetSettings,
+  UsageBudgetStatus,
+  UsageBudgetUnit,
+  UsagePeriod,
+  UsageQuotaSeverity,
+  UsageRecord,
+  UsageSource,
+  UsageSummary,
+  UsageTrendBucket,
+  UsageTrendGranularity,
+} from "./usage.js";
 import type {
   VoiceMicPermissionResult,
   VoiceSpeakRequest,
@@ -43,7 +60,24 @@ export type {
   TerminalSessionInfo,
   TerminalWriteResult,
 } from "./terminal.js";
-export type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
+export type {
+  ProviderQuotaCredits,
+  ProviderQuotaSnapshot,
+  ProviderQuotasMap,
+  ProviderQuotaWindow,
+  TokenUsage,
+  UsageBudgetLimit,
+  UsageBudgetSettings,
+  UsageBudgetStatus,
+  UsageBudgetUnit,
+  UsagePeriod,
+  UsageQuotaSeverity,
+  UsageRecord,
+  UsageSource,
+  UsageSummary,
+  UsageTrendBucket,
+  UsageTrendGranularity,
+} from "./usage.js";
 export type {
   VoiceMicPermissionResult,
   VoiceSpeakRequest,
@@ -398,6 +432,8 @@ export interface AppSnapshot {
   remoteAccessToken?: string;
   remoteAccess?: RemoteAccessStatus;
   usageRecords?: UsageRecord[];
+  usageBudgets?: UsageBudgetSettings;
+  providerQuotas?: ProviderQuotasMap;
   lastErrorBanner: string | null;
 }
 
@@ -427,6 +463,7 @@ export interface PersistedState {
   remoteAccessPort?: number;
   remoteAccessToken?: string;
   usageRecords?: UsageRecord[];
+  usageBudgets?: UsageBudgetSettings;
 }
 
 export interface TaskStatusUpdateResult {
@@ -505,6 +542,8 @@ export interface ConductorAPI {
   regenerateRemoteAccessToken(): Promise<RemoteAccessStatus>;
   refreshRemoteAccessStatus(): Promise<RemoteAccessStatus>;
   clearUsageRecords(): Promise<void>;
+  setUsageBudgets(budgets: UsageBudgetSettings): Promise<void>;
+  refreshProviderQuotas(): Promise<ProviderQuotasMap>;
 
   // Voice (TTS & macOS Microphone Permission)
   voiceSpeak(request: VoiceSpeakRequest): Promise<VoiceSpeakResult>;

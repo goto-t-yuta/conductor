@@ -2054,6 +2054,7 @@ export const App: React.FC = () => {
 
   const handleOpenUsage = useCallback(() => {
     setSettingsModalTab("usage");
+    void window.conductor.refreshProviderQuotas();
   }, []);
 
   const handleOpenSettings = useCallback(() => {
@@ -2406,7 +2407,11 @@ export const App: React.FC = () => {
           projects={snapshot.projects}
           initialTab={settingsModalTab}
           usageRecords={snapshot.usageRecords ?? []}
+          usageBudgets={snapshot.usageBudgets}
+          providerQuotas={snapshot.providerQuotas}
           onClearUsage={() => void window.conductor.clearUsageRecords()}
+          onUpdateUsageBudgets={(budgets) => void window.conductor.setUsageBudgets(budgets)}
+          onRefreshProviderQuotas={() => window.conductor.refreshProviderQuotas()}
           onClose={() => setSettingsModalTab(null)}
           onSetDefaultIntegrationMode={(mode) =>
             void window.conductor.setDefaultIntegrationMode(mode)

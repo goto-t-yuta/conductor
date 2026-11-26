@@ -10,6 +10,7 @@ import type {
   PreferredLanguage,
   SendMessagePayload,
   TerminalCreateOptions,
+  UsageBudgetSettings,
   VoiceMicPermissionResult,
   VoiceSpeakRequest,
 } from "../shared/types.js";
@@ -315,6 +316,13 @@ function registerIpcHandlers(): void {
     controller?.refreshRemoteAccessStatus(),
   );
   ipcMain.handle("conductor:clearUsageRecords", () => controller?.clearUsageRecords());
+  ipcMain.handle("conductor:setUsageBudgets", (_e, budgets: UsageBudgetSettings) =>
+    controller?.setUsageBudgets(budgets),
+  );
+  ipcMain.handle(
+    "conductor:refreshProviderQuotas",
+    () => controller?.refreshProviderQuotas() ?? {},
+  );
 
   // Voice IPC (OS-standard TTS & macOS Microphone permission)
   ipcMain.handle("voice:speak", (_e, request: VoiceSpeakRequest) =>

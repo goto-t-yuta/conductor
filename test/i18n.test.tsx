@@ -608,6 +608,41 @@ describe("English UI rendering has zero leaked Japanese strings across all major
     expect(settingsHtml).not.toContain("リモートアクセス");
     expect(settingsHtml).not.toContain("稼働中");
 
+    const usageSettingsHtml = renderToStaticMarkup(
+      <SettingsModal
+        defaultIntegrationMode="feature-branch"
+        preferredLanguage="en"
+        initialTab="usage"
+        projects={[SAMPLE_PROJECT]}
+        usageRecords={[
+          {
+            id: "u-en-1",
+            timestamp: "2026-11-26T02:00:00.000Z",
+            source: "chat",
+            provider: "codex",
+            model: "gpt-5.4",
+            projectName: null,
+            inputTokens: 2000,
+            cachedInputTokens: 1000,
+            outputTokens: 500,
+            costUsd: 0.0125,
+            isEstimated: true,
+            turnCount: 1,
+          },
+        ]}
+        onClearUsage={vi.fn()}
+        onUpdateUsageBudgets={vi.fn()}
+        onRefreshProviderQuotas={vi.fn()}
+        onClose={vi.fn()}
+        onSetDefaultIntegrationMode={vi.fn()}
+        onSetProjectIntegrationMode={vi.fn()}
+      />,
+    );
+    expect(usageSettingsHtml).toContain("Weekly &amp; Monthly Quota");
+    expect(usageSettingsHtml).toContain("General Chat");
+    expect(usageSettingsHtml).toContain("Reset History");
+    expect(usageSettingsHtml).not.toMatch(JAPANESE_CHAR_RE);
+
     const taskEventHtml = renderToStaticMarkup(
       <TaskEventCard
         message={taskEventMsg}

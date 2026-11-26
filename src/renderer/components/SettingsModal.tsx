@@ -32,7 +32,9 @@ import type {
   IntegrationMode,
   PreferredLanguage,
   Project,
+  ProviderQuotasMap,
   RemoteAccessStatus,
+  UsageBudgetSettings,
   UsageRecord,
 } from "../../shared/types.js";
 import {
@@ -59,7 +61,11 @@ export interface SettingsModalProps {
   projects: Project[];
   initialTab?: SettingsModalTab;
   usageRecords?: UsageRecord[];
+  usageBudgets?: UsageBudgetSettings;
+  providerQuotas?: ProviderQuotasMap;
   onClearUsage?: () => void;
+  onUpdateUsageBudgets?: (budgets: UsageBudgetSettings) => void;
+  onRefreshProviderQuotas?: () => void | Promise<unknown>;
   onClose: () => void;
   onSetDefaultIntegrationMode: (mode: IntegrationMode) => void;
   onSetAutoLandOnComplete?: (enabled: boolean) => void;
@@ -758,7 +764,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   projects,
   initialTab = "general",
   usageRecords = [],
+  usageBudgets,
+  providerQuotas,
   onClearUsage,
+  onUpdateUsageBudgets,
+  onRefreshProviderQuotas,
   onClose,
   onSetDefaultIntegrationMode,
   onSetAutoLandOnComplete,
@@ -783,6 +793,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     onRefreshRemoteAccessStatus?.();
   }, []);
 
+  useEffect(() => {
+    if (activeTab === "usage") {
+      void onRefreshProviderQuotas?.();
+    }
+  }, [activeTab]);
+
   const filteredProjects = useMemo(() => {
     const q = projectSearch.trim().toLowerCase();
     if (!q) return projects;
@@ -803,7 +819,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-2xl max-h-[82vh] flex flex-col rounded-2xl bg-white dark:bg-[#161a22] border border-zinc-200 dark:border-zinc-800 shadow-2xl overflow-hidden"
+        className={`w-full ${
+          activeTab === "usage" ? "max-w-3xl" : "max-w-2xl"
+        } max-h-[84vh] flex flex-col rounded-2xl bg-white dark:bg-[#161a22] border border-zinc-200 dark:border-zinc-800 shadow-2xl overflow-hidden`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -871,7 +889,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-6 select-text">
           {activeTab === "usage" ? (
-            <UsagePanel usageRecords={usageRecords} onClearUsage={onClearUsage} />
+            <UsagePanel
+              usageRecords={usageRecords}
+              usageBudgets={usageBudgets}
+              providerQuotas={providerQuotas}
+              locale={activeLocale}
+              onClearUsage={onClearUsage}
+              onUpdateBudgets={onUpdateUsageBudgets}
+              onRefreshProviderQuotas={onRefreshProviderQuotas}
+            />
           ) : (
             <>
               {/* Output Language Preference */}

@@ -13,6 +13,7 @@ import type {
   TerminalCreateOptions,
   TerminalDataEvent,
   TerminalExitEvent,
+  UsageBudgetSettings,
   VoiceSpeakRequest,
 } from "../shared/types.js";
 
@@ -79,6 +80,9 @@ const api: ConductorAPI = {
   refreshRemoteAccessStatus: () =>
     ipcRenderer.invoke("conductor:refreshRemoteAccessStatus"),
   clearUsageRecords: () => ipcRenderer.invoke("conductor:clearUsageRecords"),
+  setUsageBudgets: (budgets: UsageBudgetSettings) =>
+    ipcRenderer.invoke("conductor:setUsageBudgets", budgets),
+  refreshProviderQuotas: () => ipcRenderer.invoke("conductor:refreshProviderQuotas"),
 
   voiceSpeak: (request: VoiceSpeakRequest) => ipcRenderer.invoke("voice:speak", request),
   voiceStop: () => ipcRenderer.invoke("voice:stop"),

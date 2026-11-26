@@ -66,7 +66,13 @@ import {
   requiresLandBeforeDone,
   validateManualTaskStatusTransition,
 } from "../../shared/task-status.js";
-import { formatTokenCount, formatUsdCost, summarizeUsage } from "../../shared/usage.js";
+import {
+  evaluateUsageBudget,
+  formatTokenCount,
+  formatUsdCost,
+  normalizeUsageBudgetSettings,
+  summarizeAllUsagePeriods,
+} from "../../shared/usage.js";
 import { resolveUiLocale, t, type UiLocale } from "../../shared/i18n.js";
 import {
   appendVoiceTranscript,
@@ -968,14 +974,28 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   const activeChatModel = chatProviderInfo?.models.find((m) => m.model === snapshot.chatModel);
   const activeWorkerModel = workerProviderInfo?.models.find((m) => m.model === snapshot.workerModel);
   const allProviders: AgentProvider[] = ["codex", "agy", "claude"];
-  const todayUsage = useMemo(
-    () => summarizeUsage(snapshot.usageRecords ?? [], "today"),
+  const usageSummaries = useMemo(
+    () => summarizeAllUsagePeriods(snapshot.usageRecords ?? []),
     [snapshot.usageRecords],
   );
-  const allTimeUsage = useMemo(
-    () => summarizeUsage(snapshot.usageRecords ?? [], "all"),
-    [snapshot.usageRecords],
-  );
+  const todayUsage = usageSummaries.today;
+  const allTimeUsage = usageSummaries.all;
+  const usageAlertSeverity = useMemo(() => {
+    const budgets = normalizeUsageBudgetSettings(snapshot.usageBudgets);
+    const w = evaluateUsageBudget(
+      usageSummaries.week.costUsd,
+      usageSummaries.week.totalTokens,
+      budgets.weekly,
+    );
+    const m = evaluateUsageBudget(
+      usageSummaries.month.costUsd,
+      usageSummaries.month.totalTokens,
+      budgets.monthly,
+    );
+    if (w.severity === "exceeded" || m.severity === "exceeded") return "exceeded";
+    if (w.severity === "warning" || m.severity === "warning") return "warning";
+    return "ok";
+  }, [usageSummaries.week, usageSummaries.month, snapshot.usageBudgets]);
 
   return (
     <section className="flex flex-col h-full min-w-0 bg-white dark:bg-[#0f1115]">
@@ -1217,7 +1237,23 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               }
               className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100/80 dark:bg-zinc-800/70 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer tabular-nums"
             >
-              <BarChart3 className="w-3 h-3 text-indigo-500 shrink-0" />
+              <BarChart3
+                className={`w-3 h-3 shrink-0 ${
+                  usageAlertSeverity === "exceeded"
+                    ? "text-rose-500"
+                    : usageAlertSeverity === "warning"
+                      ? "text-amber-500"
+                      : "text-indigo-500"
+                }`}
+              />
+              {usageAlertSeverity !== "ok" && (
+                <span
+                  data-testid="usage-pill-alert-dot"
+                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    usageAlertSeverity === "exceeded" ? "bg-rose-500" : "bg-amber-500"
+                  }`}
+                />
+              )}
               {todayUsage.totalTokens > 0 ? (
                 <>
                   <span>{formatTokenCount(todayUsage.totalTokens)}</span>

@@ -17,12 +17,16 @@ import type {
   ModelOption,
   PreferredLanguage,
   Project,
+  ProviderQuotaSnapshot,
+  ProviderQuotasMap,
+  ProviderQuotaWindow,
   ProviderStatus,
   RemoteAccessStatus,
   SendMessagePayload,
   TaskStatusUpdateResult,
   TaskWorktreeStatus,
   TokenUsage,
+  UsageBudgetSettings,
   UsageRecord,
   UsageSource,
 } from "../shared/types.js";
@@ -30,7 +34,9 @@ import { PROJECT_PALETTE } from "../shared/types.js";
 import {
   appendUsageRecord,
   createUsageRecord,
+  mergeProviderQuotaSnapshot,
   normalizeRawTokenUsage,
+  normalizeUsageBudgetSettings,
   normalizeUsageRecords,
   type NormalizedRawUsage,
 } from "../shared/usage.js";
@@ -92,6 +98,7 @@ import {
 } from "./cli-agent-runner.js";
 import {
   CodexAppServerClient,
+  extractCodexRateLimitUpdate,
   extractCodexTokenUsage,
   type CodexExtractedTokenUsage,
   type CodexNotification,
@@ -380,6 +387,8 @@ export class ConductorController {
   private remoteAccessPort = DEFAULT_REMOTE_ACCESS_PORT;
   private remoteAccessToken = generateRemoteAccessToken();
   private usageRecords: UsageRecord[] = [];
+  private usageBudgets: UsageBudgetSettings = normalizeUsageBudgetSettings(undefined);
+  private providerQuotas: ProviderQuotasMap = {};
   private readonly codexThreadLastTotalUsage = new Map<string, NormalizedRawUsage>();
   private readonly codexWorkerPendingUsage = new Map<string, TokenUsage>();
   private lastErrorBanner: string | null = null;
@@ -507,6 +516,8 @@ export class ConductorController {
       remoteAccessToken: this.remoteAccessToken,
       remoteAccess: this.getRemoteAccessStatus(),
       usageRecords: this.usageRecords,
+      usageBudgets: this.usageBudgets,
+      providerQuotas: this.providerQuotas,
       lastErrorBanner: this.lastErrorBanner,
     };
   }
@@ -663,6 +674,7 @@ export class ConductorController {
           models,
         },
       };
+      void this.refreshProviderQuotas();
     } catch (err) {
       this.providers = {
         ...this.providers,
@@ -1027,6 +1039,56 @@ export class ConductorController {
     this.usageRecords = [];
     this.persist();
     this.broadcastSnapshot();
+  }
+
+  public setUsageBudgets(budgets: UsageBudgetSettings): void {
+    this.usageBudgets = normalizeUsageBudgetSettings(budgets);
+    this.persist();
+    this.broadcastSnapshot();
+  }
+
+  private updateProviderQuota(snapshot: ProviderQuotaSnapshot): void {
+    const prev = this.providerQuotas[snapshot.provider];
+    const merged = mergeProviderQuotaSnapshot(prev, snapshot);
+    this.providerQuotas = {
+      ...this.providerQuotas,
+      [snapshot.provider]: merged,
+    };
+    this.scheduleBroadcast();
+  }
+
+  private recordClaudeRateLimitWindow(window: ProviderQuotaWindow): void {
+    this.updateProviderQuota({
+      provider: "claude",
+      status: "live",
+      windows: [window],
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  public async refreshProviderQuotas(): Promise<ProviderQuotasMap> {
+    const codexClient = this.orchestratorClient.isConnected()
+      ? this.orchestratorClient
+      : this.workerClient.isConnected()
+        ? this.workerClient
+        : null;
+
+    if (codexClient && typeof codexClient.readAccountRateLimits === "function") {
+      try {
+        const snapshot = await codexClient.readAccountRateLimits();
+        if (snapshot) {
+          this.providerQuotas = {
+            ...this.providerQuotas,
+            codex: mergeProviderQuotaSnapshot(this.providerQuotas.codex, snapshot),
+          };
+          this.broadcastSnapshot();
+        }
+      } catch {
+        // Non-fatal: Codex quota endpoint may be unavailable for API-key or offline sessions
+      }
+    }
+
+    return this.providerQuotas;
   }
 
   public getRemoteAccessStatus(): RemoteAccessStatus {
@@ -1844,6 +1906,9 @@ export class ConductorController {
         );
         this.broadcastSnapshot();
       },
+      onRateLimit: (window: ProviderQuotaWindow) => {
+        this.recordClaudeRateLimitWindow(window);
+      },
       onComplete: (outcome: {
         ok: boolean;
         finalText: string;
@@ -2643,6 +2708,10 @@ export class ConductorController {
   // MARK: - Orchestrator Notifications
 
   private handleOrchestratorNotification(notification: CodexNotification): void {
+    const quotaUpdate = extractCodexRateLimitUpdate(notification);
+    if (quotaUpdate) {
+      this.updateProviderQuota(quotaUpdate);
+    }
     if (!notification.threadId) return;
     const laneIdx = this.responderLanes.findIndex((l) => l.threadId === notification.threadId);
     if (laneIdx === -1) return;
@@ -3879,6 +3948,10 @@ export class ConductorController {
 
   private handleWorkerNotification(notification: CodexNotification): void {
     if (this.isShuttingDown) return;
+    const quotaUpdate = extractCodexRateLimitUpdate(notification);
+    if (quotaUpdate) {
+      this.updateProviderQuota(quotaUpdate);
+    }
     if (!notification.threadId) return;
     const task = this.tasks.find((t) => t.workerThreadId === notification.threadId);
     if (!task) return;
@@ -5529,6 +5602,11 @@ export class ConductorController {
         });
         this.broadcastSnapshot();
       },
+      onRateLimit: (window: ProviderQuotaWindow) => {
+        if (args.provider === "claude") {
+          this.recordClaudeRateLimitWindow(window);
+        }
+      },
       onComplete: (outcome: {
         ok: boolean;
         finalText: string;
@@ -5786,6 +5864,7 @@ export class ConductorController {
         ? saved.remoteAccessToken.trim()
         : generateRemoteAccessToken();
     this.usageRecords = normalizeUsageRecords(saved.usageRecords);
+    this.usageBudgets = normalizeUsageBudgetSettings(saved.usageBudgets);
     this.browser.restore(saved.browserTabs, saved.activeBrowserTabId);
     if (normalized.changed || normalizedChats.changed || resumePrep.changed) {
       this.persist();
@@ -5826,6 +5905,7 @@ export class ConductorController {
       remoteAccessPort: this.remoteAccessPort,
       remoteAccessToken: this.remoteAccessToken,
       usageRecords: this.usageRecords,
+      usageBudgets: this.usageBudgets,
     });
   }
 
