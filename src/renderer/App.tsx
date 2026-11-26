@@ -18,6 +18,12 @@ import {
   removeExplicitMentionTarget,
   type MentionChipRemovalTarget,
 } from "../shared/mentions.js";
+import {
+  DEFAULT_VOICE_AUTO_SEND,
+  collectVoiceReadbackUtterances,
+  createInitialVoiceReadbackTracker,
+} from "../shared/voice.js";
+import { speakTextWithFallback, stopAllVoicePlayback } from "./lib/voice-client.js";
 import type { MarkdownOpenedImage } from "./components/MarkdownView.js";
 import type { MarkdownViewerTab } from "./components/MarkdownViewerPane.js";
 import { SettingsModal, type SettingsModalTab } from "./components/SettingsModal.js";
@@ -81,6 +87,23 @@ import {
 } from "./lib/right-pane-tabs.js";
 
 const RECENT_MD_STORAGE_KEY = "conductor:recentMarkdownFiles";
+const VOICE_AUTO_SEND_STORAGE_KEY = "conductor:voiceAutoSend";
+
+function loadVoiceAutoSend(): boolean {
+  try {
+    return window.localStorage.getItem(VOICE_AUTO_SEND_STORAGE_KEY) === "true";
+  } catch {
+    return DEFAULT_VOICE_AUTO_SEND;
+  }
+}
+
+function saveVoiceAutoSend(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(VOICE_AUTO_SEND_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // ignore storage errors
+  }
+}
 
 function loadRecentMarkdownFiles(): string[] {
   try {
@@ -129,6 +152,53 @@ export const App: React.FC = () => {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [settingsModalTab, setSettingsModalTab] = useState<SettingsModalTab | null>(null);
+  const [voiceAutoSend, setVoiceAutoSend] = useState<boolean>(() => loadVoiceAutoSend());
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const voiceTrackerRef = useRef(createInitialVoiceReadbackTracker());
+  const voiceQueueRef = useRef<Array<{ text: string; language: "ja" | "en" }>>([]);
+  const voiceDrainingRef = useRef(false);
+  const voiceEpochRef = useRef(0);
+
+  const updateVoiceAutoSend = useCallback((enabled: boolean) => {
+    setVoiceAutoSend(enabled);
+    saveVoiceAutoSend(enabled);
+  }, []);
+
+  const handleStopSpeaking = useCallback(() => {
+    voiceEpochRef.current += 1;
+    voiceQueueRef.current = [];
+    voiceDrainingRef.current = false;
+    setIsSpeaking(false);
+    void stopAllVoicePlayback();
+  }, []);
+
+  const drainVoiceQueue = useCallback(async () => {
+    if (voiceDrainingRef.current) return;
+    voiceDrainingRef.current = true;
+    const epoch = voiceEpochRef.current;
+
+    try {
+      while (voiceQueueRef.current.length > 0 && voiceEpochRef.current === epoch) {
+        const next = voiceQueueRef.current.shift();
+        if (!next) break;
+        setIsSpeaking(true);
+        await speakTextWithFallback(next, () => voiceEpochRef.current !== epoch);
+      }
+    } finally {
+      if (voiceEpochRef.current === epoch) {
+        voiceDrainingRef.current = false;
+        setIsSpeaking(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      voiceEpochRef.current += 1;
+      voiceQueueRef.current = [];
+      void stopAllVoicePlayback();
+    };
+  }, []);
 
   const updateComposerText = useCallback((nextText: string) => {
     composerTextRef.current = nextText;
@@ -222,6 +292,43 @@ export const App: React.FC = () => {
     setUnreadReplyIds(new Set());
     setJumpRequest(null);
   }, [snapshot?.activeChatSessionId]);
+
+  // Automatic OS-standard TTS readback for completed replies and concise TaskEvent notices
+  useEffect(() => {
+    if (!snapshot) return;
+    const readbackEnabled = Boolean(snapshot.voiceReadbackEnabled);
+    const { nextState, utterances } = collectVoiceReadbackUtterances(voiceTrackerRef.current, {
+      sessionId: snapshot.activeChatSessionId,
+      messages: snapshot.messages,
+      tasks: snapshot.tasks,
+      preferredLanguage: snapshot.preferredLanguage,
+      readbackEnabled,
+    });
+    voiceTrackerRef.current = nextState;
+
+    if (!readbackEnabled) {
+      return;
+    }
+
+    if (utterances.length > 0) {
+      voiceQueueRef.current.push(...utterances);
+      void drainVoiceQueue();
+    }
+  }, [
+    snapshot?.activeChatSessionId,
+    snapshot?.messages,
+    snapshot?.tasks,
+    snapshot?.preferredLanguage,
+    snapshot?.voiceReadbackEnabled,
+    drainVoiceQueue,
+  ]);
+
+  // Immediately stop any active readback if user disables voiceReadbackEnabled
+  useEffect(() => {
+    if (snapshot && !snapshot.voiceReadbackEnabled && isSpeaking) {
+      handleStopSpeaking();
+    }
+  }, [snapshot?.voiceReadbackEnabled, isSpeaking, handleStopSpeaking]);
 
   useEffect(() => {
     const messages = snapshot?.messages ?? [];
@@ -1717,6 +1824,18 @@ export const App: React.FC = () => {
           onSetWorkerModel={(m, e) => void window.conductor.setWorkerModel(m, e)}
           onOpenUsage={() => setSettingsModalTab("usage")}
           onOpenSettings={() => setSettingsModalTab("general")}
+          voiceReadbackEnabled={Boolean(snapshot.voiceReadbackEnabled)}
+          isSpeaking={isSpeaking}
+          voiceAutoSend={voiceAutoSend}
+          onToggleVoiceReadback={() => {
+            const next = !snapshot.voiceReadbackEnabled;
+            if (!next) {
+              handleStopSpeaking();
+            }
+            void window.conductor.setVoiceReadbackEnabled(next);
+          }}
+          onStopSpeaking={handleStopSpeaking}
+          onToggleVoiceAutoSend={() => updateVoiceAutoSend(!voiceAutoSend)}
         />
       </div>
 
@@ -1825,6 +1944,8 @@ export const App: React.FC = () => {
           defaultIntegrationMode={snapshot.defaultIntegrationMode}
           autoLandOnComplete={snapshot.autoLandOnComplete}
           preferredLanguage={snapshot.preferredLanguage}
+          voiceReadbackEnabled={Boolean(snapshot.voiceReadbackEnabled)}
+          voiceAutoSend={voiceAutoSend}
           remoteAccess={snapshot.remoteAccess}
           locale={uiLocale}
           projects={snapshot.projects}
@@ -1844,6 +1965,13 @@ export const App: React.FC = () => {
           onChangePreferredLanguage={(lang) =>
             void window.conductor.setPreferredLanguage(lang)
           }
+          onSetVoiceReadbackEnabled={(enabled) => {
+            if (!enabled) {
+              handleStopSpeaking();
+            }
+            void window.conductor.setVoiceReadbackEnabled(enabled);
+          }}
+          onSetVoiceAutoSend={updateVoiceAutoSend}
           onSetRemoteAccessEnabled={(enabled) =>
             void window.conductor.setRemoteAccessEnabled(enabled)
           }

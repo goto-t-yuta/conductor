@@ -41,6 +41,7 @@ import {
   buildWorkerLanguageInstruction,
   isValidPreferredLanguage,
 } from "../shared/language.js";
+import { DEFAULT_VOICE_READBACK_ENABLED } from "../shared/voice.js";
 import {
   getFriendlyToolLabel,
   resolveUiLocale,
@@ -374,6 +375,7 @@ export class ConductorController {
   private defaultIntegrationMode: IntegrationMode = "feature-branch";
   private autoLandOnComplete = true;
   private preferredLanguage: PreferredLanguage = DEFAULT_PREFERRED_LANGUAGE;
+  private voiceReadbackEnabled: boolean = DEFAULT_VOICE_READBACK_ENABLED;
   private remoteAccessEnabled = false;
   private remoteAccessPort = DEFAULT_REMOTE_ACCESS_PORT;
   private remoteAccessToken = generateRemoteAccessToken();
@@ -498,6 +500,7 @@ export class ConductorController {
       defaultIntegrationMode: this.defaultIntegrationMode,
       autoLandOnComplete: this.autoLandOnComplete,
       preferredLanguage: this.preferredLanguage,
+      voiceReadbackEnabled: this.voiceReadbackEnabled,
       remoteAccessEnabled: this.remoteAccessEnabled,
       remoteAccessPort: this.remoteAccessPort,
       remoteAccessToken: this.remoteAccessToken,
@@ -989,6 +992,14 @@ export class ConductorController {
     this.persist();
     this.broadcastSnapshot();
     this.refreshIdleOrchestratorLanes();
+  }
+
+  public setVoiceReadbackEnabled(enabled: boolean): void {
+    const next = Boolean(enabled);
+    if (this.voiceReadbackEnabled === next) return;
+    this.voiceReadbackEnabled = next;
+    this.persist();
+    this.broadcastSnapshot();
   }
 
   public clearUsageRecords(): void {
@@ -5743,6 +5754,10 @@ export class ConductorController {
     this.preferredLanguage = isValidPreferredLanguage(saved.preferredLanguage)
       ? saved.preferredLanguage
       : DEFAULT_PREFERRED_LANGUAGE;
+    this.voiceReadbackEnabled =
+      typeof saved.voiceReadbackEnabled === "boolean"
+        ? saved.voiceReadbackEnabled
+        : DEFAULT_VOICE_READBACK_ENABLED;
     this.remoteAccessEnabled =
       typeof saved.remoteAccessEnabled === "boolean" ? saved.remoteAccessEnabled : false;
     this.remoteAccessPort = normalizeRemoteAccessPort(saved.remoteAccessPort);
@@ -5785,6 +5800,7 @@ export class ConductorController {
       defaultIntegrationMode: this.defaultIntegrationMode,
       autoLandOnComplete: this.autoLandOnComplete,
       preferredLanguage: this.preferredLanguage,
+      voiceReadbackEnabled: this.voiceReadbackEnabled,
       remoteAccessEnabled: this.remoteAccessEnabled,
       remoteAccessPort: this.remoteAccessPort,
       remoteAccessToken: this.remoteAccessToken,

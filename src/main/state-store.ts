@@ -6,6 +6,7 @@ import { DEFAULT_PREFERRED_LANGUAGE, isValidPreferredLanguage } from "../shared/
 import { normalizeTaskNumbers } from "../shared/mentions.js";
 import type { PersistedState } from "../shared/types.js";
 import { normalizeUsageRecords } from "../shared/usage.js";
+import { DEFAULT_VOICE_READBACK_ENABLED } from "../shared/voice.js";
 
 const DEFAULT_REMOTE_ACCESS_PORT = 4789;
 
@@ -40,6 +41,7 @@ const DEFAULT_STATE: PersistedState = {
   defaultIntegrationMode: "feature-branch",
   autoLandOnComplete: true,
   preferredLanguage: DEFAULT_PREFERRED_LANGUAGE,
+  voiceReadbackEnabled: DEFAULT_VOICE_READBACK_ENABLED,
   remoteAccessEnabled: false,
   remoteAccessPort: DEFAULT_REMOTE_ACCESS_PORT,
   remoteAccessToken: "",
@@ -103,6 +105,10 @@ export class StateStore {
         preferredLanguage: isValidPreferredLanguage(parsed.preferredLanguage)
           ? parsed.preferredLanguage
           : DEFAULT_PREFERRED_LANGUAGE,
+        voiceReadbackEnabled:
+          typeof parsed.voiceReadbackEnabled === "boolean"
+            ? parsed.voiceReadbackEnabled
+            : DEFAULT_VOICE_READBACK_ENABLED,
         remoteAccessEnabled:
           typeof parsed.remoteAccessEnabled === "boolean" ? parsed.remoteAccessEnabled : false,
         remoteAccessPort: normalizeRemoteAccessPort(parsed.remoteAccessPort),

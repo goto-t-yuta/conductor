@@ -7,6 +7,11 @@ import type {
 } from "./file-tree.js";
 import type { PreferredLanguage } from "./language.js";
 import type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
+import type {
+  VoiceMicPermissionResult,
+  VoiceSpeakRequest,
+  VoiceSpeakResult,
+} from "./voice.js";
 
 export type {
   ListDirectoryResult,
@@ -17,6 +22,11 @@ export type {
 } from "./file-tree.js";
 export type { PreferredLanguage } from "./language.js";
 export type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
+export type {
+  VoiceMicPermissionResult,
+  VoiceSpeakRequest,
+  VoiceSpeakResult,
+} from "./voice.js";
 
 export type AgentProvider = "codex" | "agy" | "claude";
 
@@ -360,6 +370,7 @@ export interface AppSnapshot {
   defaultIntegrationMode: IntegrationMode;
   autoLandOnComplete: boolean;
   preferredLanguage: PreferredLanguage;
+  voiceReadbackEnabled?: boolean;
   remoteAccessEnabled?: boolean;
   remoteAccessPort?: number;
   remoteAccessToken?: string;
@@ -389,6 +400,7 @@ export interface PersistedState {
   defaultIntegrationMode?: IntegrationMode;
   autoLandOnComplete?: boolean;
   preferredLanguage?: PreferredLanguage;
+  voiceReadbackEnabled?: boolean;
   remoteAccessEnabled?: boolean;
   remoteAccessPort?: number;
   remoteAccessToken?: string;
@@ -465,11 +477,17 @@ export interface ConductorAPI {
   setAutoLandOnComplete(enabled: boolean): Promise<void>;
   setProjectIntegrationMode(projectId: string, mode: IntegrationMode | null): Promise<void>;
   setPreferredLanguage(language: PreferredLanguage): Promise<void>;
+  setVoiceReadbackEnabled(enabled: boolean): Promise<void>;
   setRemoteAccessEnabled(enabled: boolean): Promise<RemoteAccessStatus>;
   setRemoteAccessPort(port: number): Promise<RemoteAccessStatus>;
   regenerateRemoteAccessToken(): Promise<RemoteAccessStatus>;
   refreshRemoteAccessStatus(): Promise<RemoteAccessStatus>;
   clearUsageRecords(): Promise<void>;
+
+  // Voice (TTS & macOS Microphone Permission)
+  voiceSpeak(request: VoiceSpeakRequest): Promise<VoiceSpeakResult>;
+  voiceStop(): Promise<void>;
+  voiceRequestMicPermission(): Promise<VoiceMicPermissionResult>;
 
   // Tasks
   updateTaskStatus(taskId: string, status: AgentTaskStatus): Promise<TaskStatusUpdateResult>;

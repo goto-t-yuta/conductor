@@ -10,6 +10,7 @@ import type {
   MarkdownWatchEvent,
   PreferredLanguage,
   SendMessagePayload,
+  VoiceSpeakRequest,
 } from "../shared/types.js";
 
 const api: ConductorAPI = {
@@ -64,6 +65,8 @@ const api: ConductorAPI = {
     ipcRenderer.invoke("conductor:setProjectIntegrationMode", projectId, mode),
   setPreferredLanguage: (language: PreferredLanguage) =>
     ipcRenderer.invoke("conductor:setPreferredLanguage", language),
+  setVoiceReadbackEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke("conductor:setVoiceReadbackEnabled", enabled),
   setRemoteAccessEnabled: (enabled: boolean) =>
     ipcRenderer.invoke("conductor:setRemoteAccessEnabled", enabled),
   setRemoteAccessPort: (port: number) =>
@@ -73,6 +76,10 @@ const api: ConductorAPI = {
   refreshRemoteAccessStatus: () =>
     ipcRenderer.invoke("conductor:refreshRemoteAccessStatus"),
   clearUsageRecords: () => ipcRenderer.invoke("conductor:clearUsageRecords"),
+
+  voiceSpeak: (request: VoiceSpeakRequest) => ipcRenderer.invoke("voice:speak", request),
+  voiceStop: () => ipcRenderer.invoke("voice:stop"),
+  voiceRequestMicPermission: () => ipcRenderer.invoke("voice:requestMicPermission"),
 
   updateTaskStatus: (taskId: string, status: AgentTaskStatus) =>
     ipcRenderer.invoke("conductor:updateTaskStatus", taskId, status),

@@ -18,6 +18,8 @@ import {
   Image as ImageIcon,
   Link2,
   Loader2,
+  Mic,
+  MicOff,
   PanelLeft,
   PanelRight,
   Paperclip,
@@ -26,6 +28,8 @@ import {
   Settings,
   Sparkles,
   Square,
+  Volume2,
+  VolumeX,
   X,
   XCircle,
   Zap,
@@ -62,10 +66,19 @@ import {
 } from "../../shared/task-status.js";
 import { formatTokenCount, formatUsdCost, summarizeUsage } from "../../shared/usage.js";
 import { resolveUiLocale, t, type UiLocale } from "../../shared/i18n.js";
+import {
+  appendVoiceTranscript,
+  formatSpeechRecognitionError,
+  resolveSpeechLocale,
+} from "../../shared/voice.js";
 import { getEffectiveProjectMode } from "../lib/integration-mode.js";
 import { isViewableImageAttachment } from "../lib/image-viewer.js";
 import { resolveTaskForTaskEvent } from "../lib/task-event.js";
 import { getQuickStatusTransition } from "../lib/task-sidebar.js";
+import {
+  getSpeechRecognitionConstructor,
+  type BrowserSpeechRecognition,
+} from "../lib/voice-client.js";
 import { ChatSessionControls } from "./ChatHistoryMenu.js";
 import { MarkdownView } from "./MarkdownView.js";
 import { UserMessageMentionBadges } from "./MentionBadges.js";
@@ -157,6 +170,12 @@ interface UnifiedChatProps {
   onSetWorkerModel: (model: string, effort?: string) => void;
   onOpenUsage?: () => void;
   onOpenSettings?: () => void;
+  voiceReadbackEnabled?: boolean;
+  isSpeaking?: boolean;
+  voiceAutoSend?: boolean;
+  onToggleVoiceReadback?: () => void;
+  onStopSpeaking?: () => void;
+  onToggleVoiceAutoSend?: () => void;
 }
 
 export const UnifiedChat: React.FC<UnifiedChatProps> = ({
@@ -206,6 +225,12 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   onSetWorkerModel,
   onOpenUsage,
   onOpenSettings,
+  voiceReadbackEnabled = Boolean(snapshot.voiceReadbackEnabled),
+  isSpeaking = false,
+  voiceAutoSend = false,
+  onToggleVoiceReadback,
+  onStopSpeaking,
+  onToggleVoiceAutoSend,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const contentContainerRef = useRef<HTMLDivElement>(null);
@@ -224,6 +249,249 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const activeLocale = locale ?? resolveUiLocale(snapshot.preferredLanguage);
+
+  // Voice Input (Web Speech API STT) state
+  const [isListening, setIsListening] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const latestComposerTextRef = useRef(composerText);
+  latestComposerTextRef.current = composerText;
+  const interimTranscriptRef = useRef(interimTranscript);
+  interimTranscriptRef.current = interimTranscript;
+  const voiceAutoSendRef = useRef(voiceAutoSend);
+  voiceAutoSendRef.current = voiceAutoSend;
+  const preferredLanguageRef = useRef(snapshot.preferredLanguage);
+  preferredLanguageRef.current = snapshot.preferredLanguage;
+  const onComposerTextChangeRef = useRef(onComposerTextChange);
+  onComposerTextChangeRef.current = onComposerTextChange;
+  const onSendRef = useRef(onSend);
+  onSendRef.current = onSend;
+  const onStopSpeakingRef = useRef(onStopSpeaking);
+  onStopSpeakingRef.current = onStopSpeaking;
+  const voiceRecognizedAnyRef = useRef(false);
+  const voiceAbortedByUserRef = useRef(false);
+  const voiceHadErrorRef = useRef(false);
+
+  const speechLocale = useMemo(
+    () =>
+      resolveSpeechLocale(
+        snapshot.preferredLanguage,
+        typeof navigator !== "undefined" ? navigator.language : undefined,
+      ),
+    [snapshot.preferredLanguage],
+  );
+
+  const stopVoiceInput = useCallback((options?: { cancel?: boolean }) => {
+    const rec = recognitionRef.current;
+    if (!rec) {
+      setIsListening(false);
+      setInterimTranscript("");
+      interimTranscriptRef.current = "";
+      return;
+    }
+    if (options?.cancel) {
+      voiceAbortedByUserRef.current = true;
+      setInterimTranscript("");
+      interimTranscriptRef.current = "";
+      try {
+        rec.abort();
+      } catch {
+        // ignore
+      }
+    } else {
+      try {
+        rec.stop();
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+
+  const startVoiceInput = useCallback(async () => {
+    // Stop TTS readback before opening the microphone so Conductor doesn't hear itself
+    onStopSpeakingRef.current?.();
+    setVoiceError(null);
+
+    const RecognitionCtor = getSpeechRecognitionConstructor();
+    if (!RecognitionCtor) {
+      setVoiceError(
+        formatSpeechRecognitionError("unsupported", preferredLanguageRef.current),
+      );
+      return;
+    }
+
+    if (typeof window !== "undefined" && window.conductor?.voiceRequestMicPermission) {
+      try {
+        const perm = await window.conductor.voiceRequestMicPermission();
+        if (!perm.granted) {
+          setVoiceError(
+            formatSpeechRecognitionError("not-allowed", preferredLanguageRef.current),
+          );
+          return;
+        }
+      } catch {
+        // Continue and let Chromium handle permission if IPC is unavailable
+      }
+    }
+
+    // Ensure any stale recognition session is cleaned up
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.abort();
+      } catch {
+        // ignore
+      }
+      recognitionRef.current = null;
+    }
+
+    const recognition = new RecognitionCtor();
+    recognition.lang = speechLocale;
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    voiceRecognizedAnyRef.current = false;
+    voiceAbortedByUserRef.current = false;
+    voiceHadErrorRef.current = false;
+    interimTranscriptRef.current = "";
+    setInterimTranscript("");
+    recognitionRef.current = recognition;
+
+    recognition.onstart = () => {
+      if (recognitionRef.current !== recognition) return;
+      setIsListening(true);
+      textareaRef.current?.focus();
+    };
+
+    recognition.onresult = (event) => {
+      if (recognitionRef.current !== recognition) return;
+      let finalChunk = "";
+      let interimChunk = "";
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const transcript = result?.[0]?.transcript ?? "";
+        if (!transcript) continue;
+        if (result.isFinal) {
+          finalChunk = appendVoiceTranscript(finalChunk, transcript);
+        } else {
+          interimChunk = appendVoiceTranscript(interimChunk, transcript);
+        }
+      }
+
+      if (finalChunk) {
+        const nextText = appendVoiceTranscript(latestComposerTextRef.current, finalChunk);
+        latestComposerTextRef.current = nextText;
+        voiceRecognizedAnyRef.current = true;
+        onComposerTextChangeRef.current(nextText);
+        setCaretPos(nextText.length);
+      }
+
+      interimTranscriptRef.current = interimChunk;
+      setInterimTranscript(interimChunk);
+    };
+
+    recognition.onerror = (event) => {
+      if (recognitionRef.current !== recognition) return;
+      voiceHadErrorRef.current = true;
+      if (voiceAbortedByUserRef.current || event.error === "aborted") {
+        return;
+      }
+      const friendly = formatSpeechRecognitionError(
+        event.error || "unknown",
+        preferredLanguageRef.current,
+      );
+      if (friendly) {
+        setVoiceError(friendly);
+      }
+    };
+
+    recognition.onend = () => {
+      if (recognitionRef.current === recognition) {
+        recognitionRef.current = null;
+      }
+      setIsListening(false);
+
+      const leftoverInterim = interimTranscriptRef.current.trim();
+      interimTranscriptRef.current = "";
+      setInterimTranscript("");
+
+      if (!voiceAbortedByUserRef.current && leftoverInterim) {
+        const nextText = appendVoiceTranscript(latestComposerTextRef.current, leftoverInterim);
+        latestComposerTextRef.current = nextText;
+        voiceRecognizedAnyRef.current = true;
+        onComposerTextChangeRef.current(nextText);
+        setCaretPos(nextText.length);
+      }
+
+      if (
+        voiceAutoSendRef.current &&
+        voiceRecognizedAnyRef.current &&
+        !voiceAbortedByUserRef.current &&
+        !voiceHadErrorRef.current &&
+        latestComposerTextRef.current.trim().length > 0
+      ) {
+        setDismissedMentionKey(null);
+        setCaretPos(0);
+        onSendRef.current();
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch {
+      recognitionRef.current = null;
+      setIsListening(false);
+      setVoiceError(
+        formatSpeechRecognitionError("service-not-allowed", preferredLanguageRef.current),
+      );
+    }
+  }, [speechLocale]);
+
+  const toggleVoiceInput = useCallback(() => {
+    if (isListening || recognitionRef.current) {
+      stopVoiceInput();
+    } else {
+      void startVoiceInput();
+    }
+  }, [isListening, startVoiceInput, stopVoiceInput]);
+
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch {
+          // ignore
+        }
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
+
+  // Global Option+Space / Alt+Space shortcut inside Conductor window to toggle voice input
+  useEffect(() => {
+    const onWindowKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.altKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.shiftKey &&
+        (e.code === "Space" || e.key === " " || e.key === "\u00a0")
+      ) {
+        // Avoid hijacking inputs inside modals
+        const target = e.target as HTMLElement | null;
+        if (target && target !== textareaRef.current && target.closest("input, textarea, select")) {
+          return;
+        }
+        e.preventDefault();
+        textareaRef.current?.focus();
+        toggleVoiceInput();
+      }
+    };
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, [toggleVoiceInput]);
 
   const registerMessageEl = useCallback((messageId: string, el: HTMLDivElement | null) => {
     if (el) {
@@ -585,20 +853,28 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
     }
   }, [snapshot.activeChatSessionId, snapshot.messages, scrollContainerToBottom]);
 
+  const displayComposerText =
+    isListening && interimTranscript
+      ? appendVoiceTranscript(composerText, interimTranscript)
+      : composerText;
+
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(160, Math.max(44, el.scrollHeight))}px`;
-  }, [composerText]);
+  }, [displayComposerText]);
 
   const canSend = composerText.trim().length > 0 || attachments.length > 0;
   const handleTriggerSend = useCallback(() => {
+    if (isListening || recognitionRef.current) {
+      stopVoiceInput({ cancel: true });
+    }
     if (!canSend) return;
     setDismissedMentionKey(null);
     setCaretPos(0);
     onSend();
-  }, [canSend, onSend]);
+  }, [canSend, isListening, onSend, stopVoiceInput]);
   const chatProviderInfo = snapshot.providers[snapshot.chatProvider];
   const workerProviderInfo = snapshot.providers[snapshot.workerProvider];
   const activeChatModel = chatProviderInfo?.models.find((m) => m.model === snapshot.chatModel);
@@ -871,6 +1147,51 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             </button>
           )}
 
+          {isSpeaking && onStopSpeaking && (
+            <button
+              type="button"
+              data-testid="voice-stop-speaking-btn"
+              onClick={onStopSpeaking}
+              title={t(activeLocale, "voice.stopSpeakingTitle")}
+              aria-label={t(activeLocale, "voice.stopSpeakingTitle")}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 hover:bg-rose-500/15 hover:text-rose-600 dark:hover:text-rose-300 transition-colors cursor-pointer"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-ping" />
+              <Square className="w-2.5 h-2.5 fill-current" />
+              <span>{t(activeLocale, "voice.stopSpeaking")}</span>
+            </button>
+          )}
+
+          {onToggleVoiceReadback && (
+            <button
+              type="button"
+              data-testid="voice-readback-toggle-btn"
+              aria-pressed={voiceReadbackEnabled}
+              onClick={onToggleVoiceReadback}
+              title={
+                voiceReadbackEnabled
+                  ? t(activeLocale, "voice.readbackOnTitle")
+                  : t(activeLocale, "voice.readbackOffTitle")
+              }
+              aria-label={
+                voiceReadbackEnabled
+                  ? t(activeLocale, "voice.readbackDisableAria")
+                  : t(activeLocale, "voice.readbackEnableAria")
+              }
+              className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                voiceReadbackEnabled
+                  ? "text-indigo-500 bg-indigo-500/10 hover:bg-indigo-500/20"
+                  : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              }`}
+            >
+              {voiceReadbackEnabled ? (
+                <Volume2 className="w-4 h-4" />
+              ) : (
+                <VolumeX className="w-4 h-4" />
+              )}
+            </button>
+          )}
+
           {onOpenSettings && (
             <button
               type="button"
@@ -1091,10 +1412,59 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             hasAttachmentsAbove={attachments.length > 0}
           />
 
+          {isListening && (
+            <div
+              data-testid="composer-voice-listening-bar"
+              className="flex items-center justify-between gap-2 px-3.5 pt-2 pb-0.5 text-[11.5px] text-rose-600 dark:text-rose-400"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="relative flex h-2 w-2 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500" />
+                </span>
+                <span className="font-medium shrink-0">
+                  {t(activeLocale, "voice.listeningLabel", { locale: speechLocale })}
+                </span>
+                <span className="text-zinc-500 dark:text-zinc-400 truncate">
+                  {interimTranscript || t(activeLocale, "voice.listeningHint")}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => stopVoiceInput()}
+                className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-rose-500/12 hover:bg-rose-500/20 text-rose-600 dark:text-rose-300 cursor-pointer shrink-0"
+              >
+                {t(activeLocale, "common.stop")}
+              </button>
+            </div>
+          )}
+
+          {voiceError && (
+            <div
+              data-testid="composer-voice-error-banner"
+              className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11.5px] text-amber-800 dark:text-amber-200 flex items-start gap-2"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+              <span className="flex-1 leading-relaxed">{voiceError}</span>
+              <button
+                type="button"
+                onClick={() => setVoiceError(null)}
+                aria-label={t(activeLocale, "voice.dismissErrorAria")}
+                className="text-amber-600/80 hover:text-amber-800 dark:text-amber-300/80 dark:hover:text-amber-100 cursor-pointer shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           <textarea
             ref={textareaRef}
-            value={composerText}
+            value={displayComposerText}
             onChange={(e) => {
+              if (interimTranscriptRef.current) {
+                interimTranscriptRef.current = "";
+                setInterimTranscript("");
+              }
               onComposerTextChange(e.target.value);
               setCaretPos(e.target.selectionStart ?? e.target.value.length);
               setDismissedMentionKey(null);
@@ -1131,6 +1501,24 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               const composing =
                 e.nativeEvent.isComposing || isComposingRef.current || e.keyCode === 229;
               if (composing) return;
+
+              if (
+                e.altKey &&
+                !e.metaKey &&
+                !e.ctrlKey &&
+                !e.shiftKey &&
+                (e.code === "Space" || e.key === " " || e.key === "\u00a0")
+              ) {
+                e.preventDefault();
+                toggleVoiceInput();
+                return;
+              }
+
+              if (isListening && e.key === "Escape") {
+                e.preventDefault();
+                stopVoiceInput({ cancel: true });
+                return;
+              }
 
               if (showMentionPopover) {
                 if (e.key === "Escape") {
@@ -1256,19 +1644,76 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
               )}
             </div>
 
-            <button
-              type="button"
-              onClick={handleTriggerSend}
-              disabled={!canSend}
-              title={t(activeLocale, "chat.sendTitle")}
-              className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${
-                canSend
-                  ? "bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer shadow-sm"
-                  : "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 cursor-not-allowed"
-              }`}
-            >
-              <ArrowUp className="w-4 h-4 stroke-[2.5]" />
-            </button>
+            <div className="flex items-center gap-1.5">
+              {onToggleVoiceAutoSend && (
+                <button
+                  type="button"
+                  data-testid="composer-voice-autosend-btn"
+                  aria-pressed={voiceAutoSend}
+                  onClick={onToggleVoiceAutoSend}
+                  title={
+                    voiceAutoSend
+                      ? t(activeLocale, "voice.autoSendOnTitle")
+                      : t(activeLocale, "voice.autoSendOffTitle")
+                  }
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
+                    voiceAutoSend
+                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30"
+                      : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 border border-transparent"
+                  }`}
+                >
+                  <span>{t(activeLocale, "voice.autoSendShort")}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                data-testid="composer-voice-mic-btn"
+                aria-pressed={isListening}
+                onClick={toggleVoiceInput}
+                title={
+                  isListening
+                    ? t(activeLocale, "voice.micStopTitle", { locale: speechLocale })
+                    : t(activeLocale, "voice.micStartTitle", { locale: speechLocale })
+                }
+                aria-label={
+                  isListening
+                    ? t(activeLocale, "voice.micStopAria")
+                    : t(activeLocale, "voice.micStartAria")
+                }
+                className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+                  isListening
+                    ? "bg-rose-500 hover:bg-rose-600 text-white shadow-sm ring-2 ring-rose-500/35"
+                    : "text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800"
+                }`}
+              >
+                {isListening && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-0 rounded-full bg-rose-500/40 animate-ping pointer-events-none"
+                  />
+                )}
+                {isListening ? (
+                  <MicOff className="w-4 h-4 relative z-10" />
+                ) : (
+                  <Mic className="w-4 h-4" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleTriggerSend}
+                disabled={!canSend}
+                title={t(activeLocale, "chat.sendTitle")}
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${
+                  canSend
+                    ? "bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer shadow-sm"
+                    : "bg-zinc-200 dark:bg-zinc-800 text-zinc-400 cursor-not-allowed"
+                }`}
+              >
+                <ArrowUp className="w-4 h-4 stroke-[2.5]" />
+              </button>
+            </div>
           </div>
         </div>
       </div>

@@ -7,10 +7,12 @@ import {
   EyeOff,
   GitBranch,
   Globe,
+  Mic,
   RefreshCw,
   Search,
   Settings,
   Smartphone,
+  Volume2,
   X,
 } from "lucide-react";
 import {
@@ -28,6 +30,10 @@ import type {
   UsageRecord,
 } from "../../shared/types.js";
 import {
+  DEFAULT_VOICE_AUTO_SEND,
+  DEFAULT_VOICE_READBACK_ENABLED,
+} from "../../shared/voice.js";
+import {
   getIntegrationModeOption,
   getIntegrationModeOptions,
 } from "../lib/integration-mode.js";
@@ -39,6 +45,8 @@ export interface SettingsModalProps {
   defaultIntegrationMode: IntegrationMode;
   autoLandOnComplete?: boolean;
   preferredLanguage?: PreferredLanguage;
+  voiceReadbackEnabled?: boolean;
+  voiceAutoSend?: boolean;
   remoteAccess?: RemoteAccessStatus;
   locale?: UiLocale;
   projects: Project[];
@@ -50,6 +58,8 @@ export interface SettingsModalProps {
   onSetAutoLandOnComplete?: (enabled: boolean) => void;
   onSetProjectIntegrationMode: (projectId: string, mode: IntegrationMode | null) => void;
   onChangePreferredLanguage?: (language: PreferredLanguage) => void;
+  onSetVoiceReadbackEnabled?: (enabled: boolean) => void;
+  onSetVoiceAutoSend?: (enabled: boolean) => void;
   onSetRemoteAccessEnabled?: (enabled: boolean) => void;
   onSetRemoteAccessPort?: (port: number) => void;
   onRegenerateRemoteAccessToken?: () => void;
@@ -433,10 +443,147 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
   );
 };
 
+export interface VoiceSettingsSectionProps {
+  voiceReadbackEnabled: boolean;
+  voiceAutoSend: boolean;
+  locale?: UiLocale;
+  onSetVoiceReadbackEnabled?: (enabled: boolean) => void;
+  onSetVoiceAutoSend?: (enabled: boolean) => void;
+}
+
+export const VoiceSettingsSection: React.FC<VoiceSettingsSectionProps> = ({
+  voiceReadbackEnabled,
+  voiceAutoSend,
+  locale = "ja",
+  onSetVoiceReadbackEnabled,
+  onSetVoiceAutoSend,
+}) => (
+  <section
+    data-testid="voice-settings-section"
+    className="space-y-2.5 border-t border-zinc-200 dark:border-zinc-800 pt-5"
+  >
+    <div>
+      <h3 className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+        <Volume2 className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+        <span>{t(locale, "settings.voiceTitle")}</span>
+      </h3>
+      <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+        {t(locale, "settings.voiceDescBeforeKbd")}
+        <kbd className="px-1 py-0.5 rounded bg-zinc-200/80 dark:bg-zinc-800 font-mono text-[10.5px]">
+          ⌥Space
+        </kbd>
+        {t(locale, "settings.voiceDescBetweenKbdAndCode")}
+        <code className="font-mono text-[10.5px]">say</code>
+        {t(locale, "settings.voiceDescAfterCode")}
+      </p>
+    </div>
+
+    <div className="space-y-2">
+      {/* Voice Readback (TTS) Toggle */}
+      <button
+        type="button"
+        role="switch"
+        aria-checked={voiceReadbackEnabled}
+        data-testid="voice-readback-toggle"
+        onClick={() => onSetVoiceReadbackEnabled?.(!voiceReadbackEnabled)}
+        className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer flex items-start justify-between gap-3 ${
+          voiceReadbackEnabled
+            ? "bg-indigo-500/10 border-indigo-500/50 ring-1 ring-indigo-500/25"
+            : "bg-zinc-50/70 dark:bg-zinc-900/50 border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700"
+        }`}
+      >
+        <div className="space-y-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <Volume2 className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+            <span className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100">
+              {t(locale, "settings.voiceReadbackTitle")}
+            </span>
+            <span
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                voiceReadbackEnabled
+                  ? "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300"
+                  : "bg-zinc-200/80 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400"
+              }`}
+            >
+              {voiceReadbackEnabled ? "ON" : "OFF"}
+            </span>
+          </div>
+          <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 leading-relaxed pl-5">
+            {t(locale, "settings.voiceReadbackDescBeforeCode")}
+            <code className="font-mono text-[10.5px]">say</code>
+            {t(locale, "settings.voiceReadbackDescAfterCode")}
+          </p>
+        </div>
+        <span
+          aria-hidden="true"
+          className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors mt-0.5 ${
+            voiceReadbackEnabled ? "bg-indigo-500" : "bg-zinc-300 dark:bg-zinc-700"
+          }`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform ${
+              voiceReadbackEnabled ? "translate-x-4" : "translate-x-0"
+            }`}
+          />
+        </span>
+      </button>
+
+      {/* Auto-send on speech end Toggle */}
+      <button
+        type="button"
+        role="switch"
+        aria-checked={voiceAutoSend}
+        data-testid="voice-autosend-toggle"
+        onClick={() => onSetVoiceAutoSend?.(!voiceAutoSend)}
+        className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer flex items-start justify-between gap-3 ${
+          voiceAutoSend
+            ? "bg-emerald-500/8 border-emerald-500/40 ring-1 ring-emerald-500/20"
+            : "bg-zinc-50/70 dark:bg-zinc-900/50 border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700"
+        }`}
+      >
+        <div className="space-y-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <Mic className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+            <span className="text-[12.5px] font-semibold text-zinc-900 dark:text-zinc-100">
+              {t(locale, "settings.voiceAutoSendTitle")}
+            </span>
+            <span
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                voiceAutoSend
+                  ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                  : "bg-zinc-200/80 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400"
+              }`}
+            >
+              {voiceAutoSend ? "ON" : "OFF"}
+            </span>
+          </div>
+          <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 leading-relaxed pl-5">
+            {t(locale, "settings.voiceAutoSendDesc")}
+          </p>
+        </div>
+        <span
+          aria-hidden="true"
+          className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors mt-0.5 ${
+            voiceAutoSend ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-700"
+          }`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform ${
+              voiceAutoSend ? "translate-x-4" : "translate-x-0"
+            }`}
+          />
+        </span>
+      </button>
+    </div>
+  </section>
+);
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   defaultIntegrationMode,
   autoLandOnComplete = true,
   preferredLanguage = DEFAULT_PREFERRED_LANGUAGE,
+  voiceReadbackEnabled = DEFAULT_VOICE_READBACK_ENABLED,
+  voiceAutoSend = DEFAULT_VOICE_AUTO_SEND,
   remoteAccess,
   locale,
   projects,
@@ -448,6 +595,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSetAutoLandOnComplete,
   onSetProjectIntegrationMode,
   onChangePreferredLanguage,
+  onSetVoiceReadbackEnabled,
+  onSetVoiceAutoSend,
   onSetRemoteAccessEnabled,
   onSetRemoteAccessPort,
   onRegenerateRemoteAccessToken,
@@ -561,6 +710,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 preferredLanguage={preferredLanguage}
                 locale={activeLocale}
                 onChangePreferredLanguage={onChangePreferredLanguage}
+              />
+
+              {/* Voice Input & Readback (OS-Standard Zero-Cost) */}
+              <VoiceSettingsSection
+                voiceReadbackEnabled={voiceReadbackEnabled}
+                voiceAutoSend={voiceAutoSend}
+                locale={activeLocale}
+                onSetVoiceReadbackEnabled={onSetVoiceReadbackEnabled}
+                onSetVoiceAutoSend={onSetVoiceAutoSend}
               />
 
               {/* Remote Access / Tailscale Mobile Bridge */}
