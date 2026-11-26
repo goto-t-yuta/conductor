@@ -19,7 +19,7 @@ import {
 } from "../shared/mentions.js";
 import type { MarkdownOpenedImage } from "./components/MarkdownView.js";
 import type { MarkdownViewerTab } from "./components/MarkdownViewerPane.js";
-import { SettingsModal } from "./components/SettingsModal.js";
+import { SettingsModal, type SettingsModalTab } from "./components/SettingsModal.js";
 import { TaskInspectorModal } from "./components/TaskInspectorModal.js";
 import { TaskSidebar } from "./components/TaskSidebar.js";
 import { UnifiedChat, type ChatJumpRequest } from "./components/UnifiedChat.js";
@@ -127,7 +127,7 @@ export const App: React.FC = () => {
   const selectedMentionsRef = useRef<ExplicitMentionTarget[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
+  const [settingsModalTab, setSettingsModalTab] = useState<SettingsModalTab | null>(null);
 
   const updateComposerText = useCallback((nextText: string) => {
     composerTextRef.current = nextText;
@@ -1705,7 +1705,8 @@ export const App: React.FC = () => {
           onSetWorkerProvider={(p) => void window.conductor.setWorkerProvider(p)}
           onSetChatModel={(m, e) => void window.conductor.setChatModel(m, e)}
           onSetWorkerModel={(m, e) => void window.conductor.setWorkerModel(m, e)}
-          onOpenSettings={() => setShowSettings(true)}
+          onOpenUsage={() => setSettingsModalTab("usage")}
+          onOpenSettings={() => setSettingsModalTab("general")}
         />
       </div>
 
@@ -1725,7 +1726,7 @@ export const App: React.FC = () => {
               activeTab={activeUnifiedTab}
               projectRecentMdFiles={projectRecentMdFiles}
               isPickingElement={snapshot.isPickingElement}
-              hideNativeView={Boolean(selectedTask || showSettings)}
+              hideNativeView={Boolean(selectedTask || settingsModalTab !== null)}
               onNavigateBrowser={(url, newTab) => void handleNavigateActiveBrowser(url, newTab)}
               onNewBrowserTab={() => void handleNewBrowserTab()}
               onBrowserBack={() => void window.conductor.browserBack()}
@@ -1806,14 +1807,17 @@ export const App: React.FC = () => {
         />
       )}
 
-      {/* Conductor Settings Modal */}
-      {showSettings && (
+      {/* Conductor Settings & Usage Modal */}
+      {settingsModalTab !== null && (
         <SettingsModal
           defaultIntegrationMode={snapshot.defaultIntegrationMode}
           autoLandOnComplete={snapshot.autoLandOnComplete}
           preferredLanguage={snapshot.preferredLanguage}
           projects={snapshot.projects}
-          onClose={() => setShowSettings(false)}
+          initialTab={settingsModalTab}
+          usageRecords={snapshot.usageRecords ?? []}
+          onClearUsage={() => void window.conductor.clearUsageRecords()}
+          onClose={() => setSettingsModalTab(null)}
           onSetDefaultIntegrationMode={(mode) =>
             void window.conductor.setDefaultIntegrationMode(mode)
           }

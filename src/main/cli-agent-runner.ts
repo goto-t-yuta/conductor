@@ -2,11 +2,14 @@ import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { ModelOption } from "../shared/types.js";
+import { normalizeRawTokenUsage, type NormalizedRawUsage } from "../shared/usage.js";
 import {
   enrichedEnvironment,
   resolveAgyExecutable,
   resolveClaudeExecutable,
 } from "./shell-env.js";
+
+export type CliTurnUsage = NormalizedRawUsage;
 
 export interface CliTurnCallbacks {
   onSessionId?: (sessionId: string) => void;
@@ -24,6 +27,7 @@ export interface CliTurnCallbacks {
     finalText: string;
     errorMessage?: string;
     interrupted?: boolean;
+    usage?: CliTurnUsage;
   }) => void;
 }
 
@@ -40,6 +44,146 @@ function asRecord(v: unknown): Record<string, unknown> | null {
 
 function asString(v: unknown): string | null {
   return typeof v === "string" ? v : null;
+}
+
+function asNonNegNumber(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return Math.max(0, v);
+}
+
+/**
+ * Extracts normalized token usage & optional exact cost from an AGY `stream-json` event
+ * (`result`, `usage`, `token_usage`, or `step_update`). Safely supports both camelCase and snake_case.
+ */
+export function extractAgyStreamJsonUsage(
+  parsed: Record<string, unknown>,
+): CliTurnUsage | null {
+  const result = asRecord(parsed.result);
+  const stepUpdate = asRecord(parsed.step_update);
+  const candidates: Array<Record<string, unknown> | null> = [
+    asRecord(result?.usage),
+    asRecord(result?.token_usage),
+    asRecord(result?.tokenUsage),
+    asRecord(result?.usage_metadata),
+    asRecord(result?.usageMetadata),
+    asRecord(result?.stats),
+    asRecord(result?.metrics),
+    asRecord(parsed.usage),
+    asRecord(parsed.token_usage),
+    asRecord(parsed.tokenUsage),
+    asRecord(parsed.usage_metadata),
+    asRecord(parsed.usageMetadata),
+    asRecord(stepUpdate?.usage),
+    asRecord(stepUpdate?.token_usage),
+    asRecord(stepUpdate?.tokenUsage),
+    result,
+  ];
+
+  const topCost =
+    asNonNegNumber(result?.total_cost_usd) ??
+    asNonNegNumber(result?.totalCostUsd) ??
+    asNonNegNumber(result?.cost_usd) ??
+    asNonNegNumber(result?.costUsd) ??
+    asNonNegNumber(parsed.total_cost_usd) ??
+    asNonNegNumber(parsed.totalCostUsd) ??
+    asNonNegNumber(parsed.cost_usd) ??
+    asNonNegNumber(parsed.costUsd);
+
+  const topModel =
+    asString(result?.model) ??
+    asString(parsed.model) ??
+    asString(stepUpdate?.model) ??
+    undefined;
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const normalized = normalizeRawTokenUsage(candidate, "agy");
+    if (normalized) {
+      return {
+        ...normalized,
+        ...(normalized.costUsd === undefined && topCost !== null ? { costUsd: topCost } : {}),
+        ...(normalized.model === undefined && topModel ? { model: topModel } : {}),
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Extracts normalized token usage, exact `total_cost_usd`, and resolved model ID
+ * from a Claude Code `stream-json` `result` event.
+ */
+export function extractClaudeStreamJsonUsage(
+  parsed: Record<string, unknown>,
+  fallbackModel?: string | null,
+): CliTurnUsage | null {
+  const exactCost =
+    asNonNegNumber(parsed.total_cost_usd) ??
+    asNonNegNumber(parsed.totalCostUsd) ??
+    asNonNegNumber(parsed.cost_usd) ??
+    asNonNegNumber(parsed.costUsd);
+
+  // Inspect modelUsage to resolve exact model ID (and serve as fallback token source)
+  const modelUsage = asRecord(parsed.modelUsage);
+  let resolvedModel: string | undefined;
+  let aggInput = 0;
+  let aggCached = 0;
+  let aggCacheCreate = 0;
+  let aggOutput = 0;
+  let aggCost = 0;
+  let bestScore = -1;
+
+  if (modelUsage) {
+    for (const [modelName, rawEntry] of Object.entries(modelUsage)) {
+      const entry = normalizeRawTokenUsage(rawEntry, "claude");
+      if (!entry) continue;
+      aggInput += entry.inputTokens;
+      aggCached += entry.cachedInputTokens;
+      aggCacheCreate += entry.cacheCreationInputTokens;
+      aggOutput += entry.outputTokens;
+      if (entry.costUsd !== undefined) aggCost += entry.costUsd;
+
+      const score =
+        entry.costUsd !== undefined && entry.costUsd > 0
+          ? entry.costUsd * 1_000_000
+          : entry.inputTokens + entry.cachedInputTokens + entry.cacheCreationInputTokens + entry.outputTokens;
+      if (score > bestScore) {
+        bestScore = score;
+        resolvedModel = modelName;
+      }
+    }
+  }
+
+  const normalizedDirect = normalizeRawTokenUsage(parsed.usage, "claude");
+  const effectiveModel =
+    resolvedModel ??
+    normalizedDirect?.model ??
+    (fallbackModel && fallbackModel.trim() ? fallbackModel.trim() : undefined);
+
+  if (normalizedDirect) {
+    const costUsd = exactCost ?? normalizedDirect.costUsd ?? (aggCost > 0 ? aggCost : undefined);
+    return {
+      ...normalizedDirect,
+      ...(costUsd !== undefined ? { costUsd } : {}),
+      ...(effectiveModel ? { model: effectiveModel } : {}),
+    };
+  }
+
+  const totalAggTokens = aggInput + aggCached + aggCacheCreate + aggOutput;
+  const costUsd = exactCost ?? (aggCost > 0 ? aggCost : undefined);
+  if (totalAggTokens === 0 && (costUsd === undefined || costUsd === 0)) {
+    return null;
+  }
+
+  return {
+    inputTokens: aggInput,
+    cachedInputTokens: aggCached,
+    cacheCreationInputTokens: aggCacheCreate,
+    outputTokens: aggOutput,
+    reasoningTokens: 0,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+    ...(effectiveModel ? { model: effectiveModel } : {}),
+  };
 }
 
 export function defaultClaudeModels(): ModelOption[] {
@@ -285,6 +429,7 @@ export function runAgyTurn(
   let stdoutBuf = "";
   let stderrBuf = "";
   let accumulatedText = "";
+  let latestUsage: CliTurnUsage | undefined;
   let completed = false;
   let cancelled = false;
   let exited = false;
@@ -309,6 +454,7 @@ export function runAgyTurn(
     finalText: string;
     errorMessage?: string;
     interrupted?: boolean;
+    usage?: CliTurnUsage;
   }) => {
     if (completed) return;
     completed = true;
@@ -342,14 +488,15 @@ export function runAgyTurn(
     if (stdoutBuf.trim()) handleAgyLine(stdoutBuf.trim());
     if (!completed) {
       if (cancelled) {
-        finish({ ok: false, finalText: accumulatedText, interrupted: true });
+        finish({ ok: false, finalText: accumulatedText, interrupted: true, usage: latestUsage });
       } else if (code === 0) {
-        finish({ ok: true, finalText: accumulatedText });
+        finish({ ok: true, finalText: accumulatedText, usage: latestUsage });
       } else {
         finish({
           ok: false,
           finalText: accumulatedText,
           errorMessage: stderrBuf.trim() || `agy exited with code ${code ?? "null"}`,
+          usage: latestUsage,
         });
       }
     }
@@ -406,6 +553,12 @@ export function runAgyTurn(
       return;
     }
 
+    if (eventType === "usage" || eventType === "token_usage") {
+      const parsedUsage = extractAgyStreamJsonUsage(parsed);
+      if (parsedUsage) latestUsage = parsedUsage;
+      return;
+    }
+
     if (eventType === "result") {
       const result = asRecord(parsed.result);
       const status = asString(result?.status) ?? "SUCCESS";
@@ -415,10 +568,12 @@ export function runAgyTurn(
         callbacks.onTextDelta?.(response);
       }
       const errMsg = asString(result?.error) ?? undefined;
+      const resultUsage = extractAgyStreamJsonUsage(parsed) ?? latestUsage;
       finish({
         ok: status === "SUCCESS",
         finalText: accumulatedText || response,
         errorMessage: status === "SUCCESS" ? undefined : errMsg ?? `agy status: ${status}`,
+        ...(resultUsage ? { usage: resultUsage } : {}),
       });
     }
   }
@@ -513,6 +668,7 @@ export function runClaudeTurn(
   let stdoutBuf = "";
   let stderrBuf = "";
   let accumulatedText = "";
+  let observedModel: string | null = options.model ?? null;
   let sawStreamText = false;
   let completed = false;
   let cancelled = false;
@@ -539,6 +695,7 @@ export function runClaudeTurn(
     finalText: string;
     errorMessage?: string;
     interrupted?: boolean;
+    usage?: CliTurnUsage;
   }) => {
     if (completed) return;
     completed = true;
@@ -620,8 +777,16 @@ export function runClaudeTurn(
       return;
     }
 
+    if (type === "system") {
+      const sysModel = asString(parsed.model);
+      if (sysModel) observedModel = sysModel;
+      return;
+    }
+
     if (type === "assistant") {
       const message = asRecord(parsed.message);
+      const msgModel = asString(message?.model);
+      if (msgModel) observedModel = msgModel;
       const content = Array.isArray(message?.content) ? message.content : [];
       for (const rawBlock of content) {
         const block = asRecord(rawBlock);
@@ -678,10 +843,12 @@ export function runClaudeTurn(
         accumulatedText = resultText;
         callbacks.onTextDelta?.(resultText);
       }
+      const usage = extractClaudeStreamJsonUsage(parsed, observedModel) ?? undefined;
       finish({
         ok: !isError,
         finalText: accumulatedText || resultText,
         errorMessage: isError ? resultText || "Claude Code error" : undefined,
+        ...(usage ? { usage } : {}),
       });
     }
   }

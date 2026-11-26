@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { ModelOption } from "../shared/types.js";
+import { normalizeRawTokenUsage, type NormalizedRawUsage } from "../shared/usage.js";
 import { enrichedEnvironment, resolveAgyExecutable } from "./shell-env.js";
 
 export interface AgyAcpMcpServerConfig {
@@ -26,6 +27,7 @@ export interface AgyAcpSessionInfo {
 export interface AgyAcpPromptResult {
   stopReason: string;
   usage?: Record<string, unknown>;
+  normalizedUsage?: NormalizedRawUsage;
 }
 
 export type ParsedAgySessionUpdate =
@@ -43,6 +45,10 @@ export type ParsedAgySessionUpdate =
       kind: "configOptionUpdate";
       modelValue: string | null;
       thoughtLevel: string | null;
+    }
+  | {
+      kind: "usageUpdate";
+      usage: NormalizedRawUsage;
     }
   | { kind: "other"; updateType: string };
 
@@ -73,6 +79,43 @@ function asRecord(v: unknown): Record<string, unknown> | null {
 
 function asString(v: unknown): string | null {
   return typeof v === "string" ? v : null;
+}
+
+export function extractAgyPromptUsage(
+  res: Record<string, unknown> | null | undefined,
+): NormalizedRawUsage | null {
+  if (!res) return null;
+  const meta = asRecord(res._meta);
+  const rawUsage =
+    asRecord(res.usage) ??
+    asRecord(res.tokenUsage) ??
+    asRecord(res.token_usage) ??
+    asRecord(res.usageMetadata) ??
+    asRecord(res.usage_metadata) ??
+    asRecord(meta?.usage) ??
+    asRecord(meta?.tokenUsage) ??
+    asRecord(meta?.token_usage);
+
+  if (!rawUsage) return null;
+
+  const merged: Record<string, unknown> = { ...rawUsage };
+  if (
+    merged.cost === undefined &&
+    merged.costUsd === undefined &&
+    merged.cost_usd === undefined &&
+    merged.totalCostUsd === undefined &&
+    merged.total_cost_usd === undefined
+  ) {
+    if (res.cost !== undefined) merged.cost = res.cost;
+    else if (res.total_cost_usd !== undefined) merged.total_cost_usd = res.total_cost_usd;
+    else if (res.totalCostUsd !== undefined) merged.totalCostUsd = res.totalCostUsd;
+    else if (res.costUsd !== undefined) merged.costUsd = res.costUsd;
+    else if (res.cost_usd !== undefined) merged.cost_usd = res.cost_usd;
+  }
+  if (merged.model === undefined && typeof res.model === "string") {
+    merged.model = res.model;
+  }
+  return normalizeRawTokenUsage(merged, "agy");
 }
 
 function guessImageMimeType(filePath: string): string {
@@ -175,6 +218,15 @@ export function parseAgySessionUpdate(
       if (id === "thought_level") thoughtLevel = val;
     }
     return { kind: "configOptionUpdate", modelValue, thoughtLevel };
+  }
+
+  if (updateType === "usage_update" || updateType === "token_usage") {
+    const usage =
+      extractAgyPromptUsage(update) ?? normalizeRawTokenUsage(update, "agy");
+    if (usage) {
+      return { kind: "usageUpdate", usage };
+    }
+    return { kind: "other", updateType };
   }
 
   return { kind: "other", updateType };
@@ -614,9 +666,18 @@ export class AgyAcpClient {
       ),
     );
 
+    const rawUsage =
+      asRecord(res?.usage) ??
+      asRecord(res?.tokenUsage) ??
+      asRecord(res?.token_usage) ??
+      asRecord(asRecord(res?._meta)?.usage) ??
+      undefined;
+    const normalizedUsage = extractAgyPromptUsage(res) ?? undefined;
+
     return {
       stopReason: asString(res?.stopReason) ?? "end_turn",
-      usage: asRecord(res?.usage) ?? undefined,
+      usage: rawUsage,
+      ...(normalizedUsage ? { normalizedUsage } : {}),
     };
   }
 

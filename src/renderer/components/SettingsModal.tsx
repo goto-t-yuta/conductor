@@ -1,17 +1,28 @@
-import React, { useMemo, useState } from "react";
-import { Check, GitBranch, Globe, Search, Settings, X } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
+import { BarChart3, Check, GitBranch, Globe, Search, Settings, X } from "lucide-react";
 import { DEFAULT_PREFERRED_LANGUAGE, LANGUAGE_OPTIONS } from "../../shared/language.js";
-import type { IntegrationMode, PreferredLanguage, Project } from "../../shared/types.js";
+import type {
+  IntegrationMode,
+  PreferredLanguage,
+  Project,
+  UsageRecord,
+} from "../../shared/types.js";
 import {
   getIntegrationModeOption,
   INTEGRATION_MODE_OPTIONS,
 } from "../lib/integration-mode.js";
+import { UsagePanel } from "./UsagePanel.js";
+
+export type SettingsModalTab = "general" | "usage";
 
 export interface SettingsModalProps {
   defaultIntegrationMode: IntegrationMode;
   autoLandOnComplete?: boolean;
   preferredLanguage?: PreferredLanguage;
   projects: Project[];
+  initialTab?: SettingsModalTab;
+  usageRecords?: UsageRecord[];
+  onClearUsage?: () => void;
   onClose: () => void;
   onSetDefaultIntegrationMode: (mode: IntegrationMode) => void;
   onSetAutoLandOnComplete?: (enabled: boolean) => void;
@@ -89,13 +100,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   autoLandOnComplete = true,
   preferredLanguage = DEFAULT_PREFERRED_LANGUAGE,
   projects,
+  initialTab = "general",
+  usageRecords = [],
+  onClearUsage,
   onClose,
   onSetDefaultIntegrationMode,
   onSetAutoLandOnComplete,
   onSetProjectIntegrationMode,
   onChangePreferredLanguage,
 }) => {
+  const [activeTab, setActiveTab] = useState<SettingsModalTab>(initialTab);
   const [projectSearch, setProjectSearch] = useState("");
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
 
   const filteredProjects = useMemo(() => {
     const q = projectSearch.trim().toLowerCase();
@@ -118,25 +137,75 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       >
         {/* Header */}
         <div className="flex items-center gap-2.5 px-5 py-3.5 border-b border-zinc-200 dark:border-zinc-800">
-          <Settings className="w-4 h-4 text-indigo-500 shrink-0" />
-          <h2 className="text-[15px] font-semibold flex-1">Conductor 設定</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="設定を閉じる"
-            className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          {activeTab === "usage" ? (
+            <BarChart3 className="w-4 h-4 text-indigo-500 shrink-0" />
+          ) : (
+            <Settings className="w-4 h-4 text-indigo-500 shrink-0" />
+          )}
+          <h2 className="text-[15px] font-semibold">
+            {activeTab === "usage" ? "Usage / API利用料" : "Conductor 設定"}
+          </h2>
+
+          <div className="flex-1 flex items-center justify-end gap-2">
+            <div
+              role="tablist"
+              aria-label="設定タブ"
+              className="inline-flex items-center p-0.5 rounded-lg bg-zinc-100 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800"
+            >
+              <button
+                type="button"
+                role="tab"
+                data-testid="settings-tab-general"
+                aria-selected={activeTab === "general"}
+                onClick={() => setActiveTab("general")}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11.5px] font-medium transition-colors cursor-pointer ${
+                  activeTab === "general"
+                    ? "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-xs"
+                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200"
+                }`}
+              >
+                <Settings className="w-3 h-3" />
+                <span>一般設定</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                data-testid="settings-tab-usage"
+                aria-selected={activeTab === "usage"}
+                onClick={() => setActiveTab("usage")}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11.5px] font-medium transition-colors cursor-pointer ${
+                  activeTab === "usage"
+                    ? "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-xs"
+                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200"
+                }`}
+              >
+                <BarChart3 className="w-3 h-3" />
+                <span>Usage / API利用料</span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="設定を閉じる"
+              className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-6 select-text">
-          {/* Output Language Preference */}
-          <LanguageSettingsSection
-            preferredLanguage={preferredLanguage}
-            onChangePreferredLanguage={onChangePreferredLanguage}
-          />
+          {activeTab === "usage" ? (
+            <UsagePanel usageRecords={usageRecords} onClearUsage={onClearUsage} />
+          ) : (
+            <>
+              {/* Output Language Preference */}
+              <LanguageSettingsSection
+                preferredLanguage={preferredLanguage}
+                onChangePreferredLanguage={onChangePreferredLanguage}
+              />
 
           {/* Global Default Integration Mode */}
           <section className="space-y-2.5 border-t border-zinc-200 dark:border-zinc-800 pt-5">
@@ -323,6 +392,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             )}
           </section>
+            </>
+          )}
         </div>
 
         {/* Footer */}

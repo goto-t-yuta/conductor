@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import {
   AlertTriangle,
   ArrowUp,
+  BarChart3,
   Bell,
   BookOpen,
   Camera,
@@ -59,6 +60,7 @@ import {
   requiresLandBeforeDone,
   validateManualTaskStatusTransition,
 } from "../../shared/task-status.js";
+import { formatTokenCount, formatUsdCost, summarizeUsage } from "../../shared/usage.js";
 import { getEffectiveProjectMode } from "../lib/integration-mode.js";
 import { isViewableImageAttachment } from "../lib/image-viewer.js";
 import { resolveTaskForTaskEvent } from "../lib/task-event.js";
@@ -151,6 +153,7 @@ interface UnifiedChatProps {
   onSetWorkerProvider: (provider: AgentProvider) => void;
   onSetChatModel: (model: string, effort?: string) => void;
   onSetWorkerModel: (model: string, effort?: string) => void;
+  onOpenUsage?: () => void;
   onOpenSettings?: () => void;
 }
 
@@ -198,6 +201,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   onSetWorkerProvider,
   onSetChatModel,
   onSetWorkerModel,
+  onOpenUsage,
   onOpenSettings,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -596,6 +600,14 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
   const activeChatModel = chatProviderInfo?.models.find((m) => m.model === snapshot.chatModel);
   const activeWorkerModel = workerProviderInfo?.models.find((m) => m.model === snapshot.workerModel);
   const allProviders: AgentProvider[] = ["codex", "agy", "claude"];
+  const todayUsage = useMemo(
+    () => summarizeUsage(snapshot.usageRecords ?? [], "today"),
+    [snapshot.usageRecords],
+  );
+  const allTimeUsage = useMemo(
+    () => summarizeUsage(snapshot.usageRecords ?? [], "all"),
+    [snapshot.usageRecords],
+  );
 
   return (
     <section className="flex flex-col h-full min-w-0 bg-white dark:bg-[#0f1115]">
@@ -812,12 +824,42 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = ({
             )}
           </div>
 
+          {onOpenUsage && (
+            <button
+              type="button"
+              data-testid="open-usage-btn"
+              onClick={onOpenUsage}
+              title={
+                allTimeUsage.totalTokens > 0
+                  ? `Usage / API利用料 — 今日: ${formatTokenCount(todayUsage.totalTokens)} tokens (${formatUsdCost(todayUsage.costUsd, { estimated: todayUsage.hasEstimatedCost })}) / 累計: ${formatTokenCount(allTimeUsage.totalTokens)} tokens (${formatUsdCost(allTimeUsage.costUsd, { estimated: allTimeUsage.hasEstimatedCost })})`
+                  : "Usage / API利用料を表示"
+              }
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100/80 dark:bg-zinc-800/70 hover:bg-zinc-200/80 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer tabular-nums"
+            >
+              <BarChart3 className="w-3 h-3 text-indigo-500 shrink-0" />
+              {todayUsage.totalTokens > 0 ? (
+                <>
+                  <span>{formatTokenCount(todayUsage.totalTokens)}</span>
+                  <span className="text-zinc-400">·</span>
+                  <span>
+                    {formatUsdCost(todayUsage.costUsd, {
+                      estimated: todayUsage.hasEstimatedCost,
+                      compact: true,
+                    })}
+                  </span>
+                </>
+              ) : (
+                <span>Usage</span>
+              )}
+            </button>
+          )}
+
           {onOpenSettings && (
             <button
               type="button"
               data-testid="open-settings-btn"
               onClick={onOpenSettings}
-              title="設定 (Git Worktree / 統合モード)"
+              title="設定 (言語 / Git Worktree / Usage)"
               className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
             >
               <Settings className="w-4 h-4" />

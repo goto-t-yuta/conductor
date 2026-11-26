@@ -281,6 +281,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle("conductor:setPreferredLanguage", (_e, language: PreferredLanguage) =>
     controller?.setPreferredLanguage(language),
   );
+  ipcMain.handle("conductor:clearUsageRecords", () => controller?.clearUsageRecords());
 
   ipcMain.handle("conductor:updateTaskStatus", (_e, taskId: string, status: AgentTaskStatus) =>
     controller?.updateTaskStatus(taskId, status) ?? { ok: false, error: "Controller not initialized" },

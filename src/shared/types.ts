@@ -6,6 +6,7 @@ import type {
   TextFileReadResult,
 } from "./file-tree.js";
 import type { PreferredLanguage } from "./language.js";
+import type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
 
 export type {
   ListDirectoryResult,
@@ -15,6 +16,7 @@ export type {
   TextFileReadResult,
 } from "./file-tree.js";
 export type { PreferredLanguage } from "./language.js";
+export type { TokenUsage, UsagePeriod, UsageRecord, UsageSource, UsageSummary } from "./usage.js";
 
 export type AgentProvider = "codex" | "agy" | "claude";
 
@@ -342,6 +344,7 @@ export interface AppSnapshot {
   defaultIntegrationMode: IntegrationMode;
   autoLandOnComplete: boolean;
   preferredLanguage: PreferredLanguage;
+  usageRecords?: UsageRecord[];
   lastErrorBanner: string | null;
 }
 
@@ -366,6 +369,7 @@ export interface PersistedState {
   defaultIntegrationMode?: IntegrationMode;
   autoLandOnComplete?: boolean;
   preferredLanguage?: PreferredLanguage;
+  usageRecords?: UsageRecord[];
 }
 
 export interface TaskStatusUpdateResult {
@@ -438,6 +442,7 @@ export interface ConductorAPI {
   setAutoLandOnComplete(enabled: boolean): Promise<void>;
   setProjectIntegrationMode(projectId: string, mode: IntegrationMode | null): Promise<void>;
   setPreferredLanguage(language: PreferredLanguage): Promise<void>;
+  clearUsageRecords(): Promise<void>;
 
   // Tasks
   updateTaskStatus(taskId: string, status: AgentTaskStatus): Promise<TaskStatusUpdateResult>;

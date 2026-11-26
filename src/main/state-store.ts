@@ -5,6 +5,7 @@ import { normalizeChatSessions } from "../shared/chat-sessions.js";
 import { DEFAULT_PREFERRED_LANGUAGE, isValidPreferredLanguage } from "../shared/language.js";
 import { normalizeTaskNumbers } from "../shared/mentions.js";
 import type { PersistedState } from "../shared/types.js";
+import { normalizeUsageRecords } from "../shared/usage.js";
 
 const DEFAULT_STATE: PersistedState = {
   projects: [],
@@ -25,6 +26,7 @@ const DEFAULT_STATE: PersistedState = {
   defaultIntegrationMode: "feature-branch",
   autoLandOnComplete: true,
   preferredLanguage: DEFAULT_PREFERRED_LANGUAGE,
+  usageRecords: [],
 };
 
 export class StateStore {
@@ -77,6 +79,7 @@ export class StateStore {
         preferredLanguage: isValidPreferredLanguage(parsed.preferredLanguage)
           ? parsed.preferredLanguage
           : DEFAULT_PREFERRED_LANGUAGE,
+        usageRecords: normalizeUsageRecords(parsed.usageRecords),
       };
       if (normalized.changed || normalizedChats.changed) {
         this.save(state);

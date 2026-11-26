@@ -21,8 +21,18 @@ import type {
   SendMessagePayload,
   TaskStatusUpdateResult,
   TaskWorktreeStatus,
+  TokenUsage,
+  UsageRecord,
+  UsageSource,
 } from "../shared/types.js";
 import { PROJECT_PALETTE } from "../shared/types.js";
+import {
+  appendUsageRecord,
+  createUsageRecord,
+  normalizeRawTokenUsage,
+  normalizeUsageRecords,
+  type NormalizedRawUsage,
+} from "../shared/usage.js";
 import {
   DEFAULT_PREFERRED_LANGUAGE,
   buildOrchestratorLanguageInstruction,
@@ -69,9 +79,15 @@ import {
   strongestAgyModel,
   writeAgyOrchestratorMcpPlugin,
   writeClaudeMcpConfig,
+  type CliTurnUsage,
   type RunningCliTurn,
 } from "./cli-agent-runner.js";
-import { CodexAppServerClient, type CodexNotification } from "./codex-client.js";
+import {
+  CodexAppServerClient,
+  extractCodexTokenUsage,
+  type CodexExtractedTokenUsage,
+  type CodexNotification,
+} from "./codex-client.js";
 import {
   createTaskWorktree,
   getGitHeadCommit,
@@ -116,6 +132,8 @@ interface ResponderLane {
   threadId: string;
   activeTurnId: string | null;
   activeAssistantMessageId: string | null;
+  activeModel?: string | null;
+  pendingUsage?: TokenUsage | null;
 }
 
 interface AgyResponderLane {
@@ -128,6 +146,7 @@ interface AgyResponderLane {
   hasStreamedText: boolean;
   syncPromise: Promise<void> | null;
   pendingTools: Map<string, string>;
+  pendingUsage?: NormalizedRawUsage | null;
 }
 
 interface InFlightMcpToolCall {
@@ -382,6 +401,9 @@ export class ConductorController {
   private defaultIntegrationMode: IntegrationMode = "feature-branch";
   private autoLandOnComplete = true;
   private preferredLanguage: PreferredLanguage = DEFAULT_PREFERRED_LANGUAGE;
+  private usageRecords: UsageRecord[] = [];
+  private readonly codexThreadLastTotalUsage = new Map<string, NormalizedRawUsage>();
+  private readonly codexWorkerPendingUsage = new Map<string, TokenUsage>();
   private lastErrorBanner: string | null = null;
   private readonly repoLandLocks = new Map<string, Promise<unknown>>();
   private readonly activeConflictResolveTaskIds = new Set<string>();
@@ -490,6 +512,7 @@ export class ConductorController {
       defaultIntegrationMode: this.defaultIntegrationMode,
       autoLandOnComplete: this.autoLandOnComplete,
       preferredLanguage: this.preferredLanguage,
+      usageRecords: this.usageRecords,
       lastErrorBanner: this.lastErrorBanner,
     };
   }
@@ -967,6 +990,120 @@ export class ConductorController {
     this.persist();
     this.broadcastSnapshot();
     this.refreshIdleOrchestratorLanes();
+  }
+
+  public clearUsageRecords(): void {
+    if (this.usageRecords.length === 0) return;
+    this.usageRecords = [];
+    this.persist();
+    this.broadcastSnapshot();
+  }
+
+  private recordTurnUsage(input: {
+    source: UsageSource;
+    provider: AgentProvider;
+    model?: string | null;
+    projectName?: string | null;
+    taskId?: string | null;
+    tokens: TokenUsage;
+    exactCostUsd?: number | null;
+  }): void {
+    const rec = createUsageRecord(input);
+    if (!rec) return;
+    this.usageRecords = appendUsageRecord(this.usageRecords, rec);
+    this.persist();
+    this.broadcastSnapshot();
+  }
+
+  private inferChatProjectName(assistantMessageId: string | null): string | null {
+    if (!assistantMessageId) return null;
+    const msg = this.messages.find((m) => m.id === assistantMessageId);
+    if (!msg) return null;
+    const names = new Set<string>();
+    for (const ref of msg.inferredMentions ?? []) {
+      if (ref.projectName) names.add(ref.projectName);
+    }
+    if (names.size === 0 && msg.replyToMessageId) {
+      const userMsg = this.messages.find((m) => m.id === msg.replyToMessageId);
+      for (const ref of userMsg?.mentions ?? []) {
+        if (ref.projectName) names.add(ref.projectName);
+      }
+    }
+    if (names.size === 1) {
+      return [...names][0];
+    }
+    return null;
+  }
+
+  private accumulateCodexUsage(
+    threadId: string,
+    currentPending: TokenUsage | null | undefined,
+    extracted: CodexExtractedTokenUsage,
+  ): TokenUsage | null {
+    let delta: TokenUsage | null = null;
+
+    if (extracted.total) {
+      const prevTotal = this.codexThreadLastTotalUsage.get(threadId);
+      if (prevTotal) {
+        delta = {
+          inputTokens: Math.max(0, extracted.total.inputTokens - prevTotal.inputTokens),
+          cachedInputTokens: Math.max(
+            0,
+            extracted.total.cachedInputTokens - prevTotal.cachedInputTokens,
+          ),
+          cacheCreationInputTokens: Math.max(
+            0,
+            extracted.total.cacheCreationInputTokens - prevTotal.cacheCreationInputTokens,
+          ),
+          outputTokens: Math.max(0, extracted.total.outputTokens - prevTotal.outputTokens),
+          reasoningTokens: Math.max(
+            0,
+            extracted.total.reasoningTokens - prevTotal.reasoningTokens,
+          ),
+        };
+      } else {
+        delta = extracted.last ?? extracted.total;
+      }
+      this.codexThreadLastTotalUsage.set(threadId, extracted.total);
+      if (this.codexThreadLastTotalUsage.size > 200) {
+        const oldestKey = this.codexThreadLastTotalUsage.keys().next().value;
+        if (oldestKey) this.codexThreadLastTotalUsage.delete(oldestKey);
+      }
+    } else if (extracted.last) {
+      delta = extracted.last;
+    } else if (extracted.direct && !currentPending) {
+      delta = extracted.direct;
+    }
+
+    if (!delta) return currentPending ?? null;
+
+    const deltaTotal =
+      delta.inputTokens +
+      delta.cachedInputTokens +
+      (delta.cacheCreationInputTokens ?? 0) +
+      delta.outputTokens;
+    if (deltaTotal === 0) return currentPending ?? null;
+
+    if (!currentPending) {
+      return {
+        inputTokens: delta.inputTokens,
+        cachedInputTokens: delta.cachedInputTokens,
+        ...(delta.cacheCreationInputTokens ? { cacheCreationInputTokens: delta.cacheCreationInputTokens } : {}),
+        outputTokens: delta.outputTokens,
+        ...(delta.reasoningTokens ? { reasoningTokens: delta.reasoningTokens } : {}),
+      };
+    }
+
+    const cacheCreate =
+      (currentPending.cacheCreationInputTokens ?? 0) + (delta.cacheCreationInputTokens ?? 0);
+    const reasoning = (currentPending.reasoningTokens ?? 0) + (delta.reasoningTokens ?? 0);
+    return {
+      inputTokens: currentPending.inputTokens + delta.inputTokens,
+      cachedInputTokens: currentPending.cachedInputTokens + delta.cachedInputTokens,
+      ...(cacheCreate > 0 ? { cacheCreationInputTokens: cacheCreate } : {}),
+      outputTokens: currentPending.outputTokens + delta.outputTokens,
+      ...(reasoning > 0 ? { reasoningTokens: reasoning } : {}),
+    };
   }
 
   private refreshIdleOrchestratorLanes(): void {
@@ -1479,16 +1616,25 @@ export class ConductorController {
       });
 
       const promptPayload = buildPromptForTurn(needsRebind);
+      const selectedModel = this.chatModel;
+      const laneBeforeStart = this.responderLanes.find((l) => l.threadId === threadId);
+      if (laneBeforeStart) {
+        laneBeforeStart.activeModel = selectedModel;
+        laneBeforeStart.pendingUsage = null;
+      }
       const turnId = await this.orchestratorClient.startTurn({
         threadId,
         text: promptPayload,
         imagePaths,
-        model: this.chatModel,
+        model: selectedModel,
         effort: this.chatEffort,
       });
 
       const lane = this.responderLanes.find((l) => l.threadId === threadId);
-      if (lane) lane.activeTurnId = turnId;
+      if (lane) {
+        lane.activeTurnId = turnId;
+        lane.activeModel = selectedModel;
+      }
       this.updateMessage(args.assistantMessageId, (m) => {
         m.responderTurnId = turnId;
       });
@@ -1595,6 +1741,7 @@ export class ConductorController {
         finalText: string;
         errorMessage?: string;
         interrupted?: boolean;
+        usage?: CliTurnUsage;
       }) => {
         this.activeCliResponders.delete(args.assistantMessageId);
         // If --resume failed before streaming anything, fall back cleanly with re-bound context
@@ -1610,6 +1757,16 @@ export class ConductorController {
         this.cleanupClaudeTurnMcpConfig(args.assistantMessageId);
         if (outcome.ok) {
           this.rebindContextNeeded.delete(rebindKey);
+        }
+        if (outcome.usage) {
+          this.recordTurnUsage({
+            source: "chat",
+            provider: "claude",
+            model: outcome.usage.model ?? this.chatModel ?? "claude",
+            projectName: this.inferChatProjectName(args.assistantMessageId),
+            tokens: outcome.usage,
+            exactCostUsd: outcome.usage.costUsd,
+          });
         }
         if (!outcome.ok && outcome.errorMessage && !outcome.interrupted) {
           this.updateMessage(args.assistantMessageId, (m) => {
@@ -2002,11 +2159,29 @@ export class ConductorController {
         this.broadcastSnapshot();
 
         const promptPayload = args.buildPrompt(needsRebind);
+        lane.pendingUsage = null;
         const result = await this.agyOrchestratorClient.prompt({
           sessionId: lane.sessionId,
           text: promptPayload,
           imagePaths: args.imagePaths,
         });
+
+        const agyUsage =
+          result.normalizedUsage ??
+          (result.usage ? normalizeRawTokenUsage(result.usage, "agy") : null) ??
+          lane.pendingUsage ??
+          null;
+        lane.pendingUsage = null;
+        if (agyUsage) {
+          this.recordTurnUsage({
+            source: "chat",
+            provider: "agy",
+            model: agyUsage.model ?? lane.currentModel ?? args.model ?? this.chatModel ?? "agy",
+            projectName: this.inferChatProjectName(args.assistantMessageId),
+            tokens: agyUsage,
+            exactCostUsd: agyUsage.costUsd,
+          });
+        }
 
         if (lane.cancelled) {
           void this.agyOrchestratorClient.closeSession(lane.sessionId);
@@ -2092,6 +2267,10 @@ export class ConductorController {
         this.broadcastSnapshot();
         break;
       }
+
+      case "usageUpdate":
+        lane.pendingUsage = parsed.usage;
+        break;
 
       default:
         break;
@@ -2210,6 +2389,7 @@ export class ConductorController {
     const msgId = lane.activeAssistantMessageId;
     lane.activeAssistantMessageId = null;
     lane.activeTurnId = null;
+    lane.pendingUsage = null;
     if (msgId) {
       this.finishAssistantMessage(msgId, fallbackText);
     }
@@ -2402,10 +2582,45 @@ export class ConductorController {
         break;
       }
 
-      case "turn/completed":
+      case "thread/tokenUsage/updated":
+      case "token_count":
+      case "codex/event/token_count": {
+        const extracted = extractCodexTokenUsage(notification);
+        if (extracted) {
+          const lane = this.responderLanes[laneIdx];
+          lane.pendingUsage = this.accumulateCodexUsage(
+            notification.threadId,
+            lane.pendingUsage,
+            extracted,
+          );
+        }
+        break;
+      }
+
+      case "turn/completed": {
+        const lane = this.responderLanes[laneIdx];
+        const completedUsage = extractCodexTokenUsage(notification);
+        if (completedUsage) {
+          lane.pendingUsage = this.accumulateCodexUsage(
+            notification.threadId,
+            lane.pendingUsage,
+            completedUsage,
+          );
+        }
+        if (lane.pendingUsage) {
+          this.recordTurnUsage({
+            source: "chat",
+            provider: "codex",
+            model: lane.activeModel ?? this.chatModel ?? "codex",
+            projectName: this.inferChatProjectName(messageId),
+            tokens: lane.pendingUsage,
+          });
+          lane.pendingUsage = null;
+        }
         this.releaseLane(laneIdx);
         void this.prewarmIdleLane();
         break;
+      }
 
       case "error": {
         if (notification.params.willRetry === true) return;
@@ -3543,6 +3758,7 @@ export class ConductorController {
 
     switch (notification.method) {
       case "turn/started":
+        this.codexWorkerPendingUsage.delete(taskId);
         this.updateTask(taskId, (t) => {
           t.status = "running";
           t.activeTurnId = notification.turnId;
@@ -3628,9 +3844,42 @@ export class ConductorController {
         break;
       }
 
+      case "thread/tokenUsage/updated":
+      case "token_count":
+      case "codex/event/token_count": {
+        const extracted = extractCodexTokenUsage(notification);
+        if (extracted) {
+          const nextPending = this.accumulateCodexUsage(
+            notification.threadId,
+            this.codexWorkerPendingUsage.get(taskId),
+            extracted,
+          );
+          if (nextPending) {
+            this.codexWorkerPendingUsage.set(taskId, nextPending);
+          }
+        }
+        break;
+      }
+
       case "turn/completed": {
         if (notification.turnId && task.activeTurnId && notification.turnId !== task.activeTurnId) {
           return;
+        }
+        const completedUsage = extractCodexTokenUsage(notification);
+        let turnUsage = this.codexWorkerPendingUsage.get(taskId) ?? null;
+        if (completedUsage) {
+          turnUsage = this.accumulateCodexUsage(notification.threadId, turnUsage, completedUsage);
+        }
+        this.codexWorkerPendingUsage.delete(taskId);
+        if (turnUsage) {
+          this.recordTurnUsage({
+            source: "worker",
+            provider: "codex",
+            model: task.workerModel ?? this.workerModel ?? "codex",
+            projectName: task.projectName,
+            taskId: task.id,
+            tokens: turnUsage,
+          });
         }
         const turnStatus = asString(asRecord(notification.params.turn)?.status) ?? "completed";
         const wasConflictResolveTurn = this.activeConflictResolveTaskIds.has(taskId);
@@ -5141,6 +5390,7 @@ export class ConductorController {
         finalText: string;
         errorMessage?: string;
         interrupted?: boolean;
+        usage?: CliTurnUsage;
       }) => {
         if (!this.isCurrentCliWorkerGeneration(args.taskId, generation)) {
           return;
@@ -5182,6 +5432,18 @@ export class ConductorController {
             startActivityTitle: `新規セッションで再開 (${label})`,
           });
           return;
+        }
+
+        if (outcome.usage) {
+          this.recordTurnUsage({
+            source: "worker",
+            provider: args.provider,
+            model: outcome.usage.model ?? args.model ?? args.provider,
+            projectName: args.project.name,
+            taskId: args.taskId,
+            tokens: outcome.usage,
+            exactCostUsd: outcome.usage.costUsd,
+          });
         }
 
         const wasConflictResolveTurn = this.activeConflictResolveTaskIds.has(args.taskId);
@@ -5359,6 +5621,7 @@ export class ConductorController {
     this.preferredLanguage = isValidPreferredLanguage(saved.preferredLanguage)
       ? saved.preferredLanguage
       : DEFAULT_PREFERRED_LANGUAGE;
+    this.usageRecords = normalizeUsageRecords(saved.usageRecords);
     this.browser.restore(saved.browserTabs, saved.activeBrowserTabId);
     if (normalized.changed || normalizedChats.changed || resumePrep.changed) {
       this.persist();
@@ -5393,6 +5656,7 @@ export class ConductorController {
       defaultIntegrationMode: this.defaultIntegrationMode,
       autoLandOnComplete: this.autoLandOnComplete,
       preferredLanguage: this.preferredLanguage,
+      usageRecords: this.usageRecords,
     });
   }
 

@@ -64,6 +64,7 @@ const api: ConductorAPI = {
     ipcRenderer.invoke("conductor:setProjectIntegrationMode", projectId, mode),
   setPreferredLanguage: (language: PreferredLanguage) =>
     ipcRenderer.invoke("conductor:setPreferredLanguage", language),
+  clearUsageRecords: () => ipcRenderer.invoke("conductor:clearUsageRecords"),
 
   updateTaskStatus: (taskId: string, status: AgentTaskStatus) =>
     ipcRenderer.invoke("conductor:updateTaskStatus", taskId, status),
