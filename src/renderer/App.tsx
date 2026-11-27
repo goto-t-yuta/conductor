@@ -1678,11 +1678,15 @@ export const App: React.FC = () => {
       const explicitScope = options?.projectId
         ? toProjectScopeKey(options.projectId, projects)
         : null;
+      const filePathProject = /^file:\/\//i.test(url.trim())
+        ? inferProjectFromFilePath(url, projects, tasks)
+        : null;
       const taskProject = inferProjectFromTask(options?.task, projects);
       const messageProject = inferProjectFromMessage(options?.message, projects, tasks);
 
       const targetScope: ProjectScopeKey =
         (explicitScope && explicitScope !== GENERAL_PROJECT_SCOPE ? explicitScope : null) ??
+        filePathProject?.id ??
         taskProject?.id ??
         messageProject?.id ??
         workspaceStateRef.current.activeProjectScope;
