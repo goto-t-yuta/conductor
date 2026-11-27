@@ -286,7 +286,6 @@ describe("TaskCard & TaskSidebar rendering and click isolation", () => {
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
       />,
     );
 
@@ -303,7 +302,6 @@ describe("TaskCard & TaskSidebar rendering and click isolation", () => {
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
       />,
     );
 

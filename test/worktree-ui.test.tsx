@@ -191,7 +191,6 @@ describe("Worktree & Settings UI", () => {
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
         onLandTask={vi.fn()}
         onResolveConflictWithAI={vi.fn()}
       />,
@@ -218,7 +217,6 @@ describe("Worktree & Settings UI", () => {
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
         onLandTask={vi.fn()}
         onResolveConflictWithAI={vi.fn()}
       />,
@@ -236,7 +234,6 @@ describe("Worktree & Settings UI", () => {
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
         onLandTask={vi.fn()}
         onResolveConflictWithAI={vi.fn()}
       />,

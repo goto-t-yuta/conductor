@@ -438,7 +438,6 @@ describe("Inline image & video rendering in MarkdownView, TaskEventCard, and Tas
         onOpenImage={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
         imageCache={imageCache}
         videoCache={videoCache}
       />,

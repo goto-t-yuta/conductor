@@ -297,7 +297,6 @@ describe("TaskInspectorModal tool execution log collapsing UI", () => {
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
       />,
     );
 
@@ -332,7 +331,6 @@ describe("TaskInspectorModal tool execution log collapsing UI", () => {
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
       />,
     );
 
@@ -363,7 +361,6 @@ describe("TaskInspectorModal tool execution log collapsing UI", () => {
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
       />,
     );
 

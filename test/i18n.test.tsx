@@ -389,7 +389,6 @@ describe("English UI rendering has zero leaked Japanese strings across all major
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
         onCleanupWorktree={vi.fn()}
       />,
     );
@@ -398,7 +397,7 @@ describe("English UI rendering has zero leaked Japanese strings across all major
     expect(inspectorHtml).toContain("Latest Worker Output");
     expect(inspectorHtml).toContain("Open in Browser");
     expect(inspectorHtml).toContain("Mention in chat");
-    expect(inspectorHtml).toContain("Delete");
+    expect(inspectorHtml).not.toContain("Delete");
     expect(inspectorHtml).toContain("Needs Review");
     expect(inspectorHtml).not.toMatch(JAPANESE_CHAR_RE);
 
