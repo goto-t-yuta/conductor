@@ -326,7 +326,7 @@ export function conductorMCPTools(): MCPToolDefinition[] {
           title: s("Short task title (written in Conductor's configured output language)"),
           summary: s("Short summary (written in Conductor's configured output language)"),
           prompt: s(
-            "Detailed coding/investigation instructions for the worker (for frontend/UI/style changes, the worker is automatically required to attach a screenshot or video via Markdown `![description](/abs/path/to/media.png)` in its completion report)",
+            "Detailed coding/investigation instructions for the worker (for frontend/UI/style changes, the worker is automatically required to attach a screenshot or video via Markdown `![description](/abs/path/to/media.png)` in its completion report; do not narrow or override the target repository's AGENTS.md/CLAUDE.md/GEMINI.md verification or deployment policy unless the user explicitly asks to exclude specific steps)",
           ),
           provider: s("Optional agent provider override: codex | agy | claude"),
           model: s("Optional model override"),
