@@ -705,7 +705,7 @@ export const UI_STRINGS = {
     "chat.settingsTitleWithUpdate": "設定（新しいアップデート {tag} があります）",
     "update.title": "アプリのアップデート",
     "update.desc":
-      "GitHub Releases（goto-t-yuta/conductor）から最新バージョンを確認・ダウンロードします。",
+      "GitHub Releases（goto-t-yuta/conductor）から最新バージョンを確認し、起動したままバックグラウンドで準備・ワンクリック適用できます。",
     "update.checkBtn": "アップデートを確認",
     "update.checkingBtn": "確認中...",
     "update.currentVersionLabel": "現在のバージョン",
@@ -714,24 +714,41 @@ export const UI_STRINGS = {
     "update.notCheckedYet": "未確認",
     "update.devModeBadge": "開発モード (pnpm dev)",
     "update.devModeHint":
-      "開発モードで実行中です。最新リリースの確認やインストーラーのダウンロード動作はそのままテストできます。",
+      "開発モードで実行中のため、アプリ本体の上書き適用は無効化されています。アップデート確認やバックグラウンドでのダウンロード・展開検証はテスト可能ですが、差し替えと再起動はパッケージ版（Conductor.app）でのみ実行されます。",
     "update.statusAvailable": "アップデートあり",
     "update.statusUpToDate": "最新です",
     "update.statusDownloading": "ダウンロード中",
+    "update.statusStaging": "展開・検証中",
+    "update.statusReadyToInstall": "適用準備完了",
+    "update.statusInstalling": "再起動中",
     "update.statusDownloaded": "ダウンロード完了",
     "update.statusError": "確認エラー",
     "update.upToDateMessage": "お使いの Conductor は最新バージョンです。",
     "update.releaseNotesTitle": "リリースノート抜粋",
-    "update.selectedAssetLabel": "対象インストーラー",
+    "update.selectedAssetLabel": "対象パッケージ",
+    "update.targetAppPathLabel": "更新対象アプリ",
     "update.noAssetForPlatform":
       "現在の環境 ({platform}) 向けの自動選択アセットが見つかりませんでした。リリースページから手動でダウンロードしてください。",
+    "update.prepareUpdateBtn": "今すぐアップデートを準備",
+    "update.prepareHintMac":
+      "アプリを終了せず裏でダウンロード・展開・検証まで完了します。完了後は好きなタイミングでワンクリック再起動して適用できます。",
+    "update.restartAndUpdateBtn": "再起動して今すぐ適用",
+    "update.restartingBtn": "再起動して適用中…",
+    "update.applyOnQuitLabel": "アプリの通常終了時に自動で適用する",
+    "update.applyOnQuitHint":
+      "今すぐ再起動しない場合でも、次回 Conductor を終了した際に最新版へ自動で差し替えます。",
     "update.downloadAndOpenBtn": "今すぐダウンロードして開く",
     "update.openReleasePageBtn": "リリースページを開く",
-    "update.cancelDownloadBtn": "ダウンロード中止",
+    "update.cancelDownloadBtn": "準備を中止",
     "update.openInstallerBtn": "インストーラーを開く",
     "update.showInFolderBtn": "フォルダで表示",
-    "update.downloadingProgress": "ダウンロード中… {percent}% ({downloaded} / {total})",
-    "update.downloadingProgressIndeterminate": "ダウンロード中… {downloaded}",
+    "update.downloadingProgress": "バックグラウンドでダウンロード中… {percent}% ({downloaded} / {total})",
+    "update.downloadingProgressIndeterminate": "バックグラウンドでダウンロード中… {downloaded}",
+    "update.stagingProgress": "バックグラウンドで展開・検証中…（このまま作業を続けられます）",
+    "update.readyToInstallHint":
+      "最新版 ({tag}) の展開・検証が完了しました。「再起動して今すぐ適用」を押すと数秒で差し替え・再起動が完了します（手動コマンド不要）。",
+    "update.readyToInstallDevModeHint":
+      "最新版 ({tag}) の展開・検証が完了しました（開発モードのため、アプリ本体の上書き・再起動は無効化されています）。",
     "update.downloadedOpenedHint":
       "インストーラーを開きました。案内に従ってインストールを完了してください。",
     "update.downloadedManualHint":
@@ -745,12 +762,22 @@ export const UI_STRINGS = {
       "GitHub API のレート制限に達しました。しばらく待ってから再確認するか、リリースページを開いてください。",
     "update.errorNoRelease": "公開済みのリリースがまだ見つかりませんでした。",
     "update.errorDownloadFailed":
-      "インストーラーのダウンロードに失敗しました。再試行するか、リリースページから直接ダウンロードしてください。",
+      "アップデートのダウンロードに失敗しました。既存のアプリは変更されていません。再試行するか、リリースページから直接ダウンロードしてください。",
+    "update.errorStagingFailed":
+      "アップデートパッケージの展開または検証に失敗しました。既存のアプリは変更されていません。再試行するか、リリースページから手動でダウンロードしてください。",
+    "update.errorInstallFailed":
+      "アップデートの適用を開始できませんでした。既存のアプリは変更されていません。書き込み権限を確認するか、リリースページから手動で更新してください。",
+    "update.errorDevModeBlocked":
+      "開発モード (!app.isPackaged) では、誤上書き防止のため自動適用を無効化しています。",
     "update.errorOpenFailed":
       "インストーラーを自動で開けませんでした。フォルダで表示して手動で起動してください。",
     "update.bannerAvailable": "新しいバージョン {tag} が利用可能です",
-    "update.bannerDownloading": "アップデート ({tag}) をダウンロード中… {percent}%",
-    "update.bannerDownloadingIndeterminate": "アップデート ({tag}) をダウンロード中…",
+    "update.bannerDownloading": "アップデート ({tag}) を裏でダウンロード中… {percent}%",
+    "update.bannerDownloadingIndeterminate": "アップデート ({tag}) を裏でダウンロード中…",
+    "update.bannerStaging": "アップデート ({tag}) をバックグラウンドで展開・検証中…",
+    "update.bannerReadyToInstall": "アップデート ({tag}) の適用準備が完了しました",
+    "update.bannerReadyApplyOnQuitSuffix": "（終了時に自動適用）",
+    "update.bannerInstalling": "アップデート ({tag}) を適用するため再起動しています…",
     "update.bannerDownloaded": "アップデート ({tag}) のダウンロードが完了しました",
     "update.bannerDetailsBtn": "詳細",
     "update.bannerDismissAria": "アップデート通知を閉じる",
@@ -1377,7 +1404,7 @@ export const UI_STRINGS = {
     "chat.settingsTitleWithUpdate": "Settings (Update {tag} available)",
     "update.title": "App Updates",
     "update.desc":
-      "Check for and download the latest Conductor releases from GitHub Releases (goto-t-yuta/conductor).",
+      "Check for the latest Conductor releases from GitHub Releases (goto-t-yuta/conductor), prepare updates in the background, and apply with one click.",
     "update.checkBtn": "Check for Updates",
     "update.checkingBtn": "Checking...",
     "update.currentVersionLabel": "Current Version",
@@ -1386,24 +1413,41 @@ export const UI_STRINGS = {
     "update.notCheckedYet": "Not checked yet",
     "update.devModeBadge": "Dev Mode (pnpm dev)",
     "update.devModeHint":
-      "Running in development mode. You can still check releases and test downloading installers.",
+      "Running in development mode. Automatic app replacement is disabled to prevent accidental overwrites. You can still check releases and test background download & staging; applying and restarting is only enabled in packaged builds (Conductor.app).",
     "update.statusAvailable": "Update Available",
     "update.statusUpToDate": "Up to Date",
     "update.statusDownloading": "Downloading",
+    "update.statusStaging": "Preparing",
+    "update.statusReadyToInstall": "Ready to Apply",
+    "update.statusInstalling": "Restarting",
     "update.statusDownloaded": "Ready to Install",
     "update.statusError": "Check Error",
     "update.upToDateMessage": "You are running the latest version of Conductor.",
     "update.releaseNotesTitle": "Release Notes",
-    "update.selectedAssetLabel": "Installer Asset",
+    "update.selectedAssetLabel": "Update Package",
+    "update.targetAppPathLabel": "Target App Bundle",
     "update.noAssetForPlatform":
       "No matching installer asset was found for your environment ({platform}). Please download manually from the release page.",
+    "update.prepareUpdateBtn": "Prepare Update Now",
+    "update.prepareHintMac":
+      "Downloads, extracts, and verifies in the background while you keep working. Restart whenever you are ready to apply.",
+    "update.restartAndUpdateBtn": "Restart & Update Now",
+    "update.restartingBtn": "Restarting to Update…",
+    "update.applyOnQuitLabel": "Apply automatically when quitting Conductor",
+    "update.applyOnQuitHint":
+      "If you keep working now, the staged update will swap cleanly the next time you quit Conductor.",
     "update.downloadAndOpenBtn": "Download & Open",
     "update.openReleasePageBtn": "Open Release Page",
-    "update.cancelDownloadBtn": "Cancel Download",
+    "update.cancelDownloadBtn": "Cancel Preparation",
     "update.openInstallerBtn": "Open Installer",
     "update.showInFolderBtn": "Show in Folder",
-    "update.downloadingProgress": "Downloading… {percent}% ({downloaded} / {total})",
-    "update.downloadingProgressIndeterminate": "Downloading… {downloaded}",
+    "update.downloadingProgress": "Downloading in background… {percent}% ({downloaded} / {total})",
+    "update.downloadingProgressIndeterminate": "Downloading in background… {downloaded}",
+    "update.stagingProgress": "Extracting and verifying in the background… (you can keep working)",
+    "update.readyToInstallHint":
+      "Version {tag} is extracted and verified. Click \"Restart & Update Now\" to swap and relaunch in a few seconds with no manual commands.",
+    "update.readyToInstallDevModeHint":
+      "Version {tag} was extracted and verified in staging (app replacement and restart are disabled in Dev Mode).",
     "update.downloadedOpenedHint":
       "Installer opened. Follow the prompts to finish installing the update.",
     "update.downloadedManualHint":
@@ -1417,12 +1461,22 @@ export const UI_STRINGS = {
       "GitHub API rate limit reached. Please wait and retry, or open the release page directly.",
     "update.errorNoRelease": "No published release was found yet.",
     "update.errorDownloadFailed":
-      "Failed to download the installer. Retry or download directly from the release page.",
+      "Failed to download the update. Your existing app was not modified. Retry or download directly from the release page.",
+    "update.errorStagingFailed":
+      "Failed to extract or verify the update package. Your existing app was not modified. Retry or download directly from the release page.",
+    "update.errorInstallFailed":
+      "Could not start applying the update. Your existing app was not modified. Check write permissions or update manually from the release page.",
+    "update.errorDevModeBlocked":
+      "Automatic replacement is blocked in development mode (!app.isPackaged) to prevent accidental overwrites.",
     "update.errorOpenFailed":
       "Could not open the installer automatically. Reveal it in your folder to launch it manually.",
     "update.bannerAvailable": "New version {tag} is available",
-    "update.bannerDownloading": "Downloading update ({tag})… {percent}%",
-    "update.bannerDownloadingIndeterminate": "Downloading update ({tag})…",
+    "update.bannerDownloading": "Downloading update ({tag}) in background… {percent}%",
+    "update.bannerDownloadingIndeterminate": "Downloading update ({tag}) in background…",
+    "update.bannerStaging": "Preparing update ({tag}) in background…",
+    "update.bannerReadyToInstall": "Update ({tag}) is ready to apply",
+    "update.bannerReadyApplyOnQuitSuffix": " (applies on quit)",
+    "update.bannerInstalling": "Restarting to apply update ({tag})…",
     "update.bannerDownloaded": "Update ({tag}) downloaded and ready",
     "update.bannerDetailsBtn": "Details",
     "update.bannerDismissAria": "Dismiss update notification",

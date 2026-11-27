@@ -189,6 +189,7 @@ interface UnifiedChatProps {
   onOpenDownloadedUpdate?: () => void;
   onShowDownloadedUpdateInFolder?: () => void;
   onOpenUpdateReleasePage?: (url?: string) => void;
+  onInstallAndRestartUpdate?: () => void;
 }
 
 export const UnifiedChat: React.FC<UnifiedChatProps> = React.memo(({
@@ -252,6 +253,7 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = React.memo(({
   onOpenDownloadedUpdate,
   onShowDownloadedUpdateInFolder,
   onOpenUpdateReleasePage,
+  onInstallAndRestartUpdate,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const contentContainerRef = useRef<HTMLDivElement>(null);
@@ -648,14 +650,23 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = React.memo(({
         !updateBannerDismissed &&
         (appUpdate.status === "available" ||
           appUpdate.status === "downloading" ||
+          appUpdate.status === "staging" ||
+          appUpdate.status === "ready_to_install" ||
+          appUpdate.status === "installing" ||
           appUpdate.status === "downloaded") && (
           <div
             data-testid="app-update-banner"
-            className="flex items-center gap-2 px-4 py-1.5 text-[11.5px] bg-indigo-500/8 dark:bg-indigo-500/12 text-indigo-700 dark:text-indigo-200 border-b border-indigo-500/20 shrink-0"
+            className={`flex items-center gap-2 px-4 py-1.5 text-[11.5px] border-b shrink-0 ${
+              appUpdate.status === "ready_to_install" || appUpdate.status === "installing"
+                ? "bg-emerald-500/10 dark:bg-emerald-500/12 text-emerald-800 dark:text-emerald-200 border-emerald-500/25"
+                : "bg-indigo-500/8 dark:bg-indigo-500/12 text-indigo-700 dark:text-indigo-200 border-indigo-500/20"
+            }`}
           >
-            {appUpdate.status === "downloading" ? (
+            {appUpdate.status === "downloading" ||
+            appUpdate.status === "staging" ||
+            appUpdate.status === "installing" ? (
               <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin text-indigo-500" />
-            ) : appUpdate.status === "downloaded" ? (
+            ) : appUpdate.status === "ready_to_install" || appUpdate.status === "downloaded" ? (
               <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
             ) : (
               <Download className="w-3.5 h-3.5 shrink-0 text-indigo-500" />
@@ -672,13 +683,29 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = React.memo(({
                   : t(activeLocale, "update.bannerDownloadingIndeterminate", {
                       tag: appUpdate.latestRelease.tagName,
                     })
-                : appUpdate.status === "downloaded"
-                  ? t(activeLocale, "update.bannerDownloaded", {
+                : appUpdate.status === "staging"
+                  ? t(activeLocale, "update.bannerStaging", {
                       tag: appUpdate.latestRelease.tagName,
                     })
-                  : t(activeLocale, "update.bannerAvailable", {
-                      tag: appUpdate.latestRelease.tagName,
-                    })}
+                  : appUpdate.status === "ready_to_install"
+                    ? `${t(activeLocale, "update.bannerReadyToInstall", {
+                        tag: appUpdate.stagedVersionTag ?? appUpdate.latestRelease.tagName,
+                      })}${
+                        appUpdate.applyOnQuit && appUpdate.canSelfUpdate && !appUpdate.isDevMode
+                          ? t(activeLocale, "update.bannerReadyApplyOnQuitSuffix")
+                          : ""
+                      }`
+                    : appUpdate.status === "installing"
+                      ? t(activeLocale, "update.bannerInstalling", {
+                          tag: appUpdate.stagedVersionTag ?? appUpdate.latestRelease.tagName,
+                        })
+                      : appUpdate.status === "downloaded"
+                        ? t(activeLocale, "update.bannerDownloaded", {
+                            tag: appUpdate.latestRelease.tagName,
+                          })
+                        : t(activeLocale, "update.bannerAvailable", {
+                            tag: appUpdate.latestRelease.tagName,
+                          })}
             </span>
 
             <div className="flex items-center gap-1.5 shrink-0">
@@ -692,9 +719,26 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = React.memo(({
                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
                   >
                     <Download className="w-3 h-3" />
-                    <span>{t(activeLocale, "update.downloadAndOpenBtn")}</span>
+                    <span>
+                      {appUpdate.platform === "darwin"
+                        ? t(activeLocale, "update.prepareUpdateBtn")
+                        : t(activeLocale, "update.downloadAndOpenBtn")}
+                    </span>
                   </button>
                 )}
+
+              {appUpdate.status === "ready_to_install" && onInstallAndRestartUpdate && (
+                <button
+                  type="button"
+                  data-testid="app-update-banner-restart-btn"
+                  disabled={!appUpdate.canSelfUpdate || appUpdate.isDevMode}
+                  onClick={onInstallAndRestartUpdate}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors cursor-pointer"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>{t(activeLocale, "update.restartAndUpdateBtn")}</span>
+                </button>
+              )}
 
               {appUpdate.status === "downloaded" && onOpenDownloadedUpdate && (
                 <button
@@ -741,7 +785,10 @@ export const UnifiedChat: React.FC<UnifiedChatProps> = React.memo(({
                 </button>
               )}
 
-              {onDismissUpdateBanner && appUpdate.status !== "downloading" && (
+              {onDismissUpdateBanner &&
+                appUpdate.status !== "downloading" &&
+                appUpdate.status !== "staging" &&
+                appUpdate.status !== "installing" && (
                 <button
                   type="button"
                   data-testid="app-update-banner-dismiss-btn"
@@ -1342,12 +1389,19 @@ const UnifiedChatHeader: React.FC<UnifiedChatHeaderProps> = React.memo(({
               {appUpdate &&
                 (appUpdate.updateAvailable ||
                   appUpdate.status === "downloading" ||
+                  appUpdate.status === "staging" ||
+                  appUpdate.status === "ready_to_install" ||
+                  appUpdate.status === "installing" ||
                   appUpdate.status === "downloaded") && (
                   <span
                     data-testid="settings-update-badge"
                     aria-hidden="true"
                     className={`absolute top-1 right-1 w-2 h-2 rounded-full ring-2 ring-white dark:ring-[#0f1115] ${
-                      appUpdate.status === "downloaded" ? "bg-emerald-500" : "bg-indigo-500"
+                      appUpdate.status === "ready_to_install" ||
+                      appUpdate.status === "installing" ||
+                      appUpdate.status === "downloaded"
+                        ? "bg-emerald-500"
+                        : "bg-indigo-500"
                     }`}
                   />
                 )}

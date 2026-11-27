@@ -643,6 +643,8 @@ export interface ConductorAPI {
   updaterOpenDownloaded(): Promise<{ ok: boolean; error?: string }>;
   updaterShowInFolder(): Promise<{ ok: boolean; error?: string }>;
   updaterOpenReleasePage(url?: string): Promise<void>;
+  updaterInstallAndRestart(): Promise<{ ok: boolean; cancelled?: boolean; error?: string }>;
+  updaterSetApplyOnQuit(enabled: boolean): Promise<AppUpdateState>;
   onUpdaterStateChanged(listener: (state: AppUpdateState) => void): () => void;
 
   getPathForFile(file: File): string;
