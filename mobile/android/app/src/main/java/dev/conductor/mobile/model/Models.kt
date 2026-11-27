@@ -98,6 +98,7 @@ data class ApiActionResponse(
     val error: String? = null,
     val action: String? = null,
     val prUrl: String? = null,
+    val snapshot: AppSnapshot? = null,
 )
 
 @Serializable
@@ -229,4 +230,16 @@ enum class StreamTransportState {
     CONNECTED_SSE,
     CONNECTED_POLLING,
     ERROR,
+}
+
+enum class ThemeMode(val storageValue: String, val label: String) {
+    SYSTEM("system", "System"),
+    LIGHT("light", "Light"),
+    DARK("dark", "Dark"),
+    ;
+
+    companion object {
+        fun fromStorageValue(raw: String?): ThemeMode =
+            entries.firstOrNull { it.storageValue.equals(raw?.trim(), ignoreCase = true) } ?: SYSTEM
+    }
 }

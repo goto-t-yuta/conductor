@@ -1,11 +1,15 @@
 package dev.conductor.mobile.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,28 +27,29 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.AlternateEmail
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.AssistChip
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.InputChip
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,20 +60,34 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.conductor.mobile.model.AgentTask
 import dev.conductor.mobile.model.AppSnapshot
 import dev.conductor.mobile.model.ChatMessage
 import dev.conductor.mobile.model.ExplicitMentionTarget
 import dev.conductor.mobile.model.Project
 import dev.conductor.mobile.model.StreamTransportState
-import dev.conductor.mobile.ui.theme.ConductorAmber
-import dev.conductor.mobile.ui.theme.ConductorEmerald
-import dev.conductor.mobile.ui.theme.ConductorIndigo
-import dev.conductor.mobile.ui.theme.ConductorRed
+import dev.conductor.mobile.model.ToolActivityChip
+import dev.conductor.mobile.ui.components.ConductorCard
+import dev.conductor.mobile.ui.components.ConductorMarkdown
+import dev.conductor.mobile.ui.components.MarkdownVariant
+import dev.conductor.mobile.ui.components.MentionBadgeChip
+import dev.conductor.mobile.ui.components.ProjectPill
+import dev.conductor.mobile.ui.components.TaskCodeBadge
+import dev.conductor.mobile.ui.components.TaskStatusBadge
+import dev.conductor.mobile.ui.components.formatProviderLabel
+import dev.conductor.mobile.ui.components.parseConductorHexColor
+import dev.conductor.mobile.ui.components.transportStatusColor
+import dev.conductor.mobile.ui.theme.ConductorTheme
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -85,205 +104,124 @@ fun ChatScreen(
     onStopAll: () -> Unit,
     onStopMessage: (String) -> Unit,
     onNewChat: () -> Unit,
+    onOpenTask: (String) -> Unit,
 ) {
+    val colors = ConductorTheme.colors
     val messages = snapshot?.messages.orEmpty()
     val projects = snapshot?.projects.orEmpty()
     val tasks = snapshot?.tasks.orEmpty()
+    val tasksById = remember(tasks) { tasks.associateBy { it.id } }
+    val projectsById = remember(projects) { projects.associateBy { it.id } }
     val activeResponders = snapshot?.activeResponderCount ?: 0
     val listState = rememberLazyListState()
     var showMentionSheet by remember { mutableStateOf(false) }
 
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length) {
+    LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
+            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val nearBottom = messages.size <= 2 || lastVisibleIndex >= messages.lastIndex - 2
+            if (nearBottom) {
+                listState.scrollToItem(messages.lastIndex)
+            }
+        }
+    }
+
+    LaunchedEffect(messages.lastOrNull()?.id, messages.lastOrNull()?.text?.length) {
+        if (messages.isNotEmpty()) {
+            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val nearBottom = lastVisibleIndex >= messages.lastIndex - 1
+            if (nearBottom) {
+                listState.scrollToItem(messages.lastIndex)
+            }
         }
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(colors.canvas)
             .imePadding(),
     ) {
-        TopAppBar(
-            title = {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(transportDotColor(transportState)),
-                    )
-                    Column {
-                        Text(
-                            text = "Conductor Chat",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            text = buildSubtitle(snapshot, transportState),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-            },
-            actions = {
-                if (activeResponders > 0) {
-                    TextButton(onClick = onStopAll) {
-                        Icon(
-                            imageVector = Icons.Default.Stop,
-                            contentDescription = "すべて停止",
-                            tint = ConductorRed,
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("停止", color = ConductorRed)
-                    }
-                }
-                IconButton(onClick = onNewChat) {
-                    Icon(
-                        imageVector = Icons.Default.AddComment,
-                        contentDescription = "新しいチャット",
-                    )
-                }
-            },
+        // Desktop-aligned flat header: status dot + Conductor brand + provider pill + actions
+        ChatHeaderBar(
+            snapshot = snapshot,
+            transportState = transportState,
+            activeResponders = activeResponders,
+            onStopAll = onStopAll,
+            onNewChat = onNewChat,
         )
 
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+        // Error banner (if desktop reported one)
+        val errorBanner = snapshot?.lastErrorBanner
+        if (!errorBanner.isNullOrBlank()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(colors.roseBg)
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.WarningAmber,
+                    contentDescription = null,
+                    tint = colors.rose,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    text = errorBanner,
+                    fontSize = 12.sp,
+                    color = colors.roseText,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            HorizontalDivider(thickness = 1.dp, color = colors.roseBorder)
+        }
 
-        // Message stream
+        // Message stream or welcome empty state
         if (messages.isEmpty()) {
-            Box(
+            EmptyChatWelcome(
+                isSyncing = snapshot == null,
+                projectCount = projects.size,
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
-                    .padding(24.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = if (snapshot == null) "サーバーから同期中..." else "メッセージはまだありません",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "@ ボタンでプロジェクトやタスクを指定して指示を送れます。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+                    .fillMaxWidth(),
+            )
         } else {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
             ) {
                 items(messages, key = { it.id }) { msg ->
-                    ChatMessageItem(
+                    val linkedTask = msg.relatedTaskId?.let { tasksById[it] }
+                    val linkedProject = linkedTask?.projectId?.let { projectsById[it] }
+                    ChatMessageRow(
                         message = msg,
+                        linkedTask = linkedTask,
+                        linkedProjectColorHex = linkedProject?.colorHex,
                         onStop = { onStopMessage(msg.id) },
+                        onOpenTask = onOpenTask,
                     )
                 }
             }
         }
 
-        // Composer section
-        Surface(
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 2.dp,
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                if (selectedMentions.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        selectedMentions.forEach { mention ->
-                            InputChip(
-                                selected = true,
-                                onClick = { onRemoveMention(mention) },
-                                label = {
-                                    Text(
-                                        text = mention.chipLabel(),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                },
-                                trailingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "削除",
-                                        modifier = Modifier.size(14.dp),
-                                    )
-                                },
-                            )
-                        }
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.Bottom,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    IconButton(onClick = { showMentionSheet = true }) {
-                        Icon(
-                            imageVector = Icons.Default.AlternateEmail,
-                            contentDescription = "@メンション追加",
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-
-                    OutlinedTextField(
-                        value = composerText,
-                        onValueChange = onComposerTextChange,
-                        modifier = Modifier.weight(1f),
-                        placeholder = { Text("Conductor に指示を送る...") },
-                        maxLines = 4,
-                        shape = RoundedCornerShape(16.dp),
-                    )
-
-                    FilledIconButton(
-                        onClick = onSend,
-                        enabled = composerText.isNotBlank() && !isSending,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = ConductorIndigo,
-                            contentColor = Color.White,
-                        ),
-                    ) {
-                        if (isSending) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                color = Color.White,
-                                strokeWidth = 2.dp,
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Send,
-                                contentDescription = "送信",
-                            )
-                        }
-                    }
-                }
-            }
-        }
+        // Desktop-aligned floating rounded composer
+        ChatComposerBar(
+            composerText = composerText,
+            selectedMentions = selectedMentions,
+            isSending = isSending,
+            onComposerTextChange = onComposerTextChange,
+            onOpenMentionPicker = { showMentionSheet = true },
+            onRemoveMention = onRemoveMention,
+            onSend = onSend,
+        )
     }
 
     if (showMentionSheet) {
@@ -300,135 +238,874 @@ fun ChatScreen(
 }
 
 @Composable
-private fun ChatMessageItem(
-    message: ChatMessage,
-    onStop: () -> Unit,
+private fun ChatHeaderBar(
+    snapshot: AppSnapshot?,
+    transportState: StreamTransportState,
+    activeResponders: Int,
+    onStopAll: () -> Unit,
+    onNewChat: () -> Unit,
 ) {
-    val isUser = message.role == "user"
-    val isSystem = message.role == "system" || message.role == "taskEvent"
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = when {
-            isUser -> Arrangement.End
-            isSystem -> Arrangement.Center
-            else -> Arrangement.Start
-        },
-    ) {
-        val bgColor = when {
-            isUser -> ConductorIndigo
-            isSystem -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-            else -> MaterialTheme.colorScheme.surface
-        }
-        val textColor = when {
-            isUser -> Color.White
-            isSystem -> MaterialTheme.colorScheme.onSurfaceVariant
-            else -> MaterialTheme.colorScheme.onSurface
-        }
-
-        Surface(
-            color = bgColor,
-            shape = RoundedCornerShape(
-                topStart = 16.dp,
-                topEnd = 16.dp,
-                bottomStart = if (isUser) 16.dp else 4.dp,
-                bottomEnd = if (isUser) 4.dp else 16.dp,
-            ),
-            tonalElevation = if (isUser) 0.dp else 1.dp,
-            modifier = Modifier.widthIn(max = if (isSystem) 340.dp else 310.dp),
+    val colors = ConductorTheme.colors
+    Column(modifier = Modifier.background(colors.canvas)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp),
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(transportStatusColor(transportState)),
+            )
+
+            Text(
+                text = "Conductor",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.textPrimary,
+                maxLines = 1,
+            )
+
+            // Provider & transport status pill
+            val transportLabel = when (transportState) {
+                StreamTransportState.CONNECTED_SSE -> "Live"
+                StreamTransportState.CONNECTED_POLLING -> "Polling"
+                StreamTransportState.CONNECTING -> "接続中"
+                StreamTransportState.ERROR -> "エラー"
+                StreamTransportState.DISCONNECTED -> "未接続"
+            }
+            val providerLabel = snapshot?.chatProvider?.let { formatProviderLabel(it) }
+            Surface(
+                color = colors.surfaceSubtle,
+                shape = RoundedCornerShape(99.dp),
+                border = BorderStroke(1.dp, colors.borderSubtle),
             ) {
-                // Header / streaming indicator / mentions
-                if (!isUser && !isSystem) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Bolt,
+                        contentDescription = null,
+                        tint = colors.amber,
+                        modifier = Modifier.size(12.dp),
+                    )
+                    if (providerLabel != null) {
+                        Text(
+                            text = providerLabel,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.indigoText,
+                            maxLines = 1,
+                        )
+                        Text(
+                            text = "·",
+                            fontSize = 11.sp,
+                            color = colors.textSubtle,
+                        )
+                    }
+                    Text(
+                        text = transportLabel,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.textMuted,
+                        maxLines = 1,
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            if (activeResponders > 0) {
+                Surface(
+                    color = colors.indigoBg,
+                    shape = RoundedCornerShape(99.dp),
+                    border = BorderStroke(1.dp, colors.indigoBorder),
+                ) {
                     Row(
+                        modifier = Modifier
+                            .clickable(onClick = onStopAll)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(11.dp),
+                            strokeWidth = 1.6.dp,
+                            color = colors.indigo,
+                        )
+                        Text(
+                            text = "${activeResponders}件",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = colors.indigoText,
+                        )
+                        Text(
+                            text = "停止",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.roseText,
+                        )
+                    }
+                }
+            }
+
+            IconButton(
+                onClick = onNewChat,
+                modifier = Modifier.size(34.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AddComment,
+                    contentDescription = "新しいチャット",
+                    tint = colors.textMuted,
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+        }
+        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
+    }
+}
+
+@Composable
+private fun EmptyChatWelcome(
+    isSyncing: Boolean,
+    projectCount: Int,
+    modifier: Modifier = Modifier,
+) {
+    val colors = ConductorTheme.colors
+    Box(
+        modifier = modifier.padding(horizontal = 28.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(54.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(colors.indigoBg)
+                    .border(1.dp, colors.indigoBorder, RoundedCornerShape(16.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    tint = colors.indigo,
+                    modifier = Modifier.size(26.dp),
+                )
+            }
+
+            Text(
+                text = if (isSyncing) "サーバーと同期中..." else "Conductor へようこそ",
+                fontSize = 19.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.textPrimary,
+                textAlign = TextAlign.Center,
+            )
+
+            Text(
+                text = "複数のリポジトリやタスクを横断して指示できます。下の @ ボタンからプロジェクトや T# タスクを指定できます。",
+                fontSize = 13.sp,
+                lineHeight = 20.sp,
+                color = colors.textMuted,
+                textAlign = TextAlign.Center,
+            )
+
+            if (!isSyncing) {
+                Surface(
+                    color = colors.surfaceSubtle,
+                    shape = RoundedCornerShape(99.dp),
+                    border = BorderStroke(1.dp, colors.borderSubtle),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text(
-                            text = (message.provider ?: "conductor").uppercase(),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(colors.emerald),
                         )
-                        if (message.isStreaming) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(11.dp),
-                                strokeWidth = 1.8.dp,
+                        Text(
+                            text = if (projectCount > 0) {
+                                "${projectCount} 件のプロジェクトを接続中"
+                            } else {
+                                "プロジェクトをスキャン中..."
+                            },
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = colors.textSecondary,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatMessageRow(
+    message: ChatMessage,
+    linkedTask: AgentTask?,
+    linkedProjectColorHex: String?,
+    onStop: () -> Unit,
+    onOpenTask: (String) -> Unit,
+) {
+    when (message.role) {
+        "user" -> UserMessageItem(message = message)
+        "taskEvent" -> TaskEventCard(
+            message = message,
+            linkedTask = linkedTask,
+            projectColorHex = linkedProjectColorHex,
+            onOpenTask = onOpenTask,
+        )
+
+        "system" -> SystemMessageItem(message = message)
+        else -> AssistantMessageItem(message = message, onStop = onStop)
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun UserMessageItem(message: ChatMessage) {
+    val colors = ConductorTheme.colors
+    val allMentions = remember(message.mentions, message.inferredMentions) {
+        (message.mentions + message.inferredMentions).distinctBy {
+            "${it.kind}:${it.taskId ?: it.projectId ?: it.projectName}:${it.taskNumber}"
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.End,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (allMentions.isNotEmpty() || message.attachments.isNotEmpty()) {
+            FlowRow(
+                modifier = Modifier.widthIn(max = 320.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.End),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                allMentions.forEach { ref ->
+                    MentionBadgeChip(mention = ref)
+                }
+                message.attachments.forEach { att ->
+                    Surface(
+                        color = colors.surfaceSubtle,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, colors.border),
+                    ) {
+                        Text(
+                            text = att.label.ifBlank { att.kind },
+                            fontSize = 11.sp,
+                            color = colors.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        // Desktop-aligned soft indigo tinted user bubble (bg-indigo-500/12 dark:bg-indigo-500/20)
+        Surface(
+            color = colors.userBubbleBg,
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, colors.userBubbleBorder),
+            modifier = Modifier.widthIn(max = 316.dp),
+        ) {
+            ConductorMarkdown(
+                markdown = message.text,
+                variant = MarkdownVariant.USER_BUBBLE,
+                textColor = colors.textPrimary,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AssistantMessageItem(
+    message: ChatMessage,
+    onStop: () -> Unit,
+) {
+    val colors = ConductorTheme.colors
+    var showReasoning by remember(message.id) { mutableStateOf(false) }
+    var expandTools by remember(message.id) { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // Desktop-aligned Conductor avatar mark + provider tag + streaming controls
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(22.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(colors.indigoBg),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    tint = colors.indigo,
+                    modifier = Modifier.size(13.dp),
+                )
+            }
+
+            Text(
+                text = "Conductor",
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.textSecondary,
+            )
+
+            if (!message.provider.isNullOrBlank()) {
+                Text(
+                    text = "· ${formatProviderLabel(message.provider)}",
+                    fontSize = 12.sp,
+                    color = colors.textSubtle,
+                )
+            }
+
+            if (message.isStreaming) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(12.dp),
+                    strokeWidth = 1.6.dp,
+                    color = colors.indigo,
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Surface(
+                    color = colors.roseBg,
+                    shape = RoundedCornerShape(6.dp),
+                    border = BorderStroke(1.dp, colors.roseBorder),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(onClick = onStop),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Stop,
+                            contentDescription = "停止",
+                            tint = colors.rose,
+                            modifier = Modifier.size(11.dp),
+                        )
+                        Text(
+                            text = "停止",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.roseText,
+                        )
+                    }
+                }
+            }
+        }
+
+        // Collapsible reasoning summary (desktop parity)
+        if (!message.reasoningSummary.isNullOrBlank()) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { showReasoning = !showReasoning }
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = if (showReasoning) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = colors.textSubtle,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(
+                        text = "思考プロセス",
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.textMuted,
+                    )
+                }
+                if (showReasoning) {
+                    Surface(
+                        color = colors.surfaceSecondary,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, colors.borderSubtle),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = message.reasoningSummary,
+                            fontSize = 12.sp,
+                            lineHeight = 18.sp,
+                            color = colors.textMuted,
+                            modifier = Modifier.padding(10.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        // Tool activity chips (collapsible summary when > 3 chips)
+        if (message.toolChips.isNotEmpty()) {
+            val collapsible = !message.isStreaming && message.toolChips.size > 3
+            val displayedChips = if (collapsible && !expandTools) {
+                message.toolChips.takeLast(2)
+            } else {
+                message.toolChips
+            }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (collapsible) {
+                    val hiddenCount = message.toolChips.size - 2
+                    Surface(
+                        color = colors.surfaceSubtle,
+                        shape = RoundedCornerShape(99.dp),
+                        border = BorderStroke(1.dp, colors.border),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(99.dp))
+                            .clickable { expandTools = !expandTools },
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = colors.emerald,
+                                modifier = Modifier.size(12.dp),
                             )
                             Text(
-                                text = "応答中...",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Spacer(modifier = Modifier.weight(1f))
-                            Text(
-                                text = "停止",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = ConductorRed,
-                                modifier = Modifier.clickable(onClick = onStop),
+                                text = if (expandTools) "ツール履歴を折りたたむ" else "+${hiddenCount}件のツール実行",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = colors.textSecondary,
                             )
                         }
                     }
                 }
+                displayedChips.forEach { chip ->
+                    ToolActivityPill(chip = chip)
+                }
+            }
+        }
 
-                if (message.mentions.isNotEmpty()) {
+        // Rich Markdown body
+        if (message.text.isNotBlank()) {
+            ConductorMarkdown(
+                markdown = message.text,
+                variant = MarkdownVariant.DEFAULT,
+                textColor = colors.textPrimary,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        } else if (message.isStreaming) {
+            Text(
+                text = "応答を準備中...",
+                fontSize = 13.sp,
+                color = colors.textSubtle,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ToolActivityPill(chip: ToolActivityChip) {
+    val colors = ConductorTheme.colors
+    Surface(
+        color = colors.surfaceSubtle,
+        shape = RoundedCornerShape(99.dp),
+        border = BorderStroke(1.dp, colors.borderSubtle),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            when {
+                chip.isError -> Icon(
+                    imageVector = Icons.Default.Cancel,
+                    contentDescription = null,
+                    tint = colors.rose,
+                    modifier = Modifier.size(12.dp),
+                )
+
+                chip.isCompleted -> Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = colors.emerald,
+                    modifier = Modifier.size(12.dp),
+                )
+
+                else -> CircularProgressIndicator(
+                    modifier = Modifier.size(11.dp),
+                    strokeWidth = 1.6.dp,
+                    color = colors.indigo,
+                )
+            }
+            Text(
+                text = chip.label,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = colors.textSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TaskEventCard(
+    message: ChatMessage,
+    linkedTask: AgentTask?,
+    projectColorHex: String?,
+    onOpenTask: (String) -> Unit,
+) {
+    val colors = ConductorTheme.colors
+    val isDone = linkedTask?.status == "done"
+    val borderColor = if (isDone) colors.emeraldBorder else colors.indigoBorder
+    val bgColor = if (isDone) {
+        colors.emerald.copy(alpha = if (colors.isDark) 0.08f else 0.05f)
+    } else {
+        colors.indigo.copy(alpha = if (colors.isDark) 0.10f else 0.06f)
+    }
+    val dividerColor = if (isDone) colors.emerald.copy(alpha = 0.18f) else colors.indigo.copy(alpha = 0.18f)
+    val targetTaskId = linkedTask?.id ?: message.relatedTaskId
+
+    Surface(
+        color = bgColor,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, borderColor),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(13.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
+            // Task event header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Notifications,
+                    contentDescription = null,
+                    tint = if (isDone) colors.emerald else colors.indigo,
+                    modifier = Modifier.size(15.dp),
+                )
+                if (linkedTask != null) {
+                    TaskCodeBadge(taskNumber = linkedTask.taskNumber)
+                    Text(
+                        text = linkedTask.title,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TaskStatusBadge(status = linkedTask.status)
+                } else {
+                    Text(
+                        text = "タスク通知",
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.textPrimary,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+
+            if (linkedTask != null) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    ProjectPill(name = linkedTask.projectName, colorHex = projectColorHex)
+                    if (linkedTask.isUnlandedWorktree && linkedTask.status != "running") {
+                        Surface(
+                            color = colors.amberBg,
+                            shape = RoundedCornerShape(99.dp),
+                        ) {
+                            Text(
+                                text = "未反映",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.amberText,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(thickness = 1.dp, color = dividerColor)
+
+            ConductorMarkdown(
+                markdown = message.text,
+                variant = MarkdownVariant.COMPACT,
+                textColor = colors.textPrimary,
+            )
+
+            if (targetTaskId != null) {
+                Surface(
+                    color = colors.card,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, colors.border),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onOpenTask(targetTaskId) },
+                ) {
                     Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        message.mentions.forEach { ref ->
+                        if (linkedTask != null) {
+                            Text(
+                                text = "T${linkedTask.taskNumber}",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.indigoText,
+                            )
+                        }
+                        Text(
+                            text = "タスク詳細を開く",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = colors.textPrimary,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SystemMessageItem(message: ChatMessage) {
+    val colors = ConductorTheme.colors
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            color = colors.surfaceSecondary,
+            shape = RoundedCornerShape(10.dp),
+            border = BorderStroke(1.dp, colors.borderSubtle),
+        ) {
+            ConductorMarkdown(
+                markdown = message.text,
+                variant = MarkdownVariant.COMPACT,
+                textColor = colors.textMuted,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChatComposerBar(
+    composerText: String,
+    selectedMentions: List<ExplicitMentionTarget>,
+    isSending: Boolean,
+    onComposerTextChange: (String) -> Unit,
+    onOpenMentionPicker: () -> Unit,
+    onRemoveMention: (ExplicitMentionTarget) -> Unit,
+    onSend: () -> Unit,
+) {
+    val colors = ConductorTheme.colors
+    var isFocused by remember { mutableStateOf(false) }
+    val canSend = composerText.isNotBlank() && !isSending
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.canvas),
+    ) {
+        HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
+        Surface(
+            color = colors.composer,
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(
+                width = 1.dp,
+                color = if (isFocused) colors.indigo.copy(alpha = 0.65f) else colors.border,
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                // Selected @mention chips inside composer
+                if (selectedMentions.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(start = 10.dp, end = 10.dp, top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        selectedMentions.forEach { mention ->
+                            val isTask = mention.kind == "task"
                             Surface(
-                                color = if (isUser) {
-                                    Color.White.copy(alpha = 0.2f)
-                                } else {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                },
-                                shape = RoundedCornerShape(99.dp),
+                                color = if (isTask) colors.indigoBg else colors.surfaceSubtle,
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isTask) colors.indigoBorder else colors.border,
+                                ),
                             ) {
-                                Text(
-                                    text = ref.displayLabel(),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (isUser) Color.White else MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
-                                )
+                                Row(
+                                    modifier = Modifier
+                                        .clickable { onRemoveMention(mention) }
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                ) {
+                                    if (!isTask) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(6.dp)
+                                                .clip(CircleShape)
+                                                .background(parseConductorHexColor(mention.projectColorHex)),
+                                        )
+                                    }
+                                    Text(
+                                        text = mention.chipLabel(),
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = if (isTask) colors.indigoText else colors.textPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.widthIn(max = 180.dp),
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "削除",
+                                        tint = colors.textMuted,
+                                        modifier = Modifier.size(13.dp),
+                                    )
+                                }
                             }
                         }
                     }
                 }
 
-                if (message.toolChips.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                // Clean borderless input field
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 14.dp, end = 14.dp, top = 11.dp, bottom = 6.dp),
+                ) {
+                    if (composerText.isEmpty()) {
+                        Text(
+                            text = "Conductor に指示を送る...",
+                            fontSize = 14.sp,
+                            color = colors.textSubtle,
+                        )
+                    }
+                    BasicTextField(
+                        value = composerText,
+                        onValueChange = onComposerTextChange,
+                        textStyle = TextStyle(
+                            color = colors.textPrimary,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp,
+                        ),
+                        cursorBrush = SolidColor(colors.indigo),
+                        maxLines = 5,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onFocusChanged { isFocused = it.isFocused },
+                    )
+                }
+
+                // Bottom composer toolbar: @ mention pill on left, circular indigo send arrow on right
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 10.dp, end = 10.dp, bottom = 8.dp, top = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Surface(
+                        color = colors.surfaceSubtle,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, colors.borderSubtle),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(onClick = onOpenMentionPicker),
                     ) {
-                        message.toolChips.takeLast(4).forEach { chip ->
-                            AssistChip(
-                                onClick = {},
-                                label = {
-                                    Text(
-                                        text = chip.label,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        maxLines = 1,
-                                    )
-                                },
+                        Row(
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AlternateEmail,
+                                contentDescription = "@メンション追加",
+                                tint = colors.indigoText,
+                                modifier = Modifier.size(14.dp),
+                            )
+                            Text(
+                                text = "メンション",
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = colors.textSecondary,
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(if (canSend) colors.indigoAction else colors.surfaceSubtle)
+                            .clickable(enabled = canSend, onClick = onSend),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (isSending) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.ArrowUpward,
+                                contentDescription = "送信",
+                                tint = if (canSend) Color.White else colors.textSubtle,
+                                modifier = Modifier.size(18.dp),
                             )
                         }
                     }
                 }
-
-                Text(
-                    text = message.text.ifBlank { if (message.isStreaming) "思考中..." else "" },
-                    style = if (isSystem) {
-                        MaterialTheme.typography.bodySmall
-                    } else {
-                        MaterialTheme.typography.bodyMedium
-                    },
-                    color = textColor,
-                )
             }
         }
     }
@@ -442,10 +1119,12 @@ private fun MentionPickerSheet(
     onDismiss: () -> Unit,
     onSelect: (ExplicitMentionTarget) -> Unit,
 ) {
+    val colors = ConductorTheme.colors
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
+        containerColor = colors.canvas,
     ) {
         LazyColumn(
             modifier = Modifier
@@ -457,36 +1136,38 @@ private fun MentionPickerSheet(
             item {
                 Text(
                     text = "@ メンションを追加",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.textPrimary,
                 )
             }
 
             if (projects.isNotEmpty()) {
                 item {
                     Text(
-                        text = "プロジェクト",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = "PROJECTS",
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.6.sp,
+                        color = colors.textMuted,
+                        modifier = Modifier.padding(top = 4.dp),
                     )
                 }
                 items(projects, key = { "p-${it.id}" }) { project ->
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                onSelect(
-                                    ExplicitMentionTarget(
-                                        kind = "project",
-                                        projectId = project.id,
-                                        projectName = project.name,
-                                        projectPath = project.path,
-                                        projectColorHex = project.colorHex,
-                                    ),
-                                )
-                            },
+                    ConductorCard(
+                        cornerRadius = 12.dp,
+                        onClick = {
+                            onSelect(
+                                ExplicitMentionTarget(
+                                    kind = "project",
+                                    projectId = project.id,
+                                    projectName = project.name,
+                                    projectPath = project.path,
+                                    projectColorHex = project.colorHex,
+                                ),
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -495,21 +1176,23 @@ private fun MentionPickerSheet(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(10.dp)
+                                    .size(9.dp)
                                     .clip(CircleShape)
-                                    .background(parseHexColor(project.colorHex)),
+                                    .background(parseConductorHexColor(project.colorHex)),
                             )
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = "@${project.name}",
-                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontSize = 13.5.sp,
                                     fontWeight = FontWeight.SemiBold,
+                                    color = colors.textPrimary,
                                 )
                                 if (project.path.isNotBlank()) {
                                     Text(
                                         text = project.path,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = colors.textMuted,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
@@ -522,49 +1205,57 @@ private fun MentionPickerSheet(
 
             if (tasks.isNotEmpty()) {
                 item {
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "タスク",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = "TASKS",
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.6.sp,
+                        color = colors.textMuted,
                     )
                 }
                 items(tasks, key = { "t-${it.id}" }) { task ->
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                onSelect(
-                                    ExplicitMentionTarget(
-                                        kind = "task",
-                                        taskId = task.id,
-                                        taskNumber = task.taskNumber,
-                                        taskTitle = task.title,
-                                        taskStatus = task.status,
-                                        projectId = task.projectId,
-                                        projectName = task.projectName,
-                                    ),
-                                )
-                            },
+                    ConductorCard(
+                        cornerRadius = 12.dp,
+                        onClick = {
+                            onSelect(
+                                ExplicitMentionTarget(
+                                    kind = "task",
+                                    taskId = task.id,
+                                    taskNumber = task.taskNumber,
+                                    taskTitle = task.title,
+                                    taskStatus = task.status,
+                                    projectId = task.projectId,
+                                    projectName = task.projectName,
+                                ),
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Column(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Text(
-                                text = "@T${task.taskNumber} ${task.title}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                text = "${task.projectName} · ${task.status}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                            TaskCodeBadge(taskNumber = task.taskNumber)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = task.title,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = colors.textPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = task.projectName,
+                                    fontSize = 11.sp,
+                                    color = colors.textMuted,
+                                )
+                            }
+                            TaskStatusBadge(status = task.status)
                         }
                     }
                 }
@@ -573,28 +1264,4 @@ private fun MentionPickerSheet(
     }
 }
 
-private fun transportDotColor(state: StreamTransportState): Color = when (state) {
-    StreamTransportState.CONNECTED_SSE -> ConductorEmerald
-    StreamTransportState.CONNECTED_POLLING, StreamTransportState.CONNECTING -> ConductorAmber
-    StreamTransportState.ERROR -> ConductorRed
-    StreamTransportState.DISCONNECTED -> Color.Gray
-}
-
-private fun buildSubtitle(snapshot: AppSnapshot?, state: StreamTransportState): String {
-    val transport = when (state) {
-        StreamTransportState.CONNECTED_SSE -> "Live SSE"
-        StreamTransportState.CONNECTED_POLLING -> "Polling"
-        StreamTransportState.CONNECTING -> "接続中..."
-        StreamTransportState.ERROR -> "接続エラー"
-        StreamTransportState.DISCONNECTED -> "未接続"
-    }
-    val provider = snapshot?.chatProvider?.uppercase()
-    return if (provider != null) "$transport · $provider" else transport
-}
-
-internal fun parseHexColor(hex: String?): Color {
-    if (hex.isNullOrBlank()) return ConductorIndigo
-    return runCatching {
-        Color(android.graphics.Color.parseColor(hex))
-    }.getOrDefault(ConductorIndigo)
-}
+internal fun parseHexColor(hex: String?): Color = parseConductorHexColor(hex)

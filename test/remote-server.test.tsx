@@ -12,6 +12,7 @@ import {
   RemoteBridgeServer,
   buildConductorConnectUri,
   buildConductorLinkUri,
+  buildRemoteSnapshot,
   detectTailscaleIpv4FromInterfaces,
   detectTailscaleNetwork,
   isTailscaleIpv4,
@@ -769,6 +770,271 @@ describe("RemoteBridgeServer HTTP & SSE API", () => {
     // Unknown task -> 404
     const missing = await fetch(`${baseUrl}/api/tasks/does-not-exist`, { headers: authHeaders });
     expect(missing.status).toBe(404);
+  });
+
+  it("projects lightweight remote snapshots, supports gzip, and returns snapshot on chat actions", async () => {
+    const bigBase64 = `data:image/png;base64,${"A".repeat(200_000)}`;
+    const hugeOutput = "x".repeat(8_000) + "FINAL_MARKER";
+    const heavyTask = makeTask({
+      id: "t-heavy",
+      latestOutput: hugeOutput,
+      workerPrompt: "P".repeat(50_000),
+      activities: Array.from({ length: 40 }, (_, i) => ({
+        id: `act-${i}`,
+        kind: "command",
+        title: `step ${i}`,
+        detail: "D".repeat(2_000),
+        timestamp: new Date().toISOString(),
+      })),
+    });
+
+    let currentSnapshot: AppSnapshot = {
+      ...makeSnapshot([heavyTask]),
+      messages: [
+        {
+          id: "m-1",
+          role: "user",
+          text: "スクショを見て",
+          attachments: [
+            {
+              id: "att-img",
+              kind: "image",
+              label: "capture.png",
+              imagePath: "/tmp/capture.png",
+              imageDataUrl: bigBase64,
+              metadataText: "M".repeat(50_000),
+            },
+          ],
+          toolChips: [],
+          isStreaming: false,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      browserTabs: [
+        {
+          id: "tab-1",
+          title: "Preview",
+          url: "http://localhost:3000",
+          isLoading: false,
+          canGoBack: false,
+          canGoForward: false,
+          consoleErrorCount: 0,
+          networkErrorCount: 0,
+        },
+      ],
+      remoteAccessToken: "secret-should-not-be-in-snapshot",
+    };
+
+    const projected = buildRemoteSnapshot(currentSnapshot);
+    const projectedJson = JSON.stringify(projected);
+    expect(projectedJson.length).toBeLessThan(10_000);
+    expect(projectedJson).not.toContain("AAAA");
+    expect(projectedJson).not.toContain("secret-should-not-be-in-snapshot");
+    expect(projectedJson).not.toContain("browserTabs");
+    expect(projectedJson).toContain("FINAL_MARKER");
+    const projTasks = projected.tasks as Array<{ activities: unknown[]; latestOutput: string }>;
+    expect(projTasks[0].activities).toEqual([]);
+    expect(projTasks[0].latestOutput.length).toBeLessThanOrEqual(3_000);
+
+    const mock = createMockBridgeController([heavyTask]);
+    const customController: RemoteBridgeController = {
+      ...mock.controller,
+      getSnapshot: () => currentSnapshot,
+      sendMessage: async (payload) => {
+        await mock.controller.sendMessage(payload);
+        currentSnapshot = {
+          ...currentSnapshot,
+          activeResponderCount: 1,
+          messages: [
+            ...currentSnapshot.messages,
+            {
+              id: "m-user-2",
+              role: "user",
+              text: payload.text,
+              attachments: payload.attachments,
+              toolChips: [],
+              isStreaming: false,
+              createdAt: new Date().toISOString(),
+            },
+            {
+              id: "m-asst-2",
+              role: "assistant",
+              provider: "codex",
+              text: "",
+              attachments: [],
+              toolChips: [],
+              isStreaming: true,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        };
+      },
+    };
+
+    const server = new RemoteBridgeServer(customController, {
+      host: "127.0.0.1",
+      port: 0,
+      token: "remote-opt-token-1234567890abcdef",
+      sseThrottleMs: 120,
+      detectNetwork: () => ({ tailscaleIp: null, magicDnsName: null, lanIp: "127.0.0.1" }),
+    });
+    activeServers.push(server);
+    await server.start();
+    const baseUrl = `http://127.0.0.1:${server.getPort()}`;
+    const authHeaders = {
+      Authorization: `Bearer ${server.getToken()}`,
+      "Content-Type": "application/json",
+    };
+
+    // GET /api/snapshot returns gzip-compressed lightweight snapshot when accepted
+    const snapRes = await fetch(`${baseUrl}/api/snapshot`, {
+      headers: { Authorization: `Bearer ${server.getToken()}`, "Accept-Encoding": "gzip" },
+    });
+    expect(snapRes.status).toBe(200);
+    expect(snapRes.headers.get("content-encoding")).toBe("gzip");
+    const snapBody = (await snapRes.json()) as AppSnapshot & { remoteAccessToken?: string };
+    expect(snapBody.remoteAccessToken).toBeUndefined();
+    expect(snapBody.messages[0].attachments[0].imageDataUrl).toBeUndefined();
+
+    // POST /api/chat/send immediately includes the updated lightweight snapshot
+    const sendRes = await fetch(`${baseUrl}/api/chat/send`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ text: "こんにちは" }),
+    });
+    expect(sendRes.status).toBe(200);
+    const sendJson = (await sendRes.json()) as { ok: boolean; snapshot?: AppSnapshot };
+    expect(sendJson.ok).toBe(true);
+    expect(sendJson.snapshot?.activeResponderCount).toBe(1);
+    expect(sendJson.snapshot?.messages.map((m) => m.id)).toContain("m-asst-2");
+  });
+
+  it("deduplicates desktop-only updates and throttles rapid SSE streaming deltas while flushing completion immediately", async () => {
+    const baseSnap = makeSnapshot([makeTask()]);
+    let snap: AppSnapshot = {
+      ...baseSnap,
+      activeResponderCount: 1,
+      messages: [
+        {
+          id: "m-stream",
+          role: "assistant",
+          provider: "codex",
+          text: "",
+          attachments: [],
+          toolChips: [],
+          isStreaming: true,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    };
+
+    const mock = createMockBridgeController([makeTask()]);
+    const server = new RemoteBridgeServer(
+      { ...mock.controller, getSnapshot: () => snap },
+      {
+        host: "127.0.0.1",
+        port: 0,
+        token: "sse-throttle-token-1234567890abcd",
+        sseThrottleMs: 120,
+        detectNetwork: () => ({ tailscaleIp: null, magicDnsName: null, lanIp: "127.0.0.1" }),
+      },
+    );
+    activeServers.push(server);
+    await server.start();
+    const baseUrl = `http://127.0.0.1:${server.getPort()}`;
+
+    const parsedSnapshots = await new Promise<AppSnapshot[]>((resolve, reject) => {
+      const received: AppSnapshot[] = [];
+      let buffer = "";
+      let pushedBursts = false;
+      const req = http.get(
+        `${baseUrl}/api/events?token=${encodeURIComponent(server.getToken())}`,
+        (res) => {
+          res.setEncoding("utf8");
+          res.on("data", (chunk: string) => {
+            buffer += chunk;
+            const parts = buffer.split("\n\n");
+            buffer = parts.pop() ?? "";
+            for (const part of parts) {
+              const dataLine = part
+                .split("\n")
+                .find((line) => line.startsWith("data: "));
+              if (!dataLine) continue;
+              const parsed = JSON.parse(dataLine.slice("data: ".length)) as AppSnapshot;
+              received.push(parsed);
+
+              if (!pushedBursts) {
+                pushedBursts = true;
+                // 1. Desktop-only change (browserTabs) should be deduplicated and NOT sent
+                server.publishSnapshot({
+                  ...snap,
+                  browserTabs: [
+                    {
+                      id: "b1",
+                      title: "Tab",
+                      url: "https://example.com",
+                      isLoading: true,
+                      canGoBack: false,
+                      canGoForward: false,
+                      consoleErrorCount: 0,
+                      networkErrorCount: 0,
+                    },
+                  ],
+                });
+
+                // 2. Rapid streaming text burst (10 deltas within same tick) should coalesce
+                for (let i = 1; i <= 10; i++) {
+                  snap = {
+                    ...snap,
+                    messages: [
+                      {
+                        ...snap.messages[0],
+                        text: `chunk-${i}`,
+                      },
+                    ],
+                  };
+                  server.publishSnapshot(snap);
+                }
+
+                // 3. After throttle window delivers coalesced delta, send final completion
+                setTimeout(() => {
+                  snap = {
+                    ...snap,
+                    activeResponderCount: 0,
+                    messages: [
+                      {
+                        ...snap.messages[0],
+                        text: "final-answer",
+                        isStreaming: false,
+                      },
+                    ],
+                  };
+                  server.publishSnapshot(snap);
+                }, 180);
+              } else if (parsed.activeResponderCount === 0 && parsed.messages[0]?.text === "final-answer") {
+                req.destroy();
+                resolve(received);
+              }
+            }
+          });
+        },
+      );
+      req.on("error", (err) => {
+        if (received.every((s) => s.activeResponderCount !== 0)) reject(err);
+      });
+      setTimeout(() => {
+        req.destroy();
+        reject(new Error(`Timed out waiting for throttled SSE snapshots (got ${received.length})`));
+      }, 3000);
+    });
+
+    // Initial + coalesced burst (1-2 frames, far fewer than 11) + final completion
+    expect(parsedSnapshots.length).toBeLessThanOrEqual(4);
+    expect(parsedSnapshots.length).toBeGreaterThanOrEqual(3);
+    const last = parsedSnapshots[parsedSnapshots.length - 1];
+    expect(last.activeResponderCount).toBe(0);
+    expect(last.messages[0].text).toBe("final-answer");
+    expect(last.messages[0].isStreaming).toBe(false);
   });
 });
 

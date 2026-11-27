@@ -13,18 +13,25 @@ import dev.conductor.mobile.model.ConnectionConfig
 import dev.conductor.mobile.model.ExplicitMentionTarget
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.TaskDetailResponse
+import dev.conductor.mobile.model.ThemeMode
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class ConductorUiState(
     val isLoaded: Boolean = false,
     val config: ConnectionConfig = ConnectionConfig(),
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    val groupTasksByProject: Boolean = false,
     val transportState: StreamTransportState = StreamTransportState.DISCONNECTED,
     val transportDetail: String = "未接続",
     val snapshot: AppSnapshot? = null,
@@ -49,27 +56,62 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     val uiState: StateFlow<ConductorUiState> = _uiState.asStateFlow()
 
     private var streamJob: Job? = null
+    private var streamingSyncJob: Job? = null
+    private var activeSyncConfig: ConnectionConfig? = null
+    private var lastSnapshotReceivedAtMs: Long = 0L
+    private val reconnectSignal = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     init {
         viewModelScope.launch {
-            store.configFlow.collect { saved ->
-                val prev = _uiState.value.config
-                _uiState.update { it.copy(isLoaded = true, config = saved) }
-                if (saved.isConfigured) {
-                    if (saved != prev || streamJob == null) {
-                        startRealtimeSync(saved)
-                    }
-                } else {
-                    stopRealtimeSync()
-                    _uiState.update {
-                        it.copy(
-                            transportState = StreamTransportState.DISCONNECTED,
-                            transportDetail = "未接続",
-                            snapshot = null,
-                        )
+            store.themeModeFlow
+                .distinctUntilChanged()
+                .collect { mode ->
+                    _uiState.update { it.copy(themeMode = mode) }
+                }
+        }
+        viewModelScope.launch {
+            store.groupTasksByProjectFlow
+                .distinctUntilChanged()
+                .collect { grouped ->
+                    _uiState.update { it.copy(groupTasksByProject = grouped) }
+                }
+        }
+        viewModelScope.launch {
+            store.configFlow
+                .distinctUntilChanged()
+                .collect { saved ->
+                    val prev = _uiState.value.config
+                    _uiState.update { it.copy(isLoaded = true, config = saved) }
+                    if (saved.isConfigured) {
+                        if (saved != prev || streamJob?.isActive != true) {
+                            startRealtimeSync(saved)
+                        }
+                    } else {
+                        stopRealtimeSync()
+                        _uiState.update {
+                            it.copy(
+                                transportState = StreamTransportState.DISCONNECTED,
+                                transportDetail = "未接続",
+                                snapshot = null,
+                            )
+                        }
                     }
                 }
-            }
+        }
+    }
+
+    fun setThemeMode(mode: ThemeMode) {
+        _uiState.update { it.copy(themeMode = mode) }
+        viewModelScope.launch {
+            store.saveThemeMode(mode)
+        }
+    }
+
+    fun toggleGroupTasksByProject() {
+        val next = !_uiState.value.groupTasksByProject
+        _uiState.update { it.copy(groupTasksByProject = next) }
+        viewModelScope.launch {
+            store.saveGroupTasksByProject(next)
         }
     }
 
@@ -81,6 +123,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
             return false
         }
         viewModelScope.launch {
+            val sameConfig = parsed == _uiState.value.config
             store.save(parsed)
             _uiState.update {
                 it.copy(
@@ -89,7 +132,9 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                     bannerMessage = "デスクトップとリンクしました (${parsed.serverUrl})",
                 )
             }
-            startRealtimeSync(parsed)
+            if (sameConfig) {
+                startRealtimeSync(parsed)
+            }
         }
         return true
     }
@@ -129,9 +174,12 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
         viewModelScope.launch {
+            val sameConfig = normalized == _uiState.value.config
             store.save(normalized)
             _uiState.update { it.copy(lastTestResult = null, bannerMessage = "接続設定を保存しました") }
-            startRealtimeSync(normalized)
+            if (sameConfig) {
+                startRealtimeSync(normalized)
+            }
         }
     }
 
@@ -140,6 +188,23 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         if (!cfg.isConfigured) return
         startRealtimeSync(cfg)
         _uiState.update { it.copy(bannerMessage = "再接続しています...") }
+    }
+
+    fun onAppForegrounded() {
+        val cfg = _uiState.value.config
+        if (!cfg.isConfigured) return
+        val transport = _uiState.value.transportState
+        val staleMs = System.currentTimeMillis() - lastSnapshotReceivedAtMs
+        if (transport != StreamTransportState.CONNECTED_SSE || staleMs > 25_000L) {
+            viewModelScope.launch {
+                api.fetchSnapshot(cfg).onSuccess { snap ->
+                    applyIncomingSnapshot(snap, fromSse = false)
+                }
+            }
+            if (transport != StreamTransportState.CONNECTED_SSE) {
+                nudgeRealtimeSync(cfg)
+            }
+        }
     }
 
     fun disconnect() {
@@ -163,12 +228,72 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     private fun stopRealtimeSync() {
         streamJob?.cancel()
         streamJob = null
+        streamingSyncJob?.cancel()
+        streamingSyncJob = null
+        activeSyncConfig = null
+    }
+
+    private fun nudgeRealtimeSync(config: ConnectionConfig) {
+        if (streamJob?.isActive == true && activeSyncConfig == config) {
+            reconnectSignal.tryEmit(Unit)
+        } else {
+            startRealtimeSync(config)
+        }
+    }
+
+    private fun applyIncomingSnapshot(snap: AppSnapshot, fromSse: Boolean) {
+        lastSnapshotReceivedAtMs = System.currentTimeMillis()
+        _uiState.update { state ->
+            state.copy(
+                snapshot = snap,
+                transportState = if (fromSse) StreamTransportState.CONNECTED_SSE else state.transportState,
+                transportDetail = if (fromSse) "SSE リアルタイム接続中" else state.transportDetail,
+            )
+        }
+        val hasStreaming = snap.activeResponderCount > 0 || snap.messages.any { it.isStreaming }
+        if (hasStreaming) {
+            val cfg = activeSyncConfig ?: _uiState.value.config
+            if (cfg.isConfigured) {
+                ensureStreamingSync(cfg)
+            }
+        } else {
+            streamingSyncJob?.cancel()
+            streamingSyncJob = null
+        }
+    }
+
+    /**
+     * Safety net while an assistant response is actively streaming:
+     * if SSE stalls or is temporarily reconnecting, poll /api/snapshot so responses always appear promptly.
+     */
+    private fun ensureStreamingSync(config: ConnectionConfig) {
+        if (streamingSyncJob?.isActive == true) return
+        streamingSyncJob = viewModelScope.launch {
+            while (isActive) {
+                delay(1_500L)
+                val current = _uiState.value.snapshot
+                val stillStreaming = current == null ||
+                    current.activeResponderCount > 0 ||
+                    current.messages.any { it.isStreaming }
+                if (!stillStreaming) break
+
+                val sinceLastMs = System.currentTimeMillis() - lastSnapshotReceivedAtMs
+                val sseConnected = _uiState.value.transportState == StreamTransportState.CONNECTED_SSE
+                if (!sseConnected || sinceLastMs >= 2_500L) {
+                    api.fetchSnapshot(config).onSuccess { snap ->
+                        applyIncomingSnapshot(snap, fromSse = false)
+                    }
+                }
+            }
+            streamingSyncJob = null
+        }
     }
 
     private fun startRealtimeSync(config: ConnectionConfig) {
         stopRealtimeSync()
+        activeSyncConfig = config
         streamJob = viewModelScope.launch {
-            var backoffMs = 1_500L
+            var backoffMs = 1_000L
             while (isActive) {
                 _uiState.update {
                     it.copy(
@@ -177,16 +302,14 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                 }
 
-                // Initial snapshot fetch for immediate UI responsiveness
-                api.fetchSnapshot(config).onSuccess { snap ->
-                    _uiState.update { it.copy(snapshot = snap) }
-                }
-
                 var unauthorized = false
+                var receivedSnapshotInSession = false
+                // Server immediately pushes the initial snapshot on SSE connect,
+                // avoiding a duplicate full /api/snapshot transfer before opening SSE.
                 api.openSnapshotSse(config).collect { event ->
                     when (event) {
                         is SseEvent.Opened -> {
-                            backoffMs = 1_500L
+                            backoffMs = 1_000L
                             _uiState.update {
                                 it.copy(
                                     transportState = StreamTransportState.CONNECTED_SSE,
@@ -196,14 +319,9 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         }
 
                         is SseEvent.SnapshotReceived -> {
-                            backoffMs = 1_500L
-                            _uiState.update {
-                                it.copy(
-                                    snapshot = event.snapshot,
-                                    transportState = StreamTransportState.CONNECTED_SSE,
-                                    transportDetail = "SSE リアルタイム接続中",
-                                )
-                            }
+                            backoffMs = 1_000L
+                            receivedSnapshotInSession = true
+                            applyIncomingSnapshot(event.snapshot, fromSse = true)
                         }
 
                         is SseEvent.Disconnected -> {
@@ -230,9 +348,9 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                 // Fallback poll once before retrying SSE
                 api.fetchSnapshot(config)
                     .onSuccess { snap ->
+                        applyIncomingSnapshot(snap, fromSse = false)
                         _uiState.update {
                             it.copy(
-                                snapshot = snap,
                                 transportState = StreamTransportState.CONNECTED_POLLING,
                                 transportDetail = "ポーリング同期中（SSE 再接続待機）",
                             )
@@ -247,7 +365,10 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                     }
 
-                delay(backoffMs)
+                val waitMs = if (receivedSnapshotInSession) 1_000L else backoffMs
+                withTimeoutOrNull(waitMs) {
+                    reconnectSignal.first()
+                }
                 backoffMs = (backoffMs * 2).coerceAtMost(8_000L)
             }
         }
@@ -284,9 +405,23 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         val text = state.composerText.trim()
         if (text.isBlank() || !state.config.isConfigured || state.isSending) return
         val mentions = state.selectedMentions
+        val cfg = state.config
         _uiState.update { it.copy(composerText = "", selectedMentions = emptyList(), isSending = true) }
         viewModelScope.launch {
-            api.sendMessage(state.config, text, mentions)
+            api.sendMessage(cfg, text, mentions)
+                .onSuccess { res ->
+                    if (res.snapshot != null) {
+                        applyIncomingSnapshot(res.snapshot, fromSse = false)
+                    } else {
+                        api.fetchSnapshot(cfg).onSuccess { snap ->
+                            applyIncomingSnapshot(snap, fromSse = false)
+                        }
+                    }
+                    ensureStreamingSync(cfg)
+                    if (_uiState.value.transportState != StreamTransportState.CONNECTED_SSE) {
+                        nudgeRealtimeSync(cfg)
+                    }
+                }
                 .onFailure { err ->
                     _uiState.update {
                         it.copy(
@@ -305,6 +440,9 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         if (!cfg.isConfigured) return
         viewModelScope.launch {
             api.stopChat(cfg, messageId)
+                .onSuccess { res ->
+                    res.snapshot?.let { applyIncomingSnapshot(it, fromSse = false) }
+                }
                 .onFailure { err ->
                     _uiState.update { it.copy(bannerMessage = "停止エラー: ${err.message}") }
                 }
@@ -316,7 +454,8 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         if (!cfg.isConfigured) return
         viewModelScope.launch {
             api.newChat(cfg)
-                .onSuccess {
+                .onSuccess { res ->
+                    res.snapshot?.let { applyIncomingSnapshot(it, fromSse = false) }
                     _uiState.update {
                         it.copy(selectedMentions = emptyList(), bannerMessage = "新しいチャットを開始しました")
                     }
@@ -424,6 +563,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun onCleared() {
         stopRealtimeSync()
+        api.close()
         super.onCleared()
     }
 }

@@ -81,6 +81,7 @@ import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import dev.conductor.mobile.model.ConnectUriParser
 import dev.conductor.mobile.ui.theme.ConductorEmerald
+import dev.conductor.mobile.ui.theme.ConductorTheme
 import kotlinx.coroutines.delay
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -398,9 +399,10 @@ private fun CameraPermissionFallback(
     onOpenAppSettings: () -> Unit,
     onClose: () -> Unit,
 ) {
+    val colors = ConductorTheme.colors
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background,
+        color = colors.canvas,
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             IconButton(
@@ -410,7 +412,7 @@ private fun CameraPermissionFallback(
                     .padding(12.dp)
                     .align(Alignment.TopStart),
             ) {
-                Icon(Icons.Default.Close, contentDescription = "閉じる")
+                Icon(Icons.Default.Close, contentDescription = "閉じる", tint = colors.textPrimary)
             }
 
             Column(
@@ -421,27 +423,36 @@ private fun CameraPermissionFallback(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Default.CameraAlt,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(56.dp),
-                )
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .background(colors.indigoBg, RoundedCornerShape(18.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CameraAlt,
+                        contentDescription = null,
+                        tint = colors.indigo,
+                        modifier = Modifier.size(32.dp),
+                    )
+                }
                 Text(
                     text = "カメラ権限が必要です",
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.textPrimary,
                     textAlign = TextAlign.Center,
                 )
                 Text(
                     text = "デスクトップの Conductor に表示されたリンク用 QR コードを読み取るため、カメラへのアクセスを許可してください。",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = colors.textMuted,
                     textAlign = TextAlign.Center,
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Button(
                     onClick = onRequestPermission,
+                    shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("カメラ権限を許可する")
@@ -449,6 +460,7 @@ private fun CameraPermissionFallback(
                 if (permissionRequested) {
                     OutlinedButton(
                         onClick = onOpenAppSettings,
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text("アプリの設定を開く")
@@ -456,6 +468,7 @@ private fun CameraPermissionFallback(
                 }
                 OutlinedButton(
                     onClick = onClose,
+                    shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("キャンセル")

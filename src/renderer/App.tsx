@@ -2455,10 +2455,6 @@ export const App: React.FC = () => {
           onCleanupWorktree={async () => {
             await window.conductor.cleanupTaskWorktree(selectedTask.id);
           }}
-          onDelete={() => {
-            void window.conductor.deleteTask(selectedTask.id);
-            setSelectedTaskId(null);
-          }}
         />
       )}
 

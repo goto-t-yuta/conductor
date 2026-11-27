@@ -228,7 +228,6 @@ describe("TaskInspectorModal one-click Done / Reopen", () => {
           onOpenPreviewUrl={vi.fn()}
           onMentionInChat={vi.fn()}
           onStopWorker={vi.fn()}
-          onDelete={vi.fn()}
         />,
       );
       expect(html).toContain('data-testid="inspector-quick-done"');
@@ -245,7 +244,6 @@ describe("TaskInspectorModal one-click Done / Reopen", () => {
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
       />,
     );
     expect(doneHtml).toContain('data-testid="inspector-quick-reopen"');
@@ -266,7 +264,6 @@ describe("TaskInspectorModal one-click Done / Reopen", () => {
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
       />,
     );
     expect(runningHtml).not.toContain('data-testid="inspector-quick-done"');
@@ -316,6 +313,58 @@ describe("TaskInspectorModal one-click Done / Reopen", () => {
     });
     expect(stopPropReopen).toHaveBeenCalledTimes(1);
     expect(onUpdateStatus).toHaveBeenCalledWith(REOPEN_TARGET_STATUS);
+  });
+
+  it("omits the Delete button from the modal footer while keeping other footer actions intact", () => {
+    const reviewTask = makeTask({
+      id: "t-footer-review",
+      taskNumber: 10,
+      title: "Review task with preview",
+      status: "needs_review",
+      previewURL: "http://localhost:5173/demo",
+    });
+
+    const jaHtml = renderToStaticMarkup(
+      <TaskInspectorModal
+        task={reviewTask}
+        projectColorHex="#3B82F6"
+        locale="ja"
+        onClose={vi.fn()}
+        onUpdateStatus={vi.fn()}
+        onOpenPreviewUrl={vi.fn()}
+        onMentionInChat={vi.fn()}
+        onStopWorker={vi.fn()}
+      />,
+    );
+    const jaFooter = jaHtml.slice(jaHtml.indexOf('data-testid="inspector-footer"'));
+    expect(jaFooter).toContain("ブラウザで開く");
+    expect(jaFooter).toContain("チャットで言及");
+    expect(jaFooter).not.toContain("削除");
+    expect(jaFooter).not.toContain("ワーカー停止");
+
+    const runningTask = makeTask({
+      id: "t-footer-running",
+      taskNumber: 11,
+      title: "Running task",
+      status: "running",
+      previewURL: null,
+    });
+    const enRunningHtml = renderToStaticMarkup(
+      <TaskInspectorModal
+        task={runningTask}
+        projectColorHex="#3B82F6"
+        locale="en"
+        onClose={vi.fn()}
+        onUpdateStatus={vi.fn()}
+        onOpenPreviewUrl={vi.fn()}
+        onMentionInChat={vi.fn()}
+        onStopWorker={vi.fn()}
+      />,
+    );
+    const enFooter = enRunningHtml.slice(enRunningHtml.indexOf('data-testid="inspector-footer"'));
+    expect(enFooter).toContain("Mention in chat");
+    expect(enFooter).toContain("Stop worker");
+    expect(enFooter).not.toContain("Delete");
   });
 });
 
@@ -681,7 +730,6 @@ describe("Unlanded worktree Done guard across TaskSidebar, TaskInspectorModal, a
         onOpenPreviewUrl={vi.fn()}
         onMentionInChat={vi.fn()}
         onStopWorker={vi.fn()}
-        onDelete={vi.fn()}
         onLandTask={vi.fn()}
       />,
     );

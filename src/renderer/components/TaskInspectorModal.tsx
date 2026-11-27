@@ -194,7 +194,6 @@ export interface TaskInspectorModalProps {
   onOpenImage?: (image: MarkdownOpenedImage) => void;
   onMentionInChat: () => void;
   onStopWorker: () => void;
-  onDelete: () => void;
   onLandTask?: (options?: { createPr?: boolean }) => Promise<LandTaskResult | void> | void;
   onResolveConflictWithAI?: () => Promise<{ ok: boolean; error?: string } | void> | void;
   onCleanupWorktree?: () => Promise<void> | void;
@@ -216,7 +215,6 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
   onOpenImage,
   onMentionInChat,
   onStopWorker,
-  onDelete,
   onLandTask,
   onResolveConflictWithAI,
   onCleanupWorktree,
@@ -733,7 +731,10 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center gap-2 px-5 py-3 border-t border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40">
+        <div
+          data-testid="inspector-footer"
+          className="flex items-center gap-2 px-5 py-3 border-t border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40"
+        >
           {task.previewURL && (
             <button
               type="button"
@@ -769,17 +770,6 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
               {t(locale, "sidebar.stopWorker")}
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => {
-              onDelete();
-              onClose();
-            }}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-rose-500 hover:bg-rose-500/10 transition-colors cursor-pointer"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            {t(locale, "common.delete")}
-          </button>
         </div>
       </div>
     </div>
