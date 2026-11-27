@@ -549,6 +549,10 @@ export function buildRemoteSnapshot(snapshot: AppSnapshot): Record<string, unkno
   }));
 
   return {
+    ...(snapshot.snapshotEpoch ? { snapshotEpoch: snapshot.snapshotEpoch } : {}),
+    ...(typeof snapshot.snapshotVersion === "number"
+      ? { snapshotVersion: snapshot.snapshotVersion }
+      : {}),
     projects: snapshot.projects ?? [],
     tasks,
     messages,
@@ -2318,6 +2322,18 @@ export function renderMobileFallbackHtml(): string {
     }
 
     function applySnapshot(next) {
+      if (!next || typeof next !== "object") return;
+      if (
+        snapshot &&
+        snapshot.snapshotEpoch &&
+        next.snapshotEpoch &&
+        snapshot.snapshotEpoch === next.snapshotEpoch &&
+        typeof snapshot.snapshotVersion === "number" &&
+        typeof next.snapshotVersion === "number" &&
+        next.snapshotVersion < snapshot.snapshotVersion
+      ) {
+        return;
+      }
       snapshot = next;
       const streaming = (snapshot.activeResponderCount || 0) > 0;
       document.getElementById("stopAllBtn").style.display = streaming ? "inline-flex" : "none";

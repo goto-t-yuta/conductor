@@ -9,7 +9,7 @@ import type {
 
 export const DEFAULT_CHAT_TITLE = "新しいチャット";
 export const MAX_CHAT_SESSIONS = 50;
-export const MAX_MESSAGES_PER_SESSION = 250;
+export const MAX_MESSAGES_PER_SESSION = 2000;
 
 function collapseWhitespace(text: string): string {
   return text.replace(/\s+/g, " ").trim();
@@ -119,6 +119,26 @@ export function sortChatSessionsByRecency(sessions: readonly ChatSession[]): Cha
   });
 }
 
+export function capChatSessionsPreservingActive(
+  sessions: readonly ChatSession[],
+  activeSessionId?: string | null,
+  maxSessions = MAX_CHAT_SESSIONS,
+): ChatSession[] {
+  const sorted = sortChatSessionsByRecency(sessions);
+  if (sorted.length <= maxSessions) {
+    return sorted;
+  }
+  const kept = sorted.slice(0, maxSessions);
+  if (!activeSessionId || kept.some((s) => s.id === activeSessionId)) {
+    return kept;
+  }
+  const active = sorted.find((s) => s.id === activeSessionId);
+  if (!active) {
+    return kept;
+  }
+  return [...kept.slice(0, Math.max(0, maxSessions - 1)), active];
+}
+
 export function toChatSessionSummary(session: ChatSession): ChatSessionSummary {
   return {
     id: session.id,
@@ -223,13 +243,17 @@ export function normalizeChatSessions(input: {
     changed = true;
   }
 
-  const sorted = sortChatSessionsByRecency(normalized).slice(0, MAX_CHAT_SESSIONS);
+  const requestedActiveId =
+    typeof input.activeChatSessionId === "string" ? input.activeChatSessionId : null;
+  const sorted = capChatSessionsPreservingActive(
+    normalized,
+    requestedActiveId,
+    MAX_CHAT_SESSIONS,
+  );
   if (sorted.length !== normalized.length) {
     changed = true;
   }
 
-  const requestedActiveId =
-    typeof input.activeChatSessionId === "string" ? input.activeChatSessionId : null;
   const activeSession =
     (requestedActiveId ? sorted.find((s) => s.id === requestedActiveId) : undefined) ?? sorted[0]!;
 

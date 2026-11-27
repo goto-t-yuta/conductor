@@ -56,12 +56,14 @@ const DEFAULT_STATE: PersistedState = {
 export class StateStore {
   public readonly baseDir: string;
   public readonly stateFile: string;
+  public readonly backupStateFile: string;
   public readonly attachmentsDir: string;
   public readonly worktreesDir: string;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     this.stateFile = path.join(baseDir, "state.json");
+    this.backupStateFile = path.join(baseDir, "state.json.bak");
     this.attachmentsDir = path.join(baseDir, "attachments");
     this.worktreesDir = path.join(baseDir, "worktrees");
     fs.mkdirSync(this.baseDir, { recursive: true });
@@ -69,77 +71,117 @@ export class StateStore {
     fs.mkdirSync(this.worktreesDir, { recursive: true });
   }
 
-  load(): PersistedState {
-    try {
-      if (!fs.existsSync(this.stateFile)) {
-        return {
-          ...DEFAULT_STATE,
-          remoteAccessToken: generateRemoteAccessToken(),
-        };
-      }
-      const raw = fs.readFileSync(this.stateFile, "utf8");
-      const parsed = JSON.parse(raw) as Partial<PersistedState>;
-      const rawTasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
-      const normalized = normalizeTaskNumbers(rawTasks, parsed.nextTaskNumber);
-      const normalizedChats = normalizeChatSessions({
-        chatSessions: parsed.chatSessions,
-        activeChatSessionId: parsed.activeChatSessionId,
-        legacyMessages: parsed.messages,
-        chatProvider: parsed.chatProvider,
-      });
-      const activeChat = normalizedChats.chatSessions.find(
-        (s) => s.id === normalizedChats.activeChatSessionId,
-      );
-      const existingToken =
-        typeof parsed.remoteAccessToken === "string" ? parsed.remoteAccessToken.trim() : "";
-      const hasValidToken = existingToken.length >= 16;
-      const remoteAccessToken = hasValidToken ? existingToken : generateRemoteAccessToken();
-      const state: PersistedState = {
-        ...DEFAULT_STATE,
-        ...parsed,
-        projects: Array.isArray(parsed.projects) ? parsed.projects : [],
-        scanRoots: Array.isArray(parsed.scanRoots) ? parsed.scanRoots : [],
-        tasks: normalized.tasks,
-        nextTaskNumber: normalized.nextTaskNumber,
-        messages: activeChat ? activeChat.messages : [],
-        chatSessions: normalizedChats.chatSessions,
-        activeChatSessionId: normalizedChats.activeChatSessionId,
-        browserTabs: Array.isArray(parsed.browserTabs) ? parsed.browserTabs : [],
-        autoLandOnComplete:
-          typeof parsed.autoLandOnComplete === "boolean" ? parsed.autoLandOnComplete : true,
-        preferredLanguage: isValidPreferredLanguage(parsed.preferredLanguage)
-          ? parsed.preferredLanguage
-          : DEFAULT_PREFERRED_LANGUAGE,
-        voiceReadbackEnabled:
-          typeof parsed.voiceReadbackEnabled === "boolean"
-            ? parsed.voiceReadbackEnabled
-            : DEFAULT_VOICE_READBACK_ENABLED,
-        remoteAccessEnabled:
-          typeof parsed.remoteAccessEnabled === "boolean" ? parsed.remoteAccessEnabled : false,
-        remoteAccessPort: normalizeRemoteAccessPort(parsed.remoteAccessPort),
-        remoteAccessToken,
-        usageRecords: normalizeUsageRecords(parsed.usageRecords),
-        usageBudgets: normalizeUsageBudgetSettings(parsed.usageBudgets),
-      };
-      if (normalized.changed || normalizedChats.changed || !hasValidToken) {
-        this.save(state);
-      }
-      return state;
-    } catch {
-      return {
-        ...DEFAULT_STATE,
-        remoteAccessToken: generateRemoteAccessToken(),
-      };
+  private parseStateFile(filePath: string): { state: PersistedState; needsSave: boolean } {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<PersistedState>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Persisted state root must be a JSON object");
     }
+    const rawTasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+    const normalized = normalizeTaskNumbers(rawTasks, parsed.nextTaskNumber);
+    const normalizedChats = normalizeChatSessions({
+      chatSessions: parsed.chatSessions,
+      activeChatSessionId: parsed.activeChatSessionId,
+      legacyMessages: parsed.messages,
+      chatProvider: parsed.chatProvider,
+    });
+    const activeChat = normalizedChats.chatSessions.find(
+      (s) => s.id === normalizedChats.activeChatSessionId,
+    );
+    const existingToken =
+      typeof parsed.remoteAccessToken === "string" ? parsed.remoteAccessToken.trim() : "";
+    const hasValidToken = existingToken.length >= 16;
+    const remoteAccessToken = hasValidToken ? existingToken : generateRemoteAccessToken();
+    const state: PersistedState = {
+      ...DEFAULT_STATE,
+      ...parsed,
+      projects: Array.isArray(parsed.projects) ? parsed.projects : [],
+      scanRoots: Array.isArray(parsed.scanRoots) ? parsed.scanRoots : [],
+      tasks: normalized.tasks,
+      nextTaskNumber: normalized.nextTaskNumber,
+      messages: activeChat ? activeChat.messages : [],
+      chatSessions: normalizedChats.chatSessions,
+      activeChatSessionId: normalizedChats.activeChatSessionId,
+      browserTabs: Array.isArray(parsed.browserTabs) ? parsed.browserTabs : [],
+      autoLandOnComplete:
+        typeof parsed.autoLandOnComplete === "boolean" ? parsed.autoLandOnComplete : true,
+      preferredLanguage: isValidPreferredLanguage(parsed.preferredLanguage)
+        ? parsed.preferredLanguage
+        : DEFAULT_PREFERRED_LANGUAGE,
+      voiceReadbackEnabled:
+        typeof parsed.voiceReadbackEnabled === "boolean"
+          ? parsed.voiceReadbackEnabled
+          : DEFAULT_VOICE_READBACK_ENABLED,
+      remoteAccessEnabled:
+        typeof parsed.remoteAccessEnabled === "boolean" ? parsed.remoteAccessEnabled : false,
+      remoteAccessPort: normalizeRemoteAccessPort(parsed.remoteAccessPort),
+      remoteAccessToken,
+      usageRecords: normalizeUsageRecords(parsed.usageRecords),
+      usageBudgets: normalizeUsageBudgetSettings(parsed.usageBudgets),
+    };
+    return {
+      state,
+      needsSave: normalized.changed || normalizedChats.changed || !hasValidToken,
+    };
+  }
+
+  load(): PersistedState {
+    const primaryExists = fs.existsSync(this.stateFile);
+    if (primaryExists) {
+      try {
+        const { state, needsSave } = this.parseStateFile(this.stateFile);
+        if (needsSave) {
+          this.save(state);
+        }
+        return state;
+      } catch {
+        // Preserve the unreadable state file before falling back to backup so user history is never silently lost
+        try {
+          const corruptPath = `${this.stateFile}.corrupt.${Date.now()}`;
+          fs.copyFileSync(this.stateFile, corruptPath);
+        } catch {
+          // best-effort backup of corrupted file
+        }
+      }
+    }
+
+    if (fs.existsSync(this.backupStateFile)) {
+      try {
+        const { state } = this.parseStateFile(this.backupStateFile);
+        this.save(state);
+        return state;
+      } catch {
+        // fall through to default state
+      }
+    }
+
+    return {
+      ...DEFAULT_STATE,
+      remoteAccessToken: generateRemoteAccessToken(),
+    };
   }
 
   save(state: PersistedState): void {
-    const tmp = `${this.stateFile}.tmp`;
+    const tmp = `${this.stateFile}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    const serialized = JSON.stringify(state, null, 2);
     try {
-      fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
+      fs.writeFileSync(tmp, serialized, "utf8");
+      if (fs.existsSync(this.stateFile)) {
+        try {
+          fs.copyFileSync(this.stateFile, this.backupStateFile);
+        } catch {
+          // best-effort backup of previous valid state
+        }
+      }
       fs.renameSync(tmp, this.stateFile);
     } catch {
-      // ignore transient disk errors
+      try {
+        if (fs.existsSync(tmp)) {
+          fs.unlinkSync(tmp);
+        }
+      } catch {
+        // ignore cleanup errors
+      }
     }
   }
 

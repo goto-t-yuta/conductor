@@ -862,6 +862,9 @@ export function runClaudeTurn(
           }
         }
       }
+      // Reset per-message stream flag so subsequent assistant messages in a multi-step
+      // or post-compaction turn still emit fallback text if stream_event deltas are absent.
+      sawStreamText = false;
       return;
     }
 

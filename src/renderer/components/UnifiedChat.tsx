@@ -1775,6 +1775,47 @@ const EmptyWelcome: React.FC<{
   );
 });
 
+interface MessageRenderErrorBoundaryProps {
+  resetKey: string;
+  fallbackText: string;
+  children: React.ReactNode;
+}
+
+interface MessageRenderErrorBoundaryState {
+  hasError: boolean;
+}
+
+export class MessageRenderErrorBoundary extends React.Component<
+  MessageRenderErrorBoundaryProps,
+  MessageRenderErrorBoundaryState
+> {
+  public state: MessageRenderErrorBoundaryState = { hasError: false };
+
+  public static getDerivedStateFromError(): MessageRenderErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  public componentDidUpdate(prevProps: MessageRenderErrorBoundaryProps): void {
+    if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  public render(): React.ReactNode {
+    if (this.state.hasError) {
+      return (
+        <div
+          data-testid="message-markdown-fallback"
+          className="text-[14px] leading-[1.65] whitespace-pre-wrap break-words select-text"
+        >
+          {this.props.fallbackText}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export interface TaskEventCardProps {
   message: ChatMessage;
   tasks: AgentTask[];
@@ -1982,16 +2023,21 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
             </div>
           </div>
 
-          <MarkdownView
-            content={message.text}
-            locale={locale}
-            baseFilePath={taskBaseFilePath}
-            onOpenUrl={onOpenUrl}
-            onOpenMarkdownFile={onOpenMarkdownFile}
-            onOpenImage={onOpenImage}
-            imageCache={imageCache}
-            videoCache={videoCache}
-          />
+          <MessageRenderErrorBoundary
+            resetKey={`${message.id}:${message.text.length}`}
+            fallbackText={message.text}
+          >
+            <MarkdownView
+              content={message.text}
+              locale={locale}
+              baseFilePath={taskBaseFilePath}
+              onOpenUrl={onOpenUrl}
+              onOpenMarkdownFile={onOpenMarkdownFile}
+              onOpenImage={onOpenImage}
+              imageCache={imageCache}
+              videoCache={videoCache}
+            />
+          </MessageRenderErrorBoundary>
 
           <button
             type="button"
@@ -2009,16 +2055,21 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
         <div className="flex items-start gap-3">
           <Bell className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
           <div className="flex-1 min-w-0 space-y-2">
-            <MarkdownView
-              content={message.text}
-              locale={locale}
-              baseFilePath={taskBaseFilePath}
-              onOpenUrl={onOpenUrl}
-              onOpenMarkdownFile={onOpenMarkdownFile}
-              onOpenImage={onOpenImage}
-              imageCache={imageCache}
-              videoCache={videoCache}
-            />
+            <MessageRenderErrorBoundary
+              resetKey={`${message.id}:${message.text.length}`}
+              fallbackText={message.text}
+            >
+              <MarkdownView
+                content={message.text}
+                locale={locale}
+                baseFilePath={taskBaseFilePath}
+                onOpenUrl={onOpenUrl}
+                onOpenMarkdownFile={onOpenMarkdownFile}
+                onOpenImage={onOpenImage}
+                imageCache={imageCache}
+                videoCache={videoCache}
+              />
+            </MessageRenderErrorBoundary>
             {targetTaskId && (
               <button
                 type="button"
@@ -2094,8 +2145,11 @@ const MessageRow: React.FC<{
     [hasInlineAt, projects, tasks, onOpenTask],
   );
 
+  const safeAttachments = Array.isArray(message.attachments) ? message.attachments : [];
+  const safeToolChips = Array.isArray(message.toolChips) ? message.toolChips : [];
+
   if (message.role === "user") {
-    const hasMetaChips = mentionBadges.length > 0 || message.attachments.length > 0;
+    const hasMetaChips = mentionBadges.length > 0 || safeAttachments.length > 0;
     return (
       <div className="flex flex-col items-end gap-1.5">
         {hasMetaChips && (
@@ -2108,7 +2162,7 @@ const MessageRow: React.FC<{
               locale={locale}
               onOpenTask={onOpenTask}
             />
-            {message.attachments.map((att) => {
+            {safeAttachments.map((att) => {
               const viewableImage =
                 isViewableImageAttachment(att) && Boolean(onOpenImageAttachment);
               if (viewableImage) {
@@ -2156,15 +2210,20 @@ const MessageRow: React.FC<{
           data-testid="user-message-bubble"
           className="max-w-[82%] min-w-0 rounded-2xl px-4 py-2.5 bg-indigo-500/12 dark:bg-indigo-500/20 text-zinc-900 dark:text-zinc-100 select-text"
         >
-          <MarkdownView
-            content={message.text}
-            variant="user"
-            locale={locale}
-            onOpenUrl={onOpenUrl}
-            onOpenMarkdownFile={onOpenMarkdownFile}
-            onOpenImage={onOpenMarkdownImage}
-            mentionContext={userMentionContext}
-          />
+          <MessageRenderErrorBoundary
+            resetKey={`${message.id}:${message.text.length}`}
+            fallbackText={message.text}
+          >
+            <MarkdownView
+              content={message.text}
+              variant="user"
+              locale={locale}
+              onOpenUrl={onOpenUrl}
+              onOpenMarkdownFile={onOpenMarkdownFile}
+              onOpenImage={onOpenMarkdownImage}
+              mentionContext={userMentionContext}
+            />
+          </MessageRenderErrorBoundary>
         </div>
       </div>
     );
@@ -2243,9 +2302,9 @@ const MessageRow: React.FC<{
         </div>
       )}
 
-      {message.toolChips.length > 0 && (
+      {safeToolChips.length > 0 && (
         <MessageToolChips
-          toolChips={message.toolChips}
+          toolChips={safeToolChips}
           isStreaming={message.isStreaming}
           locale={locale}
         />
@@ -2253,13 +2312,18 @@ const MessageRow: React.FC<{
 
       <div className="pl-7">
         {message.text ? (
-          <MarkdownView
-            content={message.text}
-            locale={locale}
-            onOpenUrl={onOpenUrl}
-            onOpenMarkdownFile={onOpenMarkdownFile}
-            onOpenImage={onOpenMarkdownImage}
-          />
+          <MessageRenderErrorBoundary
+            resetKey={`${message.id}:${message.text.length}`}
+            fallbackText={message.text}
+          >
+            <MarkdownView
+              content={message.text}
+              locale={locale}
+              onOpenUrl={onOpenUrl}
+              onOpenMarkdownFile={onOpenMarkdownFile}
+              onOpenImage={onOpenMarkdownImage}
+            />
+          </MessageRenderErrorBoundary>
         ) : message.isStreaming ? (
           <span className="text-[13px] text-zinc-400">{t(locale, "chat.preparingReply")}</span>
         ) : null}
