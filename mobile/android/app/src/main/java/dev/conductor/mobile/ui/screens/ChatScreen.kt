@@ -1,10 +1,20 @@
 package dev.conductor.mobile.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +41,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.AlternateEmail
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bolt
@@ -53,9 +64,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +77,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -70,6 +87,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 import dev.conductor.mobile.model.AgentTask
 import dev.conductor.mobile.model.AppSnapshot
 import dev.conductor.mobile.model.ChatMessage
@@ -114,24 +132,57 @@ fun ChatScreen(
     val projectsById = remember(projects) { projects.associateBy { it.id } }
     val activeResponders = snapshot?.activeResponderCount ?: 0
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
     var showMentionSheet by remember { mutableStateOf(false) }
+    var isScrollingToBottom by remember { mutableStateOf(false) }
+    var hasInitializedScroll by remember { mutableStateOf(false) }
+
+    val density = LocalDensity.current
+    val bottomThresholdPx = remember(density) {
+        with(density) { ChatScrollLogic.BOTTOM_THRESHOLD_DP.dp.roundToPx() }
+    }
+    val latestMessageCount by rememberUpdatedState(messages.size)
+    val showScrollToBottom by remember(listState, bottomThresholdPx) {
+        derivedStateOf {
+            ChatScrollLogic.shouldShowScrollToBottomButton(
+                metrics = listState.toChatScrollMetrics(),
+                messageCount = latestMessageCount,
+                isScrollingToBottom = isScrollingToBottom,
+                thresholdPx = bottomThresholdPx,
+            )
+        }
+    }
 
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            val nearBottom = messages.size <= 2 || lastVisibleIndex >= messages.lastIndex - 2
-            if (nearBottom) {
-                listState.scrollToItem(messages.lastIndex)
+        if (messages.isEmpty()) {
+            hasInitializedScroll = false
+            isScrollingToBottom = false
+        } else {
+            val bottomAnchorIndex = messages.size
+            val lastMessageIsUser = messages.lastOrNull()?.role == "user"
+            val shouldAutoScroll = !hasInitializedScroll ||
+                lastMessageIsUser ||
+                ChatScrollLogic.shouldAutoScrollOnMessageCountChange(
+                    metrics = listState.toChatScrollMetrics(),
+                    messageCount = messages.size,
+                    thresholdPx = bottomThresholdPx,
+                )
+            hasInitializedScroll = true
+            if (shouldAutoScroll) {
+                listState.scrollToItem(bottomAnchorIndex)
             }
         }
     }
 
     LaunchedEffect(messages.lastOrNull()?.id, messages.lastOrNull()?.text?.length) {
-        if (messages.isNotEmpty()) {
-            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            val nearBottom = lastVisibleIndex >= messages.lastIndex - 1
-            if (nearBottom) {
-                listState.scrollToItem(messages.lastIndex)
+        if (messages.isNotEmpty() && !isScrollingToBottom) {
+            val shouldAutoScroll = ChatScrollLogic.shouldAutoScrollOnStreamingUpdate(
+                metrics = listState.toChatScrollMetrics(),
+                messageCount = messages.size,
+                thresholdPx = bottomThresholdPx,
+            )
+            if (shouldAutoScroll) {
+                listState.scrollToItem(messages.size)
             }
         }
     }
@@ -180,36 +231,61 @@ fun ChatScreen(
             HorizontalDivider(thickness = 1.dp, color = colors.roseBorder)
         }
 
-        // Message stream or welcome empty state
-        if (messages.isEmpty()) {
-            EmptyChatWelcome(
-                isSyncing = snapshot == null,
-                projectCount = projects.size,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-            )
-        } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
-            ) {
-                items(messages, key = { it.id }) { msg ->
-                    val linkedTask = msg.relatedTaskId?.let { tasksById[it] }
-                    val linkedProject = linkedTask?.projectId?.let { projectsById[it] }
-                    ChatMessageRow(
-                        message = msg,
-                        linkedTask = linkedTask,
-                        linkedProjectColorHex = linkedProject?.colorHex,
-                        onStop = { onStopMessage(msg.id) },
-                        onOpenTask = onOpenTask,
-                    )
+        // Message stream or welcome empty state, with floating scroll-to-bottom button
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+        ) {
+            if (messages.isEmpty()) {
+                EmptyChatWelcome(
+                    isSyncing = snapshot == null,
+                    projectCount = projects.size,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 0.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                ) {
+                    items(messages, key = { it.id }) { msg ->
+                        val linkedTask = msg.relatedTaskId?.let { tasksById[it] }
+                        val linkedProject = linkedTask?.projectId?.let { projectsById[it] }
+                        ChatMessageRow(
+                            message = msg,
+                            linkedTask = linkedTask,
+                            linkedProjectColorHex = linkedProject?.colorHex,
+                            onStop = { onStopMessage(msg.id) },
+                            onOpenTask = onOpenTask,
+                        )
+                    }
+                    // Bottom anchor ensures animateScrollToItem reaches the very end even for tall messages
+                    item(key = CHAT_BOTTOM_ANCHOR_KEY) {
+                        Spacer(modifier = Modifier.height(1.dp))
+                    }
                 }
             }
+
+            ScrollToBottomFloatingButton(
+                visible = showScrollToBottom,
+                onClick = {
+                    val targetIndex = messages.size
+                    if (targetIndex <= 0) return@ScrollToBottomFloatingButton
+                    coroutineScope.launch {
+                        isScrollingToBottom = true
+                        try {
+                            listState.animateScrollToItem(targetIndex)
+                        } finally {
+                            isScrollingToBottom = false
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 12.dp),
+            )
         }
 
         // Desktop-aligned floating rounded composer
@@ -1259,6 +1335,62 @@ private fun MentionPickerSheet(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+private const val CHAT_BOTTOM_ANCHOR_KEY = "__chat_bottom_anchor__"
+
+@Composable
+private fun ScrollToBottomFloatingButton(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = ConductorTheme.colors
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+
+    val containerColor = colors.card.copy(alpha = 0.96f)
+    val borderColor = if (isPressed) {
+        colors.indigo.copy(alpha = 0.55f)
+    } else if (colors.isDark) {
+        colors.borderStrong
+    } else {
+        colors.border
+    }
+    val iconTint = if (isPressed) colors.indigoText else colors.textSecondary
+
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(animationSpec = tween(durationMillis = 180)) +
+            scaleIn(initialScale = 0.85f, animationSpec = tween(durationMillis = 180)) +
+            slideInVertically(animationSpec = tween(durationMillis = 180)) { it / 2 },
+        exit = fadeOut(animationSpec = tween(durationMillis = 150)) +
+            scaleOut(targetScale = 0.85f, animationSpec = tween(durationMillis = 150)) +
+            slideOutVertically(animationSpec = tween(durationMillis = 150)) { it / 2 },
+        modifier = modifier,
+    ) {
+        Surface(
+            onClick = onClick,
+            shape = CircleShape,
+            color = containerColor,
+            border = BorderStroke(1.dp, borderColor),
+            shadowElevation = 4.dp,
+            tonalElevation = 0.dp,
+            interactionSource = interactionSource,
+            modifier = Modifier
+                .size(40.dp)
+                .semantics { contentDescription = "最新メッセージへ" },
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = Icons.Default.ArrowDownward,
+                    contentDescription = null,
+                    tint = iconTint,
+                    modifier = Modifier.size(19.dp),
+                )
             }
         }
     }
