@@ -1931,9 +1931,10 @@ export const App: React.FC = () => {
     [handleAddMention],
   );
 
-  const handleUpdateTaskStatus = useCallback((taskId: string, status: AgentTaskStatus) => {
-    void window.conductor.updateTaskStatus(taskId, status);
-  }, []);
+  const handleUpdateTaskStatus = useCallback(
+    (taskId: string, status: AgentTaskStatus) => window.conductor.updateTaskStatus(taskId, status),
+    [],
+  );
 
   const handleAddProjectDialog = useCallback(() => {
     void window.conductor.addProjectDialog();

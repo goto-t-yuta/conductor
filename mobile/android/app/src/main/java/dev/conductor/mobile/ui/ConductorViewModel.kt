@@ -82,6 +82,7 @@ data class ConductorUiState(
     val selectedTaskId: String? = null,
     val selectedTaskDetail: TaskDetailResponse? = null,
     val isLoadingTaskDetail: Boolean = false,
+    val taskDetailError: String? = null,
     val updatingTaskIds: Set<String> = emptySet(),
     val landingTaskIds: Set<String> = emptySet(),
     val isTestingConnection: Boolean = false,
@@ -344,6 +345,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                     snapshot = null,
                     selectedTaskId = null,
                     selectedTaskDetail = null,
+                    taskDetailError = null,
                     updatingTaskIds = emptySet(),
                     landingTaskIds = emptySet(),
                     selectedMentions = emptyList(),
@@ -698,6 +700,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                 selectedTaskId = taskId,
                 selectedTaskDetail = null,
                 isLoadingTaskDetail = true,
+                taskDetailError = null,
             )
         }
         refreshTaskDetail(taskId)
@@ -709,8 +712,13 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                 selectedTaskId = null,
                 selectedTaskDetail = null,
                 isLoadingTaskDetail = false,
+                taskDetailError = null,
             )
         }
+    }
+
+    fun clearTaskDetailError() {
+        _uiState.update { it.copy(taskDetailError = null) }
     }
 
     fun refreshTaskDetail(taskId: String) {
@@ -743,6 +751,13 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
             ?: state.selectedTaskDetail?.task?.takeIf { it.id == taskId }
         if (nextStatus == TaskStatusActions.STATUS_DONE && currentTask != null) {
             TaskStatusActions.getMarkDoneBlockedReason(currentTask)?.let { blockedReason ->
+                _uiState.update { current ->
+                    if (current.selectedTaskId == taskId) {
+                        current.copy(taskDetailError = blockedReason)
+                    } else {
+                        current
+                    }
+                }
                 showBanner(blockedReason)
                 return
             }
@@ -750,28 +765,51 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         val previousStatus = currentTask?.status
 
         viewModelScope.launch {
-            _uiState.update { it.copy(updatingTaskIds = it.updatingTaskIds + taskId) }
+            _uiState.update { current ->
+                current.copy(
+                    updatingTaskIds = current.updatingTaskIds + taskId,
+                    taskDetailError = if (current.selectedTaskId == taskId) null else current.taskDetailError,
+                )
+            }
             try {
                 api.updateTaskStatus(cfg, taskId, nextStatus)
                     .onSuccess { res ->
-                        val updatedTask = res.task
-                        _uiState.update { current ->
-                            val nextSnapshot = TaskStatusActions.applyTaskUpdate(
-                                snapshot = current.snapshot,
-                                taskId = taskId,
-                                updatedTask = updatedTask,
-                                fallbackStatus = nextStatus,
-                            )
-                            val nextDetail = if (current.selectedTaskId == taskId && current.selectedTaskDetail != null) {
-                                val patchedTask = updatedTask
-                                    ?: current.selectedTaskDetail.task?.copy(status = nextStatus)
-                                current.selectedTaskDetail.copy(task = patchedTask)
-                            } else {
-                                current.selectedTaskDetail
+                        if (!res.ok) {
+                            val errorMessage = res.error ?: res.message ?: "ステータス更新に失敗しました"
+                            _uiState.update { current ->
+                                if (current.selectedTaskId == taskId) {
+                                    current.copy(taskDetailError = errorMessage)
+                                } else {
+                                    current
+                                }
                             }
+                            showBanner(errorMessage)
+                            return@onSuccess
+                        }
+                        val updatedTask = res.task
+                        var shouldRefreshDetail = false
+                        _uiState.update { current ->
+                            val outcome = TaskStatusActions.applyStatusUpdateSuccess(
+                                snapshot = current.snapshot,
+                                selectedTaskId = current.selectedTaskId,
+                                selectedTaskDetail = current.selectedTaskDetail,
+                                isLoadingTaskDetail = current.isLoadingTaskDetail,
+                                taskId = taskId,
+                                nextStatus = nextStatus,
+                                updatedTask = updatedTask,
+                                isUndo = isUndo,
+                            )
+                            shouldRefreshDetail = outcome.shouldRefreshDetail
                             current.copy(
-                                snapshot = nextSnapshot,
-                                selectedTaskDetail = nextDetail,
+                                snapshot = outcome.snapshot,
+                                selectedTaskId = outcome.selectedTaskId,
+                                selectedTaskDetail = outcome.selectedTaskDetail,
+                                isLoadingTaskDetail = outcome.isLoadingTaskDetail,
+                                taskDetailError = if (outcome.shouldCloseDetail || current.selectedTaskId == taskId) {
+                                    null
+                                } else {
+                                    current.taskDetailError
+                                },
                             )
                         }
                         val feedback = TaskStatusActions.formatStatusFeedback(
@@ -793,7 +831,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         } else {
                             showBanner(feedback)
                         }
-                        if (_uiState.value.selectedTaskId == taskId) {
+                        if (shouldRefreshDetail) {
                             refreshTaskDetail(taskId)
                         }
                         if (_uiState.value.transportState != StreamTransportState.CONNECTED_SSE) {
@@ -803,7 +841,15 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                     }
                     .onFailure { err ->
-                        showBanner(err.message ?: "ステータス更新に失敗しました")
+                        val errorMessage = err.message ?: "ステータス更新に失敗しました"
+                        _uiState.update { current ->
+                            if (current.selectedTaskId == taskId) {
+                                current.copy(taskDetailError = errorMessage)
+                            } else {
+                                current
+                            }
+                        }
+                        showBanner(errorMessage)
                     }
             } finally {
                 _uiState.update { it.copy(updatingTaskIds = it.updatingTaskIds - taskId) }

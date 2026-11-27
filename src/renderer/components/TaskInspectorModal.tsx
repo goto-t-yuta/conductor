@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -30,6 +30,7 @@ import type {
   LandTaskResult,
   Project,
   TaskLandStatus,
+  TaskStatusUpdateResult,
   TaskWorktreeStatus,
   WorkerActivityEntry,
 } from "../../shared/types.js";
@@ -54,15 +55,59 @@ import { buildTaskMarkdownBasePath } from "../lib/task-event.js";
 import { getQuickStatusTransition } from "../lib/task-sidebar.js";
 import { MarkdownView, type MarkdownOpenedImage } from "./MarkdownView.js";
 
+export type TaskInspectorStatusUpdateResult =
+  | TaskStatusUpdateResult
+  | void
+  | Promise<TaskStatusUpdateResult | void>;
+
+export async function executeTaskInspectorStatusUpdate(options: {
+  nextStatus: AgentTaskStatus;
+  onUpdateStatus: (status: AgentTaskStatus) => TaskInspectorStatusUpdateResult;
+  onClose: () => void;
+  fallbackErrorMessage: string;
+}): Promise<{ ok: boolean; error: string | null; closed: boolean }> {
+  try {
+    const result = await Promise.resolve(options.onUpdateStatus(options.nextStatus));
+    if (result && result.ok === false) {
+      return {
+        ok: false,
+        error: result.error?.trim() || options.fallbackErrorMessage,
+        closed: false,
+      };
+    }
+    const shouldClose = options.nextStatus === "done";
+    if (shouldClose) {
+      options.onClose();
+    }
+    return {
+      ok: true,
+      error: null,
+      closed: shouldClose,
+    };
+  } catch (err) {
+    const message =
+      err instanceof Error && err.message.trim()
+        ? err.message.trim()
+        : options.fallbackErrorMessage;
+    return {
+      ok: false,
+      error: message,
+      closed: false,
+    };
+  }
+}
+
 export interface TaskInspectorQuickStatusButtonProps {
   task: Pick<AgentTask, "title" | "status" | "worktreePath" | "worktreeBranch" | "landStatus">;
   locale?: UiLocale;
+  disabled?: boolean;
   onUpdateStatus: (status: AgentTaskStatus) => void;
 }
 
 export const TaskInspectorQuickStatusButton: React.FC<TaskInspectorQuickStatusButtonProps> = ({
   task,
   locale = "ja",
+  disabled = false,
   onUpdateStatus,
 }) => {
   const quickTransition = getQuickStatusTransition(task.status, locale);
@@ -76,15 +121,19 @@ export const TaskInspectorQuickStatusButton: React.FC<TaskInspectorQuickStatusBu
       ? getLocalizedMarkTaskDoneBlockedReason(task, locale)
       : null;
   const isBlocked = Boolean(doneBlockedReason);
+  const isDisabled = isBlocked || disabled;
 
   return (
     <button
       type="button"
-      disabled={isBlocked}
-      aria-disabled={isBlocked || undefined}
+      disabled={isDisabled}
+      aria-disabled={isDisabled || undefined}
       data-testid={`inspector-quick-${quickTransition.action}`}
       onClick={(e) => {
         e.stopPropagation();
+        if (disabled) {
+          return;
+        }
         if (
           !validateManualTaskStatusTransition({
             currentStatus: task.status,
@@ -101,14 +150,20 @@ export const TaskInspectorQuickStatusButton: React.FC<TaskInspectorQuickStatusBu
       title={doneBlockedReason ?? quickTransition.title}
       aria-label={`${task.title}: ${quickTransition.label}`}
       className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium border transition-colors shrink-0 ${
-        isBlocked
+        isDisabled
           ? "bg-zinc-100 dark:bg-zinc-800/60 border-zinc-200/80 dark:border-zinc-700/70 text-zinc-400 dark:text-zinc-500 opacity-60 cursor-not-allowed"
           : isDone
             ? "bg-zinc-100 dark:bg-zinc-800/80 border-zinc-200/90 dark:border-zinc-700 text-zinc-700 dark:text-zinc-200 hover:bg-indigo-500/12 hover:border-indigo-500/35 hover:text-indigo-600 dark:hover:text-indigo-300 cursor-pointer"
             : "bg-emerald-500/15 border-emerald-500/35 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/25 hover:border-emerald-500/50 font-semibold cursor-pointer"
       }`}
     >
-      {isDone ? <RotateCcw className="w-3.5 h-3.5" /> : <Check className="w-3.5 h-3.5" />}
+      {disabled ? (
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+      ) : isDone ? (
+        <RotateCcw className="w-3.5 h-3.5" />
+      ) : (
+        <Check className="w-3.5 h-3.5" />
+      )}
       <span>{quickTransition.label}</span>
     </button>
   );
@@ -120,6 +175,7 @@ export interface TaskStatusSelectProps {
   worktreeBranch?: string | null;
   landStatus?: TaskLandStatus;
   locale?: UiLocale;
+  disabled?: boolean;
   onUpdateStatus: (status: AgentTaskStatus) => void;
 }
 
@@ -129,6 +185,7 @@ export const TaskStatusSelect: React.FC<TaskStatusSelectProps> = ({
   worktreeBranch,
   landStatus,
   locale = "ja",
+  disabled = false,
   onUpdateStatus,
 }) => {
   const doneBlockedReason = getLocalizedMarkTaskDoneBlockedReason(
@@ -145,9 +202,13 @@ export const TaskStatusSelect: React.FC<TaskStatusSelectProps> = ({
     <select
       data-testid="inspector-status-select"
       value={status}
+      disabled={disabled}
       aria-label={t(locale, "inspector.statusAria")}
       title={allowMarkDone ? t(locale, "inspector.statusTitle") : doneBlockedReason!}
       onChange={(e) => {
+        if (disabled) {
+          return;
+        }
         const nextStatus = e.target.value as AgentTaskStatus;
         if (
           !validateManualTaskStatusTransition({
@@ -162,7 +223,7 @@ export const TaskStatusSelect: React.FC<TaskStatusSelectProps> = ({
         }
         onUpdateStatus(nextStatus);
       }}
-      className="text-[12px] rounded-lg px-2.5 py-1 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 outline-none"
+      className="text-[12px] rounded-lg px-2.5 py-1 bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 outline-none disabled:opacity-60 disabled:cursor-not-allowed"
     >
       <option value="queued">{formatTaskStatusLabel("queued", locale)}</option>
       <option value="running">{formatTaskStatusLabel("running", locale)}</option>
@@ -188,7 +249,7 @@ export interface TaskInspectorModalProps {
   locale?: UiLocale;
   defaultToolLogExpanded?: boolean;
   onClose: () => void;
-  onUpdateStatus: (status: AgentTaskStatus) => void;
+  onUpdateStatus: (status: AgentTaskStatus) => TaskInspectorStatusUpdateResult;
   onOpenPreviewUrl: (url: string) => void;
   onOpenMarkdownFile?: (target: string, baseFilePath?: string) => void;
   onOpenImage?: (image: MarkdownOpenedImage) => void;
@@ -225,6 +286,51 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
   const [worktreeStatus, setWorktreeStatus] = useState<TaskWorktreeStatus | null>(null);
   const [isRefreshingGit, setIsRefreshingGit] = useState(false);
   const [isStartingConflictResolve, setIsStartingConflictResolve] = useState(false);
+  const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
+  const [statusUpdateError, setStatusUpdateError] = useState<string | null>(null);
+  const isUpdatingStatusRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setStatusUpdateError(null);
+  }, [task.id, task.status]);
+
+  const handleStatusUpdate = useCallback(
+    async (nextStatus: AgentTaskStatus) => {
+      if (isUpdatingStatusRef.current) return;
+      isUpdatingStatusRef.current = true;
+      setIsUpdatingStatus(true);
+      setStatusUpdateError(null);
+      try {
+        const outcome = await executeTaskInspectorStatusUpdate({
+          nextStatus,
+          onUpdateStatus,
+          onClose: () => {
+            if (mountedRef.current) {
+              onClose();
+            }
+          },
+          fallbackErrorMessage: t(locale, "inspector.statusUpdateError"),
+        });
+        if (mountedRef.current && !outcome.ok) {
+          setStatusUpdateError(outcome.error);
+        }
+      } finally {
+        isUpdatingStatusRef.current = false;
+        if (mountedRef.current) {
+          setIsUpdatingStatus(false);
+        }
+      }
+    },
+    [locale, onClose, onUpdateStatus],
+  );
 
   const partitionedActivities = useMemo(
     () => partitionTaskActivities(task.activities),
@@ -319,7 +425,8 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
           <TaskInspectorQuickStatusButton
             task={task}
             locale={locale}
-            onUpdateStatus={onUpdateStatus}
+            disabled={isUpdatingStatus}
+            onUpdateStatus={(nextStatus) => void handleStatusUpdate(nextStatus)}
           />
           <TaskStatusSelect
             status={task.status}
@@ -327,7 +434,8 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
             worktreeBranch={task.worktreeBranch}
             landStatus={task.landStatus}
             locale={locale}
-            onUpdateStatus={onUpdateStatus}
+            disabled={isUpdatingStatus}
+            onUpdateStatus={(nextStatus) => void handleStatusUpdate(nextStatus)}
           />
           <button
             type="button"
@@ -337,6 +445,25 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
             <X className="w-4 h-4" />
           </button>
         </div>
+
+        {statusUpdateError && (
+          <div
+            role="alert"
+            data-testid="inspector-status-error"
+            className="mx-5 mt-3 rounded-lg px-3 py-2 bg-rose-500/10 border border-rose-500/25 text-[12px] text-rose-700 dark:text-rose-300 flex items-start gap-2 shrink-0"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-rose-500" />
+            <span className="flex-1 min-w-0">{statusUpdateError}</span>
+            <button
+              type="button"
+              onClick={() => setStatusUpdateError(null)}
+              aria-label={t(locale, "common.close")}
+              className="p-0.5 rounded hover:bg-rose-500/15 text-rose-500 cursor-pointer shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-4 select-text">

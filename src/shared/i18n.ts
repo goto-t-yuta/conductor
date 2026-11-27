@@ -281,6 +281,7 @@ export const UI_STRINGS = {
     // TaskInspectorModal
     "inspector.statusAria": "タスクステータス",
     "inspector.statusTitle": "タスクステータスを変更",
+    "inspector.statusUpdateError": "ステータスの更新に失敗しました",
     "inspector.refreshGitTitle": "Git 状態を更新",
     "inspector.parentDirty": "親リポジトリに未コミット変更あり",
     "inspector.conflictFiles": "対象ファイル: {files}",
@@ -980,6 +981,7 @@ export const UI_STRINGS = {
     // TaskInspectorModal
     "inspector.statusAria": "Task status",
     "inspector.statusTitle": "Change task status",
+    "inspector.statusUpdateError": "Failed to update task status",
     "inspector.refreshGitTitle": "Refresh Git status",
     "inspector.parentDirty": "Parent repository has uncommitted changes",
     "inspector.conflictFiles": "Conflicted files: {files}",

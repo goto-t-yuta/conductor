@@ -103,11 +103,13 @@ fun TasksScreen(
     selectedTaskId: String?,
     selectedTaskDetail: TaskDetailResponse?,
     isLoadingDetail: Boolean,
+    taskDetailError: String?,
     updatingTaskIds: Set<String>,
     landingTaskIds: Set<String>,
     onToggleGroupByProject: () -> Unit,
     onOpenTask: (String) -> Unit,
     onCloseTask: () -> Unit,
+    onDismissTaskDetailError: () -> Unit,
     onMarkDone: (String) -> Unit,
     onReopen: (String) -> Unit,
     onStopTask: (String) -> Unit,
@@ -493,7 +495,9 @@ fun TasksScreen(
             detail = selectedTaskDetail,
             isLoadingDetail = isLoadingDetail,
             actionInProgress = isSheetTaskBusy,
+            actionError = taskDetailError,
             onDismiss = onCloseTask,
+            onDismissActionError = onDismissTaskDetailError,
             onMarkDone = { onMarkDone(activeSheetTask.id) },
             onReopen = { onReopen(activeSheetTask.id) },
             onStopTask = { onStopTask(activeSheetTask.id) },
@@ -1118,7 +1122,9 @@ private fun TaskDetailBottomSheet(
     detail: TaskDetailResponse?,
     isLoadingDetail: Boolean,
     actionInProgress: Boolean,
+    actionError: String?,
     onDismiss: () -> Unit,
+    onDismissActionError: () -> Unit,
     onMarkDone: () -> Unit,
     onReopen: () -> Unit,
     onStopTask: () -> Unit,
@@ -1264,6 +1270,43 @@ private fun TaskDetailBottomSheet(
                     Icon(Icons.Default.AlternateEmail, contentDescription = null, modifier = Modifier.size(15.dp))
                     Spacer(modifier = Modifier.width(5.dp))
                     Text("チャットで参照", fontSize = 12.5.sp)
+                }
+            }
+
+            if (!actionError.isNullOrBlank()) {
+                Surface(
+                    color = colors.roseBg,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, colors.rose.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.WarningAmber,
+                            contentDescription = null,
+                            tint = colors.rose,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Text(
+                            text = actionError,
+                            fontSize = 11.5.sp,
+                            lineHeight = 16.sp,
+                            color = colors.roseText,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "エラーを閉じる",
+                            tint = colors.rose,
+                            modifier = Modifier
+                                .size(16.dp)
+                                .clickable(onClick = onDismissActionError),
+                        )
+                    }
                 }
             }
 
