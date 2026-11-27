@@ -50,7 +50,30 @@ cd mobile/android
 ビルド成果物は以下に生成されます：
 `mobile/android/app/build/outputs/apk/debug/app-debug.apk`
 
-### 3. Android 実機 / エミュレータへのインストール
+### 3. Release 署名付き APK のビルド（上書きアップデート対応）
+
+配布用 APK は毎回同じ署名鍵と単調増加する `versionCode` でビルドする必要があります（署名鍵が変わると Android で上書きインストール時に `App not installed` になります）。
+
+GitHub Actions（`.github/workflows/release.yml`）では以下の GitHub Secrets を用いて固定鍵で `assembleRelease` を実行し、`GITHUB_RUN_NUMBER` に基づいて単調増加する `versionCode` / `versionName` を付与します：
+
+- `ANDROID_KEYSTORE_BASE64`（PKCS12 / JKS キーストアを Base64 エンコードした文字列）
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+ローカルで同じ固定鍵を使って Release APK をビルドする場合（バックアップ例: `~/.conductor-signing/signing.env`）：
+
+```bash
+source ~/.conductor-signing/signing.env
+cd mobile/android
+CONDUCTOR_BUILD_RUN_NUMBER=7 ./gradlew testDebugUnitTest testReleaseUnitTest assembleRelease
+```
+
+成果物: `mobile/android/app/build/outputs/apk/release/app-release.apk`
+
+> **初回移行時の注意**: 以前の Debug 署名版 APK（`assembleDebug` でビルドされたリリース）が端末に入っている場合、固定 Release 署名鍵へ切り替えた最初の 1 回のみ既存アプリのアンインストールが必要です。それ以降の Release 署名版同士はアプリ内アップデートおよび `adb install -r` で上書き更新できます。
+
+### 4. Android 実機 / エミュレータへのインストール
 
 USB デバッグを有効にした Android 端末を接続し、以下を実行します：
 

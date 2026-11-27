@@ -125,20 +125,102 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Run unit tests and build Android APK
-        working-directory: mobile/android
+      - name: Decode Android release keystore
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          chmod +x ./gradlew
-          ./gradlew testDebugUnitTest assembleDebug --no-daemon
+          for var in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!var:-}" ]; then
+              echo "ERROR: Missing required GitHub Actions secret: ${var}" >&2
+              exit 1
+            fi
+          done
 
-      - name: Prepare Android APK artifact
+          KEYSTORE_PATH="${RUNNER_TEMP}/conductor-android-release.jks"
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | tr -d '\r\n ' | base64 --decode > "${KEYSTORE_PATH}"
+          chmod 600 "${KEYSTORE_PATH}"
+          echo "ANDROID_SIGNING_STORE_FILE=${KEYSTORE_PATH}" >> "$GITHUB_ENV"
+
+      - name: Prepare Android version metadata
+        id: android_meta
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TAG="v${VERSION}-${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+          VERSION_NAME="${VERSION}-${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests and build signed release Android APK
+        working-directory: mobile/android
+        env:
+          ANDROID_REQUIRE_RELEASE_SIGNING: "true"
+          ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          CONDUCTOR_BUILD_VERSION: ${{ steps.android_meta.outputs.version }}
+          CONDUCTOR_BUILD_RUN_NUMBER: ${{ steps.android_meta.outputs.version_code }}
+          CONDUCTOR_BUILD_SHA: ${{ github.sha }}
+          CONDUCTOR_BUILD_TAG: ${{ steps.android_meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew testDebugUnitTest testReleaseUnitTest assembleRelease --no-daemon
+
+      - name: Verify signed APK and prepare artifact
+        shell: bash
+        env:
+          EXPECTED_VERSION_CODE: ${{ steps.android_meta.outputs.version_code }}
+          EXPECTED_VERSION_NAME: ${{ steps.android_meta.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          APK_PATH="mobile/android/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "${APK_PATH}" ]; then
+            echo "ERROR: Expected signed release APK not found at ${APK_PATH}" >&2
+            exit 1
+          fi
+
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          BUILD_TOOLS_DIR="$(find "${SDK_ROOT}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          if [ -z "${BUILD_TOOLS_DIR}" ]; then
+            echo "ERROR: Could not locate Android build-tools under ${SDK_ROOT}/build-tools" >&2
+            exit 1
+          fi
+
+          SIGN_INFO="$("${BUILD_TOOLS_DIR}/apksigner" verify --verbose --print-certs "${APK_PATH}")"
+          echo "${SIGN_INFO}"
+          if printf '%s' "${SIGN_INFO}" | grep -q "CN=Android Debug"; then
+            echo "ERROR: Release APK is signed with an ephemeral Android Debug key!" >&2
+            exit 1
+          fi
+
+          BADGING="$("${BUILD_TOOLS_DIR}/aapt2" dump badging "${APK_PATH}")"
+          PACKAGE_LINE="$(printf '%s\n' "${BADGING}" | grep '^package:')"
+          echo "${PACKAGE_LINE}"
+          if ! printf '%s\n' "${PACKAGE_LINE}" | grep -q "package: name='dev.conductor.mobile' versionCode='${EXPECTED_VERSION_CODE}' versionName='${EXPECTED_VERSION_NAME}'"; then
+            echo "ERROR: APK package/version metadata did not match expected versionCode=${EXPECTED_VERSION_CODE}, versionName=${EXPECTED_VERSION_NAME}" >&2
+            exit 1
+          fi
+
           mkdir -p release
-          cp mobile/android/app/build/outputs/apk/debug/app-debug.apk "release/conductor-android.apk"
+          cp "${APK_PATH}" "release/conductor-android.apk"
           ls -lh release/*.apk
+
+      - name: Clean up Android keystore
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${RUNNER_TEMP}/conductor-android-release.jks"
 
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v4
