@@ -29,6 +29,7 @@ import {
   readLocalMarkdownFile,
   writeLocalMarkdownFile,
 } from "./markdown-viewer.js";
+import { installMainWindowNavigationGuard } from "./main-window-guard.js";
 import { registerProjectFileTreeIpcHandlers } from "./project-files.js";
 import { QuitGuard, buildUpdateRestartConfirmationDialog } from "./quit-guard.js";
 import { StateStore } from "./state-store.js";
@@ -597,6 +598,17 @@ async function createWindow(): Promise<void> {
   });
 
   const devUrl = process.env.CONDUCTOR_DEV_SERVER_URL;
+  const rendererHtmlPath = path.join(__dirname, "../renderer/index.html");
+
+  installMainWindowNavigationGuard(mainWindow.webContents, {
+    devServerUrl: devUrl,
+    rendererHtmlPath,
+    onOpenInAppBrowser: (url) => {
+      controller?.setLayout({ showBrowserPane: true });
+      void browserManager?.navigate(url, true);
+    },
+  });
+
   mainWindow.webContents.session.setPermissionRequestHandler(
     (_webContents, permission, callback) => {
       if (permission === "clipboard-sanitized-write") {
@@ -629,7 +641,7 @@ async function createWindow(): Promise<void> {
   if (devUrl) {
     await mainWindow.loadURL(devUrl);
   } else {
-    await mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+    await mainWindow.loadFile(rendererHtmlPath);
   }
 
   mainWindow.on("closed", () => {

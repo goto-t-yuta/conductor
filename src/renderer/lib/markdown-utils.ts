@@ -2,6 +2,8 @@ import type { AgentTask, Project } from "../../shared/types.js";
 import { formatTaskCode, parseAndResolveMentions } from "../../shared/mentions.js";
 
 export const MARKDOWN_EXT_REGEX = /\.(?:md|markdown|mdown|mkd|mdx)$/i;
+export const HTML_EXT_REGEX = /\.(?:html|htm)$/i;
+export const IMAGE_EXT_REGEX = /\.(?:png|jpe?g|jfif|webp|gif|bmp|svg|ico|avif)$/i;
 export const VIDEO_EXT_REGEX = /\.(?:mp4|webm|mov)$/i;
 export const IMAGE_OR_VIDEO_EXT_REGEX =
   /\.(?:png|jpe?g|jfif|webp|gif|bmp|svg|ico|avif|mp4|webm|mov)(?:[?#][^\s)]*)?$/i;
@@ -92,7 +94,9 @@ export interface MarkdownHeading {
 
 export type ClassifiedHref =
   | { kind: "web"; url: string }
+  | { kind: "localHtml"; url: string; filePath: string | null }
   | { kind: "markdown"; target: string; baseFilePath?: string; hash: string | null }
+  | { kind: "image"; target: string; baseFilePath?: string; resolvedPath: string | null }
   | { kind: "anchor"; id: string }
   | { kind: "other"; href: string };
 
@@ -479,6 +483,63 @@ export function isMarkdownPathOrUrl(raw: string): boolean {
   return MARKDOWN_EXT_REGEX.test(pathPart);
 }
 
+export function isHtmlPathOrUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const pathPart = safeDecodeURIComponent(stripQueryAndHash(trimmed));
+  return HTML_EXT_REGEX.test(pathPart);
+}
+
+export function isImagePathOrUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const pathPart = safeDecodeURIComponent(stripQueryAndHash(trimmed));
+  return IMAGE_EXT_REGEX.test(pathPart);
+}
+
+function extractQueryAndHash(raw: string): string {
+  const qIdx = raw.indexOf("?");
+  const hIdx = raw.indexOf("#");
+  if (qIdx === -1 && hIdx === -1) return "";
+  if (qIdx === -1) return raw.slice(hIdx);
+  if (hIdx === -1) return raw.slice(qIdx);
+  return raw.slice(Math.min(qIdx, hIdx));
+}
+
+function normalizeFileHrefUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol.toLowerCase() === "file:") {
+      return parsed.toString();
+    }
+  } catch {
+    // keep raw if URL constructor rejects it
+  }
+  return rawUrl;
+}
+
+function localPathToFileUrl(localPath: string, queryAndHash = ""): string | null {
+  const normalized = localPath.replace(/\\/g, "/");
+  if (!normalized || normalized.includes("\0")) return null;
+  if (normalized.startsWith("/")) {
+    const encoded = normalized
+      .split("/")
+      .map((seg) => encodeURIComponent(seg))
+      .join("/");
+    return `file://${encoded}${queryAndHash}`;
+  }
+  if (WINDOWS_DRIVE_PATH_RE.test(normalized)) {
+    const drive = normalized.slice(0, 2);
+    const rest = normalized
+      .slice(2)
+      .split("/")
+      .map((seg) => encodeURIComponent(seg))
+      .join("/");
+    return `file:///${drive}${rest}${queryAndHash}`;
+  }
+  return null;
+}
+
 export function classifyLinkHref(href: string | undefined, baseFilePath?: string): ClassifiedHref {
   if (!href) return { kind: "other", href: "" };
   const trimmed = href.trim();
@@ -507,26 +568,81 @@ export function classifyLinkHref(href: string | undefined, baseFilePath?: string
         hash: extractHash(trimmed),
       };
     }
+    if (isImagePathOrUrl(trimmed)) {
+      return {
+        kind: "image",
+        target: trimmed,
+        resolvedPath: resolveMarkdownImagePath(trimmed),
+      };
+    }
+    if (isHtmlPathOrUrl(trimmed)) {
+      return {
+        kind: "localHtml",
+        url: normalizeFileHrefUrl(trimmed),
+        filePath: fileUrlToLocalPath(trimmed),
+      };
+    }
     return { kind: "other", href: trimmed };
   }
 
-  // Relative or absolute filesystem path inside an open local Markdown document
-  const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed);
-  if (!hasScheme && isMarkdownPathOrUrl(trimmed)) {
-    if (trimmed.startsWith("/") || trimmed.startsWith("~/")) {
-      return {
-        kind: "markdown",
-        target: trimmed,
-        hash: extractHash(trimmed),
-      };
+  // Relative or absolute filesystem path inside an open local Markdown document or chat output
+  const isWindowsDrive = WINDOWS_DRIVE_PATH_RE.test(trimmed);
+  const hasScheme = !isWindowsDrive && URL_SCHEME_RE.test(trimmed);
+  if (!hasScheme) {
+    const isAbsoluteOrHome =
+      trimmed.startsWith("/") ||
+      trimmed.startsWith("~/") ||
+      trimmed.startsWith("~\\") ||
+      isWindowsDrive;
+
+    if (isMarkdownPathOrUrl(trimmed)) {
+      if (isAbsoluteOrHome) {
+        return {
+          kind: "markdown",
+          target: trimmed,
+          hash: extractHash(trimmed),
+        };
+      }
+      if (baseFilePath) {
+        return {
+          kind: "markdown",
+          target: trimmed,
+          baseFilePath,
+          hash: extractHash(trimmed),
+        };
+      }
     }
-    if (baseFilePath) {
-      return {
-        kind: "markdown",
-        target: trimmed,
-        baseFilePath,
-        hash: extractHash(trimmed),
-      };
+
+    if (isImagePathOrUrl(trimmed)) {
+      if (isAbsoluteOrHome) {
+        return {
+          kind: "image",
+          target: trimmed,
+          resolvedPath: resolveMarkdownImagePath(trimmed),
+        };
+      }
+      if (baseFilePath) {
+        return {
+          kind: "image",
+          target: trimmed,
+          baseFilePath,
+          resolvedPath: resolveMarkdownImagePath(trimmed, baseFilePath),
+        };
+      }
+    }
+
+    if (isHtmlPathOrUrl(trimmed) && (isAbsoluteOrHome || baseFilePath)) {
+      const resolvedPath = resolveMarkdownImagePath(trimmed, baseFilePath);
+      if (resolvedPath) {
+        const fileUrl = localPathToFileUrl(resolvedPath, extractQueryAndHash(trimmed));
+        if (fileUrl) {
+          return {
+            kind: "localHtml",
+            url: fileUrl,
+            filePath: resolvedPath,
+          };
+        }
+      }
     }
   }
 

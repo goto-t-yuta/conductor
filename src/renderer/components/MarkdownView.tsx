@@ -3,7 +3,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
-import { Check, Copy, Film, FileText, FolderOpen, Image as ImageIcon, ImageOff, RotateCw, VideoOff } from "lucide-react";
+import { Check, Copy, Film, FileText, FolderOpen, Globe, Image as ImageIcon, ImageOff, RotateCw, VideoOff } from "lucide-react";
 import type { AgentTask, Project } from "../../shared/types.js";
 import {
   defaultMarkdownImageCache,
@@ -98,6 +98,81 @@ export const CONDUCTOR_SANITIZE_SCHEMA = {
 
 export function conductorUrlTransform(url: string, key: string): string {
   return transformMarkdownUrl(url, key, defaultUrlTransform);
+}
+
+export interface MarkdownLinkClickEventLike {
+  preventDefault(): void;
+}
+
+export interface HandleMarkdownLinkClickParams {
+  href: string | undefined;
+  baseFilePath?: string;
+  linkText?: string;
+  headingIdPrefix?: string;
+  onOpenUrl: (url: string) => void;
+  onOpenMarkdownFile?: (target: string, baseFilePath?: string) => void;
+  onOpenImage?: (image: MarkdownOpenedImage) => void;
+  onScrollToHeading?: (id: string) => void;
+  imageCache?: MarkdownImageCache;
+}
+
+/**
+ * Handles anchor clicks rendered inside `MarkdownView` so local `file://` links
+ * (`.md`, images, `.html`/`.htm`, and other local files) never navigate the main
+ * Conductor window away from the app UI.
+ */
+export function handleMarkdownLinkClick(
+  e: MarkdownLinkClickEventLike,
+  params: HandleMarkdownLinkClickParams,
+) {
+  const classified = classifyLinkHref(params.href, params.baseFilePath);
+
+  if (classified.kind === "web" || classified.kind === "localHtml") {
+    e.preventDefault();
+    params.onOpenUrl(classified.url);
+    return classified;
+  }
+
+  if (classified.kind === "markdown") {
+    e.preventDefault();
+    if (params.onOpenMarkdownFile) {
+      params.onOpenMarkdownFile(classified.target, classified.baseFilePath);
+    }
+    return classified;
+  }
+
+  if (classified.kind === "image") {
+    e.preventDefault();
+    if (params.onOpenImage) {
+      const cacheKey = classified.resolvedPath ?? classified.target;
+      const cached = params.imageCache?.get(cacheKey) ?? null;
+      const alt = params.linkText?.trim() || undefined;
+      params.onOpenImage({
+        src: cached?.dataUrl ?? classified.resolvedPath ?? classified.target,
+        alt,
+        filePath: cached?.filePath ?? classified.resolvedPath ?? classified.target,
+      });
+    }
+    return classified;
+  }
+
+  if (classified.kind === "anchor") {
+    e.preventDefault();
+    if (params.onScrollToHeading) {
+      params.onScrollToHeading(classified.id);
+    } else if (params.headingIdPrefix && typeof document !== "undefined") {
+      const el = document.getElementById(`${params.headingIdPrefix}${classified.id}`);
+      el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    return classified;
+  }
+
+  // Guard: never allow unhandled `file://`, relative paths, or non-mailto/tel links
+  // to navigate the main Electron window away from Conductor UI.
+  if (!/^(?:mailto|tel):/i.test(classified.href)) {
+    e.preventDefault();
+  }
+  return classified;
 }
 
 type LocalImageLoadState =
@@ -1107,31 +1182,50 @@ export const MarkdownView: React.FC<MarkdownViewProps> = React.memo(({
       a({ href, children }) {
         const classified = classifyLinkHref(href, baseFilePath);
         const isLocalMd = classified.kind === "markdown" && Boolean(onOpenMarkdownFile);
+        const isLocalHtml = classified.kind === "localHtml";
+        const isLocalImage = classified.kind === "image" && Boolean(onOpenImage);
+        const linkTitle = isLocalMd
+          ? t(locale, "markdown.openInViewerTitle")
+          : isLocalHtml
+            ? t(locale, "markdown.openHtmlInBrowserTitle")
+            : isLocalImage
+              ? t(locale, "markdown.imageZoomTitle")
+              : undefined;
 
         return (
           <a
             href={href}
-            title={isLocalMd ? t(locale, "markdown.openInViewerTitle") : undefined}
+            title={linkTitle}
             onClick={(e) => {
-              if (classified.kind === "web") {
-                e.preventDefault();
-                onOpenUrl(classified.url);
-              } else if (classified.kind === "markdown" && onOpenMarkdownFile) {
-                e.preventDefault();
-                onOpenMarkdownFile(classified.target, classified.baseFilePath);
-              } else if (classified.kind === "anchor") {
-                e.preventDefault();
-                if (onScrollToHeading) {
-                  onScrollToHeading(classified.id);
-                } else if (headingIdPrefix) {
-                  const el = document.getElementById(`${headingIdPrefix}${classified.id}`);
-                  el?.scrollIntoView({ behavior: "smooth", block: "start" });
-                }
-              }
+              handleMarkdownLinkClick(e, {
+                href,
+                baseFilePath,
+                linkText: extractNodeText(children),
+                headingIdPrefix,
+                onOpenUrl,
+                onOpenMarkdownFile,
+                onOpenImage,
+                onScrollToHeading,
+                imageCache,
+              });
             }}
           >
             {isLocalMd && (
               <FileText
+                className={`inline-block w-3.5 h-3.5 mr-1 -mt-0.5 align-middle ${
+                  isUserBubble ? "text-current" : "text-indigo-500"
+                }`}
+              />
+            )}
+            {isLocalHtml && (
+              <Globe
+                className={`inline-block w-3.5 h-3.5 mr-1 -mt-0.5 align-middle ${
+                  isUserBubble ? "text-current" : "text-indigo-500"
+                }`}
+              />
+            )}
+            {isLocalImage && (
+              <ImageIcon
                 className={`inline-block w-3.5 h-3.5 mr-1 -mt-0.5 align-middle ${
                   isUserBubble ? "text-current" : "text-indigo-500"
                 }`}
@@ -1192,6 +1286,8 @@ export const MarkdownView: React.FC<MarkdownViewProps> = React.memo(({
     mentionContext,
     baseFilePath,
     onOpenMarkdownFile,
+    onOpenImage,
+    imageCache,
     locale,
     onOpenUrl,
     onScrollToHeading,

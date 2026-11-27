@@ -251,6 +251,16 @@ export function shortTitleFromUrl(urlString: string): string {
   if (!urlString) return "New Tab";
   try {
     const u = new URL(urlString);
+    if (u.protocol === "file:") {
+      let decodedPath = u.pathname;
+      try {
+        decodedPath = decodeURIComponent(u.pathname);
+      } catch {
+        // keep raw pathname
+      }
+      const base = decodedPath.split("/").filter(Boolean).pop();
+      if (base) return base;
+    }
     return u.port ? `${u.hostname}:${u.port}` : u.hostname || urlString;
   } catch {
     return urlString;
