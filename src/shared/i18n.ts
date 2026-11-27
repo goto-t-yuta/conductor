@@ -1555,6 +1555,8 @@ export function getFriendlyToolLabel(name: string, locale: UiLocale = "ja"): str
         return "Stop worker";
       case "get_task_detail":
         return "Get task detail";
+      case "search_chat_history":
+        return "Search chat history";
       case "browser_open":
         return "Open browser";
       case "browser_snapshot":
@@ -1599,6 +1601,8 @@ export function getFriendlyToolLabel(name: string, locale: UiLocale = "ja"): str
       return "ワーカーを停止";
     case "get_task_detail":
       return "タスク詳細を取得";
+    case "search_chat_history":
+      return "チャット履歴を検索";
     case "browser_open":
       return "ブラウザを開く";
     case "browser_snapshot":

@@ -153,8 +153,9 @@ describe("Conductor core", () => {
 
       const list = await postMcp({ jsonrpc: "2.0", id: 2, method: "tools/list" });
       const tools = (list.result as { tools: Array<{ name: string }> }).tools;
-      expect(tools.length).toBe(19);
+      expect(tools.length).toBe(20);
       expect(tools.some((t) => t.name === "search_projects")).toBe(true);
+      expect(tools.some((t) => t.name === "search_chat_history")).toBe(true);
       expect(tools.some((t) => t.name === "scan_directory_projects")).toBe(true);
       expect(tools.some((t) => t.name === "browser_click")).toBe(true);
       expect(tools.some((t) => t.name === "browser_console_errors")).toBe(true);
