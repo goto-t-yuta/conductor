@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.Checklist
@@ -62,6 +63,7 @@ import dev.conductor.mobile.ui.screens.QrScannerScreen
 import dev.conductor.mobile.ui.screens.SettingsScreen
 import dev.conductor.mobile.ui.screens.SetupScreen
 import dev.conductor.mobile.ui.screens.TasksScreen
+import dev.conductor.mobile.ui.screens.rememberChatScrollSessionState
 import dev.conductor.mobile.ui.theme.ConductorTheme
 import dev.conductor.mobile.ui.theme.resolveDarkTheme
 
@@ -138,6 +140,23 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
     var currentTab by rememberSaveable { mutableStateOf(MainTab.CHAT) }
     var showQrScanner by rememberSaveable { mutableStateOf(false) }
+    val chatListState = rememberLazyListState()
+    val chatScrollSessionState = rememberChatScrollSessionState()
+    var lastConnectedServerUrl by rememberSaveable { mutableStateOf("") }
+
+    LaunchedEffect(state.isLoaded, state.config.isConfigured, state.config.serverUrl) {
+        if (!state.isLoaded) return@LaunchedEffect
+        if (!state.config.isConfigured) {
+            chatScrollSessionState.reset()
+            lastConnectedServerUrl = ""
+        } else {
+            val currentUrl = state.config.serverUrl
+            if (lastConnectedServerUrl.isNotEmpty() && lastConnectedServerUrl != currentUrl) {
+                chatScrollSessionState.reset()
+            }
+            lastConnectedServerUrl = currentUrl
+        }
+    }
 
     LaunchedEffect(state.banner?.id) {
         val banner = state.banner ?: return@LaunchedEffect
@@ -375,6 +394,8 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                             viewModel.openTaskDetail(taskId)
                             currentTab = MainTab.TASKS
                         },
+                        listState = chatListState,
+                        scrollSessionState = chatScrollSessionState,
                     )
 
                     MainTab.TASKS -> TasksScreen(
