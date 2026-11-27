@@ -54,9 +54,11 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.conductor.mobile.data.ConnectionTestResult
+import dev.conductor.mobile.model.AppUpdateState
 import dev.conductor.mobile.model.ConnectUriParser
 import dev.conductor.mobile.model.ConnectionConfig
 import dev.conductor.mobile.model.ThemeMode
+import dev.conductor.mobile.ui.components.AppUpdateCard
 import dev.conductor.mobile.ui.components.ConductorCard
 import dev.conductor.mobile.ui.components.ThemeModeSelector
 import dev.conductor.mobile.ui.theme.ConductorTheme
@@ -68,7 +70,14 @@ fun SetupScreen(
     themeMode: ThemeMode,
     isTesting: Boolean,
     lastTestResult: ConnectionTestResult?,
+    appUpdate: AppUpdateState,
     onSelectThemeMode: (ThemeMode) -> Unit,
+    onCheckForUpdates: () -> Unit,
+    onDownloadAndInstallUpdate: () -> Unit,
+    onCancelUpdateDownload: () -> Unit,
+    onInstallDownloadedApk: () -> Unit,
+    onOpenUnknownSourcesSettings: () -> Unit,
+    onOpenReleasePage: (String?) -> Unit,
     onConsumeDeepLink: () -> Unit,
     onOpenQrScanner: () -> Unit,
     onTestConnection: (url: String, token: String) -> Unit,
@@ -420,6 +429,16 @@ fun SetupScreen(
                 fontSize = 11.5.sp,
                 lineHeight = 16.sp,
                 color = colors.textMuted,
+            )
+
+            AppUpdateCard(
+                appUpdate = appUpdate,
+                onCheckForUpdates = onCheckForUpdates,
+                onDownloadAndInstall = onDownloadAndInstallUpdate,
+                onCancelDownload = onCancelUpdateDownload,
+                onInstallDownloaded = onInstallDownloadedApk,
+                onOpenUnknownSourcesSettings = onOpenUnknownSourcesSettings,
+                onOpenReleasePage = onOpenReleasePage,
             )
 
             Spacer(modifier = Modifier.height(8.dp))

@@ -2,26 +2,39 @@ package dev.conductor.mobile.ui
 
 import android.app.Application
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.conductor.mobile.BuildConfig
 import dev.conductor.mobile.data.AndroidImageAttachmentProcessor
+import dev.conductor.mobile.data.ApkInstallLaunchResult
+import dev.conductor.mobile.data.ApkInstaller
+import dev.conductor.mobile.data.AppUpdateClient
 import dev.conductor.mobile.data.AttachmentByteCache
 import dev.conductor.mobile.data.ConductorApiClient
 import dev.conductor.mobile.data.ConnectionStore
 import dev.conductor.mobile.data.ConnectionTestResult
 import dev.conductor.mobile.data.ImageAttachmentLogic
+import dev.conductor.mobile.data.ReleaseFetchResult
 import dev.conductor.mobile.data.SseEvent
 import dev.conductor.mobile.model.AppSnapshot
+import dev.conductor.mobile.model.AppUpdateErrorCode
+import dev.conductor.mobile.model.AppUpdateLogic
+import dev.conductor.mobile.model.AppUpdateState
+import dev.conductor.mobile.model.AppUpdateStatus
 import dev.conductor.mobile.model.ConnectUriParser
 import dev.conductor.mobile.model.ConnectionConfig
+import dev.conductor.mobile.model.CurrentBuildInfo
 import dev.conductor.mobile.model.ExplicitMentionTarget
+import dev.conductor.mobile.model.GITHUB_LATEST_RELEASE_PAGE_URL
 import dev.conductor.mobile.model.PendingImageAttachment
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.TaskDetailResponse
 import dev.conductor.mobile.model.TaskStatusActions
 import dev.conductor.mobile.model.ThemeMode
 import dev.conductor.mobile.ui.components.ConductorImageLoader
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -34,6 +47,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
 
 data class UiBanner(
     val id: Long,
@@ -65,20 +79,40 @@ data class ConductorUiState(
     val lastTestResult: ConnectionTestResult? = null,
     val pendingDeepLinkConfig: ConnectionConfig? = null,
     val banner: UiBanner? = null,
+    val appUpdate: AppUpdateState = AppUpdateState(),
 )
 
 class ConductorViewModel(application: Application) : AndroidViewModel(application) {
-    private val store = ConnectionStore(application.applicationContext)
+    private val appContext = application.applicationContext
+    private val store = ConnectionStore(appContext)
     private val api = ConductorApiClient()
-    private val imageProcessor = AndroidImageAttachmentProcessor(application.applicationContext)
+    private val imageProcessor = AndroidImageAttachmentProcessor(appContext)
     private val attachmentImageCache = AttachmentByteCache()
     val imageLoader = ConductorImageLoader(api)
 
-    private val _uiState = MutableStateFlow(ConductorUiState())
+    private val currentBuildInfo = CurrentBuildInfo(
+        versionName = BuildConfig.VERSION_NAME,
+        versionCode = BuildConfig.VERSION_CODE,
+        buildTag = BuildConfig.BUILD_TAG.takeIf { it.isNotBlank() },
+        commitSha = BuildConfig.BUILD_COMMIT_SHA.takeIf { it.isNotBlank() },
+        runNumber = BuildConfig.BUILD_RUN_NUMBER.takeIf { it > 0 },
+    )
+    private val updateClient = AppUpdateClient(
+        userAgentVersion = BuildConfig.VERSION_NAME,
+        supportedAbis = Build.SUPPORTED_ABIS.toList(),
+    )
+
+    private val _uiState = MutableStateFlow(
+        ConductorUiState(
+            appUpdate = AppUpdateState(currentBuild = currentBuildInfo),
+        ),
+    )
     val uiState: StateFlow<ConductorUiState> = _uiState.asStateFlow()
 
     private var streamJob: Job? = null
     private var streamingSyncJob: Job? = null
+    private var updateCheckJob: Job? = null
+    private var updateDownloadJob: Job? = null
     private var activeSyncConfig: ConnectionConfig? = null
     private var lastSnapshotReceivedAtMs: Long = 0L
     private var nextBannerId: Long = 1L
@@ -120,6 +154,11 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                     }
                 }
+        }
+        // Lightweight background check on startup (never disturbs user if offline/error)
+        viewModelScope.launch {
+            delay(1_200L)
+            checkForUpdates(silent = true)
         }
     }
 
@@ -239,6 +278,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun onAppForegrounded() {
+        resumePendingApkInstallIfPermitted()
         val cfg = _uiState.value.config
         if (!cfg.isConfigured) return
         val transport = _uiState.value.transportState
@@ -798,8 +838,313 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    // --- App Update (GitHub Releases standalone check + in-app APK install) ---
+
+    fun checkForUpdates(silent: Boolean = false) {
+        val currentUpdate = _uiState.value.appUpdate
+        if (currentUpdate.status == AppUpdateStatus.DOWNLOADING) return
+        if (updateCheckJob?.isActive == true) return
+
+        updateCheckJob = viewModelScope.launch {
+            if (!silent) {
+                _uiState.update { state ->
+                    state.copy(
+                        appUpdate = state.appUpdate.copy(
+                            status = AppUpdateStatus.CHECKING,
+                            errorMessage = null,
+                            errorCode = null,
+                        ),
+                    )
+                }
+            }
+
+            when (val result = updateClient.fetchLatestRelease()) {
+                is ReleaseFetchResult.Success -> {
+                    val release = result.release
+                    val hasUpdate = AppUpdateLogic.isUpdateAvailable(
+                        current = currentBuildInfo,
+                        latestTag = release.tagName,
+                        latestTargetCommitish = result.targetCommitish,
+                    )
+                    val checkedAtMs = System.currentTimeMillis()
+                    _uiState.update { state ->
+                        val prev = state.appUpdate
+                        val downloadedFile = prev.downloadedApkPath?.let(::File)
+                        val keepDownloaded = downloadedFile != null &&
+                            downloadedFile.isFile &&
+                            prev.latestRelease?.tagName == release.tagName
+
+                        state.copy(
+                            appUpdate = prev.copy(
+                                status = when {
+                                    keepDownloaded -> AppUpdateStatus.DOWNLOADED
+                                    hasUpdate -> AppUpdateStatus.AVAILABLE
+                                    else -> AppUpdateStatus.UP_TO_DATE
+                                },
+                                lastCheckedAtMs = checkedAtMs,
+                                latestRelease = release,
+                                updateAvailable = hasUpdate,
+                                downloadProgress = if (keepDownloaded) prev.downloadProgress else null,
+                                downloadedApkPath = if (keepDownloaded) prev.downloadedApkPath else null,
+                                needsUnknownSourcesPermission = if (keepDownloaded) {
+                                    prev.needsUnknownSourcesPermission
+                                } else {
+                                    false
+                                },
+                                errorMessage = null,
+                                errorCode = null,
+                                bannerDismissedForTag = if (prev.bannerDismissedForTag == release.tagName) {
+                                    prev.bannerDismissedForTag
+                                } else {
+                                    null
+                                },
+                            ),
+                        )
+                    }
+                }
+
+                is ReleaseFetchResult.Failure -> {
+                    if (silent) return@launch
+                    val checkedAtMs = System.currentTimeMillis()
+                    _uiState.update { state ->
+                        state.copy(
+                            appUpdate = state.appUpdate.copy(
+                                status = AppUpdateStatus.ERROR,
+                                lastCheckedAtMs = checkedAtMs,
+                                errorMessage = result.message,
+                                errorCode = result.errorCode,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun downloadAndInstallUpdate() {
+        val currentUpdate = _uiState.value.appUpdate
+        if (currentUpdate.status == AppUpdateStatus.DOWNLOADING) return
+
+        val release = currentUpdate.latestRelease
+        val asset = release?.apkAsset
+        if (release == null || asset == null) {
+            _uiState.update { state ->
+                state.copy(
+                    appUpdate = state.appUpdate.copy(
+                        status = AppUpdateStatus.ERROR,
+                        errorCode = AppUpdateErrorCode.NO_ASSET,
+                        errorMessage = "このリリースにはインストール可能な Android APK が含まれていません。",
+                    ),
+                )
+            }
+            return
+        }
+
+        // Reuse already downloaded APK for the exact same release tag if present
+        val existingPath = currentUpdate.downloadedApkPath
+        if (existingPath != null && File(existingPath).isFile) {
+            installDownloadedApk()
+            return
+        }
+
+        updateDownloadJob?.cancel()
+        updateDownloadJob = viewModelScope.launch {
+            val initialTotal = asset.size.takeIf { it > 0L }
+            _uiState.update { state ->
+                state.copy(
+                    appUpdate = state.appUpdate.copy(
+                        status = AppUpdateStatus.DOWNLOADING,
+                        downloadProgress = dev.conductor.mobile.model.AppUpdateDownloadProgress(
+                            downloadedBytes = 0L,
+                            totalBytes = initialTotal,
+                            percent = if (initialTotal != null) 0 else null,
+                        ),
+                        downloadedApkPath = null,
+                        needsUnknownSourcesPermission = false,
+                        errorMessage = null,
+                        errorCode = null,
+                    ),
+                )
+            }
+
+            try {
+                val downloadResult = updateClient.downloadApk(
+                    asset = asset,
+                    updatesDir = ApkInstaller.updatesDirectory(appContext),
+                    onProgress = { progress ->
+                        _uiState.update { state ->
+                            if (state.appUpdate.status != AppUpdateStatus.DOWNLOADING) {
+                                state
+                            } else {
+                                state.copy(
+                                    appUpdate = state.appUpdate.copy(downloadProgress = progress),
+                                )
+                            }
+                        }
+                    },
+                )
+
+                downloadResult
+                    .onSuccess { apkFile ->
+                        _uiState.update { state ->
+                            state.copy(
+                                appUpdate = state.appUpdate.copy(
+                                    status = AppUpdateStatus.DOWNLOADED,
+                                    downloadedApkPath = apkFile.absolutePath,
+                                    errorMessage = null,
+                                    errorCode = null,
+                                ),
+                            )
+                        }
+                        launchApkInstaller(apkFile)
+                    }
+                    .onFailure { err ->
+                        _uiState.update { state ->
+                            state.copy(
+                                appUpdate = state.appUpdate.copy(
+                                    status = AppUpdateStatus.ERROR,
+                                    downloadProgress = null,
+                                    errorCode = AppUpdateErrorCode.DOWNLOAD_FAILED,
+                                    errorMessage = err.message ?: "APK のダウンロードに失敗しました。",
+                                ),
+                            )
+                        }
+                    }
+            } catch (_: CancellationException) {
+                _uiState.update { state ->
+                    val nextStatus = if (state.appUpdate.updateAvailable) {
+                        AppUpdateStatus.AVAILABLE
+                    } else {
+                        AppUpdateStatus.UP_TO_DATE
+                    }
+                    state.copy(
+                        appUpdate = state.appUpdate.copy(
+                            status = nextStatus,
+                            downloadProgress = null,
+                            errorMessage = null,
+                            errorCode = null,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelUpdateDownload() {
+        updateClient.cancelDownload()
+        updateDownloadJob?.cancel()
+        updateDownloadJob = null
+    }
+
+    fun installDownloadedApk() {
+        val path = _uiState.value.appUpdate.downloadedApkPath
+        val file = path?.let(::File)
+        if (file == null || !file.isFile) {
+            _uiState.update { state ->
+                state.copy(
+                    appUpdate = state.appUpdate.copy(
+                        status = if (state.appUpdate.updateAvailable) {
+                            AppUpdateStatus.AVAILABLE
+                        } else {
+                            AppUpdateStatus.IDLE
+                        },
+                        downloadedApkPath = null,
+                        needsUnknownSourcesPermission = false,
+                        errorCode = AppUpdateErrorCode.INSTALL_FAILED,
+                        errorMessage = "ダウンロード済みの APK が見つかりませんでした。もう一度ダウンロードしてください。",
+                    ),
+                )
+            }
+            return
+        }
+        launchApkInstaller(file)
+    }
+
+    fun openUnknownAppSourcesSettings() {
+        ApkInstaller.openUnknownAppSourcesSettings(appContext)
+            .onFailure { err ->
+                showBanner("設定画面を開けませんでした: ${err.message ?: "不明なエラー"}")
+            }
+    }
+
+    fun openReleasePage(url: String? = null) {
+        val target = url?.takeIf { it.startsWith("https://github.com/", ignoreCase = true) }
+            ?: _uiState.value.appUpdate.latestRelease?.htmlUrl
+            ?: GITHUB_LATEST_RELEASE_PAGE_URL
+        ApkInstaller.openReleasePage(appContext, target)
+            .onFailure { err ->
+                showBanner("リリースページを開けませんでした: ${err.message ?: "不明なエラー"}")
+            }
+    }
+
+    fun dismissUpdateBanner() {
+        val tag = _uiState.value.appUpdate.latestRelease?.tagName ?: return
+        _uiState.update { state ->
+            state.copy(
+                appUpdate = state.appUpdate.copy(bannerDismissedForTag = tag),
+            )
+        }
+    }
+
+    private fun launchApkInstaller(apkFile: File) {
+        when (val result = ApkInstaller.launchInstaller(appContext, apkFile)) {
+            is ApkInstallLaunchResult.Launched -> {
+                _uiState.update { state ->
+                    state.copy(
+                        appUpdate = state.appUpdate.copy(
+                            status = AppUpdateStatus.DOWNLOADED,
+                            needsUnknownSourcesPermission = false,
+                            errorMessage = null,
+                            errorCode = null,
+                        ),
+                    )
+                }
+            }
+
+            is ApkInstallLaunchResult.PermissionRequired -> {
+                _uiState.update { state ->
+                    state.copy(
+                        appUpdate = state.appUpdate.copy(
+                            status = AppUpdateStatus.DOWNLOADED,
+                            needsUnknownSourcesPermission = true,
+                            errorCode = AppUpdateErrorCode.INSTALL_PERMISSION_REQUIRED,
+                            errorMessage = "APK をインストールするには「不明なアプリのインストール」を許可してください。",
+                        ),
+                    )
+                }
+                showBanner("「不明なアプリのインストール」を許可してからインストールしてください")
+                ApkInstaller.openUnknownAppSourcesSettings(appContext)
+            }
+
+            is ApkInstallLaunchResult.Failed -> {
+                _uiState.update { state ->
+                    state.copy(
+                        appUpdate = state.appUpdate.copy(
+                            status = AppUpdateStatus.DOWNLOADED,
+                            needsUnknownSourcesPermission = false,
+                            errorCode = AppUpdateErrorCode.INSTALL_FAILED,
+                            errorMessage = result.message,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    private fun resumePendingApkInstallIfPermitted() {
+        val update = _uiState.value.appUpdate
+        if (!update.needsUnknownSourcesPermission) return
+        if (!ApkInstaller.canRequestPackageInstalls(appContext)) return
+        val file = update.downloadedApkPath?.let(::File) ?: return
+        if (!file.isFile) return
+        launchApkInstaller(file)
+    }
+
     override fun onCleared() {
         stopRealtimeSync()
+        updateCheckJob?.cancel()
+        updateDownloadJob?.cancel()
+        updateClient.close()
         imageLoader.clear()
         api.close()
         super.onCleared()

@@ -5,6 +5,74 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+fun readRootPackageVersion(): String {
+    val pkgFile = rootProject.projectDir.resolve("../../package.json")
+    if (!pkgFile.isFile) return "0.1.0"
+    val content = runCatching { pkgFile.readText() }.getOrNull().orEmpty()
+    val match = Regex(""""version"\s*:\s*"([^"]+)"""").find(content)
+    return match?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() } ?: "0.1.0"
+}
+
+fun resolveGitShortSha(): String {
+    val envSha = (
+        providers.gradleProperty("conductorBuildSha").orNull
+            ?: System.getenv("GITHUB_SHA")
+            ?: System.getenv("CONDUCTOR_BUILD_SHA")
+            ?: ""
+        ).trim()
+    if (Regex("^[0-9a-fA-F]{7,40}$").matches(envSha)) {
+        return envSha.take(7).lowercase()
+    }
+    return runCatching {
+        val process = ProcessBuilder("git", "rev-parse", "--short=7", "HEAD")
+            .directory(rootProject.projectDir)
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().readText().trim()
+        val exitCode = process.waitFor()
+        if (exitCode == 0 && Regex("^[0-9a-fA-F]{7,40}$").matches(output)) {
+            output.take(7).lowercase()
+        } else {
+            ""
+        }
+    }.getOrDefault("")
+}
+
+val conductorBaseVersion: String = (
+    providers.gradleProperty("conductorVersionName").orNull
+        ?: System.getenv("CONDUCTOR_BUILD_VERSION")
+        ?: readRootPackageVersion()
+    ).trim().removePrefix("v").ifEmpty { "0.1.0" }
+
+val conductorRunNumber: Int = (
+    providers.gradleProperty("conductorBuildRunNumber").orNull
+        ?: System.getenv("GITHUB_RUN_NUMBER")
+        ?: System.getenv("CONDUCTOR_BUILD_RUN_NUMBER")
+        ?: ""
+    ).trim().toIntOrNull()?.takeIf { it > 0 } ?: 0
+
+val conductorCommitSha: String = resolveGitShortSha()
+
+val conductorBuildTag: String = (
+    providers.gradleProperty("conductorBuildTag").orNull
+        ?: System.getenv("CONDUCTOR_BUILD_TAG")
+        ?: if (conductorRunNumber > 0 && conductorCommitSha.isNotEmpty()) {
+            "v$conductorBaseVersion-$conductorRunNumber-$conductorCommitSha"
+        } else {
+            ""
+        }
+    ).trim()
+
+val computedVersionCode: Int = if (conductorRunNumber > 0) conductorRunNumber else 1
+val computedVersionName: String = if (conductorBuildTag.isNotEmpty()) {
+    conductorBuildTag.removePrefix("v")
+} else {
+    conductorBaseVersion
+}
+
+fun String.asBuildConfigString(): String =
+    "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
 android {
     namespace = "dev.conductor.mobile"
     compileSdk = 35
@@ -13,9 +81,14 @@ android {
         applicationId = "dev.conductor.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = computedVersionCode
+        versionName = computedVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("String", "BUILD_BASE_VERSION", conductorBaseVersion.asBuildConfigString())
+        buildConfigField("String", "BUILD_TAG", conductorBuildTag.asBuildConfigString())
+        buildConfigField("String", "BUILD_COMMIT_SHA", conductorCommitSha.asBuildConfigString())
+        buildConfigField("int", "BUILD_RUN_NUMBER", conductorRunNumber.toString())
     }
 
     buildTypes {
@@ -39,6 +112,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {

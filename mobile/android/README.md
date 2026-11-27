@@ -18,7 +18,7 @@ Mac 上の **Conductor** デスクトップアプリに **Tailscale** 経由で�
   - タスク詳細ボトムシート（Worktree / Git Status / 最新出力）
   - ワンタップの **Stop** / **Land** / **Done** / **Reopen**（デスクトップ側ガードと連動）
 - **Settings**:
-  - SSE / ポーリング接続ステータス確認、URL・Token 編集、再接続、切断
+  - テーマ切替（System / Light / Dark）、アプリ内アップデート確認（GitHub Releases 直接参照・APK ダウンロード＆インストール）、SSE / ポーリング接続ステータス確認、URL・Token 編集、再接続、切断
 
 ## 事前準備
 

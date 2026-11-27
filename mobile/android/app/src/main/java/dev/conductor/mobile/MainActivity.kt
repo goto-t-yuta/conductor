@@ -52,9 +52,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+import dev.conductor.mobile.model.AppUpdateStatus
 import dev.conductor.mobile.ui.ConductorViewModel
 import dev.conductor.mobile.ui.components.ConductorImageContext
 import dev.conductor.mobile.ui.components.LocalConductorImageContext
+import dev.conductor.mobile.ui.components.UpdateAvailableBanner
 import dev.conductor.mobile.ui.screens.ChatScreen
 import dev.conductor.mobile.ui.screens.QrScannerScreen
 import dev.conductor.mobile.ui.screens.SettingsScreen
@@ -195,7 +197,14 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                     themeMode = state.themeMode,
                     isTesting = state.isTestingConnection,
                     lastTestResult = state.lastTestResult,
+                    appUpdate = state.appUpdate,
                     onSelectThemeMode = viewModel::setThemeMode,
+                    onCheckForUpdates = { viewModel.checkForUpdates(silent = false) },
+                    onDownloadAndInstallUpdate = viewModel::downloadAndInstallUpdate,
+                    onCancelUpdateDownload = viewModel::cancelUpdateDownload,
+                    onInstallDownloadedApk = viewModel::installDownloadedApk,
+                    onOpenUnknownSourcesSettings = viewModel::openUnknownAppSourcesSettings,
+                    onOpenReleasePage = viewModel::openReleasePage,
                     onConsumeDeepLink = viewModel::consumePendingDeepLink,
                     onOpenQrScanner = { showQrScanner = true },
                     onTestConnection = viewModel::testConnection,
@@ -287,14 +296,28 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                         onClick = { currentTab = MainTab.SETTINGS },
                         colors = navItemColors,
                         icon = {
-                            Icon(
-                                imageVector = if (currentTab == MainTab.SETTINGS) {
-                                    Icons.Filled.Settings
-                                } else {
-                                    Icons.Outlined.Settings
+                            BadgedBox(
+                                badge = {
+                                    if (state.appUpdate.hasAttentionBadge) {
+                                        Badge(
+                                            containerColor = if (state.appUpdate.status == AppUpdateStatus.DOWNLOADED) {
+                                                colors.emerald
+                                            } else {
+                                                colors.indigoAction
+                                            },
+                                        )
+                                    }
                                 },
-                                contentDescription = "Settings",
-                            )
+                            ) {
+                                Icon(
+                                    imageVector = if (currentTab == MainTab.SETTINGS) {
+                                        Icons.Filled.Settings
+                                    } else {
+                                        Icons.Outlined.Settings
+                                    },
+                                    contentDescription = "Settings",
+                                )
+                            }
                         },
                         label = {
                             Text(
@@ -308,75 +331,97 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
             }
         },
     ) { innerPadding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding),
         ) {
-            when (currentTab) {
-                MainTab.CHAT -> ChatScreen(
-                    snapshot = state.snapshot,
-                    transportState = state.transportState,
-                    composerText = state.composerText,
-                    selectedMentions = state.selectedMentions,
-                    pendingAttachments = state.pendingAttachments,
-                    isProcessingImages = state.isProcessingImages,
-                    isSending = state.isSending,
-                    onComposerTextChange = viewModel::updateComposerText,
-                    onAddMention = viewModel::addMention,
-                    onRemoveMention = viewModel::removeMention,
-                    onPickImageUris = viewModel::addImageUris,
-                    onRemoveAttachment = viewModel::removePendingAttachment,
-                    getCachedAttachmentImage = viewModel::getCachedAttachmentImageBytes,
-                    loadAttachmentImage = viewModel::loadAttachmentImageBytes,
-                    onSend = viewModel::sendChatMessage,
-                    onStopAll = { viewModel.stopChat(null) },
-                    onStopMessage = { id -> viewModel.stopChat(id) },
-                    onNewChat = viewModel::startNewChat,
-                    onOpenTask = { taskId ->
-                        viewModel.openTaskDetail(taskId)
-                        currentTab = MainTab.TASKS
-                    },
+            if (currentTab != MainTab.SETTINGS && state.appUpdate.shouldShowTopBanner) {
+                UpdateAvailableBanner(
+                    appUpdate = state.appUpdate,
+                    onOpenSettings = { currentTab = MainTab.SETTINGS },
+                    onDismiss = viewModel::dismissUpdateBanner,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                 )
+            }
 
-                MainTab.TASKS -> TasksScreen(
-                    snapshot = state.snapshot,
-                    groupByProject = state.groupTasksByProject,
-                    selectedTaskId = state.selectedTaskId,
-                    selectedTaskDetail = state.selectedTaskDetail,
-                    isLoadingDetail = state.isLoadingTaskDetail,
-                    updatingTaskIds = state.updatingTaskIds,
-                    landingTaskIds = state.landingTaskIds,
-                    onToggleGroupByProject = viewModel::toggleGroupTasksByProject,
-                    onOpenTask = viewModel::openTaskDetail,
-                    onCloseTask = viewModel::closeTaskDetail,
-                    onMarkDone = { id -> viewModel.updateTaskStatus(id, "done") },
-                    onReopen = { id -> viewModel.updateTaskStatus(id, "needs_review") },
-                    onStopTask = viewModel::stopTask,
-                    onLandTask = { id -> viewModel.landTask(id, createPr = false) },
-                    onShowFeedback = viewModel::showMessage,
-                    onMentionTaskInChat = { target ->
-                        viewModel.addMention(target)
-                        currentTab = MainTab.CHAT
-                    },
-                )
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxSize(),
+            ) {
+                when (currentTab) {
+                    MainTab.CHAT -> ChatScreen(
+                        snapshot = state.snapshot,
+                        transportState = state.transportState,
+                        composerText = state.composerText,
+                        selectedMentions = state.selectedMentions,
+                        pendingAttachments = state.pendingAttachments,
+                        isProcessingImages = state.isProcessingImages,
+                        isSending = state.isSending,
+                        onComposerTextChange = viewModel::updateComposerText,
+                        onAddMention = viewModel::addMention,
+                        onRemoveMention = viewModel::removeMention,
+                        onPickImageUris = viewModel::addImageUris,
+                        onRemoveAttachment = viewModel::removePendingAttachment,
+                        getCachedAttachmentImage = viewModel::getCachedAttachmentImageBytes,
+                        loadAttachmentImage = viewModel::loadAttachmentImageBytes,
+                        onSend = viewModel::sendChatMessage,
+                        onStopAll = { viewModel.stopChat(null) },
+                        onStopMessage = { id -> viewModel.stopChat(id) },
+                        onNewChat = viewModel::startNewChat,
+                        onOpenTask = { taskId ->
+                            viewModel.openTaskDetail(taskId)
+                            currentTab = MainTab.TASKS
+                        },
+                    )
 
-                MainTab.SETTINGS -> SettingsScreen(
-                    config = state.config,
-                    themeMode = state.themeMode,
-                    transportState = state.transportState,
-                    transportDetail = state.transportDetail,
-                    snapshot = state.snapshot,
-                    isTesting = state.isTestingConnection,
-                    lastTestResult = state.lastTestResult,
-                    onSelectThemeMode = viewModel::setThemeMode,
-                    onOpenQrScanner = { showQrScanner = true },
-                    onReconnect = viewModel::reconnect,
-                    onTestConnection = viewModel::testConnection,
-                    onSaveConfig = viewModel::saveAndConnect,
-                    onDisconnect = viewModel::disconnect,
-                )
+                    MainTab.TASKS -> TasksScreen(
+                        snapshot = state.snapshot,
+                        groupByProject = state.groupTasksByProject,
+                        selectedTaskId = state.selectedTaskId,
+                        selectedTaskDetail = state.selectedTaskDetail,
+                        isLoadingDetail = state.isLoadingTaskDetail,
+                        updatingTaskIds = state.updatingTaskIds,
+                        landingTaskIds = state.landingTaskIds,
+                        onToggleGroupByProject = viewModel::toggleGroupTasksByProject,
+                        onOpenTask = viewModel::openTaskDetail,
+                        onCloseTask = viewModel::closeTaskDetail,
+                        onMarkDone = { id -> viewModel.updateTaskStatus(id, "done") },
+                        onReopen = { id -> viewModel.updateTaskStatus(id, "needs_review") },
+                        onStopTask = viewModel::stopTask,
+                        onLandTask = { id -> viewModel.landTask(id, createPr = false) },
+                        onShowFeedback = viewModel::showMessage,
+                        onMentionTaskInChat = { target ->
+                            viewModel.addMention(target)
+                            currentTab = MainTab.CHAT
+                        },
+                    )
+
+                    MainTab.SETTINGS -> SettingsScreen(
+                        config = state.config,
+                        themeMode = state.themeMode,
+                        transportState = state.transportState,
+                        transportDetail = state.transportDetail,
+                        snapshot = state.snapshot,
+                        isTesting = state.isTestingConnection,
+                        lastTestResult = state.lastTestResult,
+                        appUpdate = state.appUpdate,
+                        onSelectThemeMode = viewModel::setThemeMode,
+                        onCheckForUpdates = { viewModel.checkForUpdates(silent = false) },
+                        onDownloadAndInstallUpdate = viewModel::downloadAndInstallUpdate,
+                        onCancelUpdateDownload = viewModel::cancelUpdateDownload,
+                        onInstallDownloadedApk = viewModel::installDownloadedApk,
+                        onOpenUnknownSourcesSettings = viewModel::openUnknownAppSourcesSettings,
+                        onOpenReleasePage = viewModel::openReleasePage,
+                        onOpenQrScanner = { showQrScanner = true },
+                        onReconnect = viewModel::reconnect,
+                        onTestConnection = viewModel::testConnection,
+                        onSaveConfig = viewModel::saveAndConnect,
+                        onDisconnect = viewModel::disconnect,
+                    )
+                }
             }
         }
     }
