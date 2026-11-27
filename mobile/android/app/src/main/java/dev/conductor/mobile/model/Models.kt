@@ -221,6 +221,8 @@ data class ChatMessage(
 
 @Serializable
 data class AppSnapshot(
+    val snapshotEpoch: String? = null,
+    val snapshotVersion: Long? = null,
     val projects: List<Project> = emptyList(),
     val tasks: List<AgentTask> = emptyList(),
     val messages: List<ChatMessage> = emptyList(),

@@ -153,17 +153,29 @@ export function extractAgyToolDetail(
   return undefined;
 }
 
+function extractAgyContentText(update: Record<string, unknown>): string {
+  if (Array.isArray(update.content)) {
+    const parts: string[] = [];
+    for (const rawBlock of update.content) {
+      const block = asRecord(rawBlock);
+      const text = asString(block?.text);
+      if (text) parts.push(text);
+    }
+    if (parts.length > 0) {
+      return parts.join("");
+    }
+  }
+  const content = asRecord(update.content);
+  return asString(content?.text) ?? asString(update.text) ?? "";
+}
+
 export function parseAgySessionUpdate(
   update: Record<string, unknown>,
 ): ParsedAgySessionUpdate {
   const updateType = asString(update.sessionUpdate) ?? "";
 
   if (updateType === "agent_message_chunk") {
-    const content = asRecord(update.content);
-    const text =
-      asString(content?.text) ??
-      asString(update.text) ??
-      "";
+    const text = extractAgyContentText(update);
     if (text) {
       return { kind: "textDelta", text };
     }
@@ -171,11 +183,7 @@ export function parseAgySessionUpdate(
   }
 
   if (updateType === "agent_thought_chunk") {
-    const content = asRecord(update.content);
-    const text =
-      asString(content?.text) ??
-      asString(update.text) ??
-      "";
+    const text = extractAgyContentText(update);
     if (text) {
       return { kind: "reasoningDelta", text };
     }

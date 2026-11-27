@@ -34,6 +34,7 @@ import dev.conductor.mobile.model.ExplicitMentionTarget
 import dev.conductor.mobile.model.GITHUB_LATEST_RELEASE_PAGE_URL
 import dev.conductor.mobile.model.MentionAutocomplete
 import dev.conductor.mobile.model.PendingImageAttachment
+import dev.conductor.mobile.model.SnapshotSyncGuard
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.TaskDetailResponse
 import dev.conductor.mobile.model.TaskStatusActions
@@ -376,14 +377,20 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun applyIncomingSnapshot(snap: AppSnapshot, fromSse: Boolean) {
-        lastSnapshotReceivedAtMs = System.currentTimeMillis()
+        var accepted = false
         _uiState.update { state ->
+            if (!SnapshotSyncGuard.shouldAccept(state.snapshot, snap, fromSse)) {
+                return@update state
+            }
+            accepted = true
             state.copy(
                 snapshot = snap,
                 transportState = if (fromSse) StreamTransportState.CONNECTED_SSE else state.transportState,
                 transportDetail = if (fromSse) "SSE リアルタイム接続中" else state.transportDetail,
             )
         }
+        if (!accepted) return
+        lastSnapshotReceivedAtMs = System.currentTimeMillis()
         val hasStreaming = snap.activeResponderCount > 0 || snap.messages.any { it.isStreaming }
         if (hasStreaming) {
             val cfg = activeSyncConfig ?: _uiState.value.config

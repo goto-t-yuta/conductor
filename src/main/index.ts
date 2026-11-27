@@ -41,6 +41,7 @@ let markdownWatcher: MarkdownFileWatcher | null = null;
 let terminalManager: TerminalManager | null = null;
 let controller: ConductorController | null = null;
 let stateStore: StateStore | null = null;
+let createWindowPromise: Promise<void> | null = null;
 let appUpdater: AppUpdater | null = null;
 let startupUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 let hasRunStartupUpdateCheck = false;
@@ -561,96 +562,131 @@ function registerIpcHandlers(): void {
 }
 
 async function createWindow(): Promise<void> {
-  stateStore = new StateStore(path.join(app.getPath("userData"), "conductor-data"));
-  const windowIcon = loadAppIcon();
+  if (createWindowPromise) {
+    return createWindowPromise;
+  }
+  const run = (async () => {
+    const previousController = controller;
+    if (previousController) {
+      controller = null;
+      await Promise.race([
+        previousController.shutdown().catch(() => {}),
+        new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
+      ]);
+    }
+    browserManager?.destroyAll();
+    browserManager = null;
 
-  mainWindow = new BrowserWindow({
-    width: 1520,
-    height: 920,
-    minWidth: 960,
-    minHeight: 620,
-    title: "Conductor",
-    ...(windowIcon ? { icon: windowIcon } : {}),
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 14, y: 12 },
-    backgroundColor: "#0f1115",
-    webPreferences: {
-      preload: path.join(__dirname, "../preload/index.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  });
+    stateStore = new StateStore(path.join(app.getPath("userData"), "conductor-data"));
+    const windowIcon = loadAppIcon();
 
-  browserManager = new BrowserManager({
-    window: mainWindow,
-    store: stateStore,
-    onTabsChanged: (reason) =>
-      controller?.notifyBrowserChanged({ persist: reason !== "transient" }),
-    onElementPicked: (attachment) => sendToRenderer("conductor:browserAttachment", attachment),
-  });
+    mainWindow = new BrowserWindow({
+      width: 1520,
+      height: 920,
+      minWidth: 960,
+      minHeight: 620,
+      title: "Conductor",
+      ...(windowIcon ? { icon: windowIcon } : {}),
+      titleBarStyle: "hiddenInset",
+      trafficLightPosition: { x: 14, y: 12 },
+      backgroundColor: "#0f1115",
+      webPreferences: {
+        preload: path.join(__dirname, "../preload/index.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
 
-  controller = new ConductorController({
-    store: stateStore,
-    browser: browserManager,
-    onSnapshot: (snapshot) => sendToRenderer("conductor:snapshot", snapshot),
-  });
+    const nextBrowserManager = new BrowserManager({
+      window: mainWindow,
+      store: stateStore,
+      onTabsChanged: (reason) => {
+        if (browserManager !== nextBrowserManager) return;
+        controller?.notifyBrowserChanged({ persist: reason !== "transient" });
+      },
+      onElementPicked: (attachment) => {
+        if (browserManager !== nextBrowserManager) return;
+        sendToRenderer("conductor:browserAttachment", attachment);
+      },
+    });
+    browserManager = nextBrowserManager;
 
-  const devUrl = process.env.CONDUCTOR_DEV_SERVER_URL;
-  mainWindow.webContents.session.setPermissionRequestHandler(
-    (_webContents, permission, callback) => {
-      if (permission === "clipboard-sanitized-write") {
-        callback(true);
-        return;
-      }
-      if (permission === "media") {
-        if (process.platform === "darwin") {
-          const status = systemPreferences.getMediaAccessStatus("microphone");
-          if (status === "granted") {
-            callback(true);
-            return;
-          }
-          if (status === "not-determined") {
-            void systemPreferences
-              .askForMediaAccess("microphone")
-              .then((granted) => callback(granted))
-              .catch(() => callback(false));
-            return;
-          }
-          callback(false);
+    const nextController = new ConductorController({
+      store: stateStore,
+      browser: nextBrowserManager,
+      onSnapshot: (snapshot) => {
+        if (controller !== nextController) return;
+        sendToRenderer("conductor:snapshot", snapshot);
+      },
+    });
+    controller = nextController;
+
+    const devUrl = process.env.CONDUCTOR_DEV_SERVER_URL;
+    mainWindow.webContents.session.setPermissionRequestHandler(
+      (_webContents, permission, callback) => {
+        if (permission === "clipboard-sanitized-write") {
+          callback(true);
           return;
         }
-        callback(true);
-        return;
-      }
-      callback(false);
-    },
-  );
-  if (devUrl) {
-    await mainWindow.loadURL(devUrl);
-  } else {
-    await mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
-  }
+        if (permission === "media") {
+          if (process.platform === "darwin") {
+            const status = systemPreferences.getMediaAccessStatus("microphone");
+            if (status === "granted") {
+              callback(true);
+              return;
+            }
+            if (status === "not-determined") {
+              void systemPreferences
+                .askForMediaAccess("microphone")
+                .then((granted) => callback(granted))
+                .catch(() => callback(false));
+              return;
+            }
+            callback(false);
+            return;
+          }
+          callback(true);
+          return;
+        }
+        callback(false);
+      },
+    );
+    if (devUrl) {
+      await mainWindow.loadURL(devUrl);
+    } else {
+      await mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+    }
 
-  mainWindow.on("closed", () => {
-    voiceTts.stop();
-    markdownWatcher?.dispose();
-    markdownWatcher = null;
-    terminalManager?.disposeAll();
-    browserManager?.destroyAll();
-    mainWindow = null;
-  });
+    mainWindow.on("closed", () => {
+      voiceTts.stop();
+      markdownWatcher?.dispose();
+      markdownWatcher = null;
+      terminalManager?.disposeAll();
+      browserManager?.destroyAll();
+      mainWindow = null;
+    });
 
-  void controller.start();
+    void nextController.start();
 
-  // Check for updates once in the background shortly after startup (silently ignores network failures)
-  if (!hasRunStartupUpdateCheck) {
-    hasRunStartupUpdateCheck = true;
-    startupUpdateTimer = setTimeout(() => {
-      startupUpdateTimer = null;
-      void getAppUpdater().checkForUpdates({ silent: true });
-    }, 3_000);
-    startupUpdateTimer.unref?.();
+    // Check for updates once in the background shortly after startup (silently ignores network failures)
+    if (!hasRunStartupUpdateCheck) {
+      hasRunStartupUpdateCheck = true;
+      startupUpdateTimer = setTimeout(() => {
+        startupUpdateTimer = null;
+        void getAppUpdater().checkForUpdates({ silent: true });
+      }, 3_000);
+      startupUpdateTimer.unref?.();
+    }
+  })();
+
+  createWindowPromise = run;
+  try {
+    await run;
+  } finally {
+    if (createWindowPromise === run) {
+      createWindowPromise = null;
+    }
   }
 }
 

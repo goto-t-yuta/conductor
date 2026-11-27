@@ -432,11 +432,12 @@ export const App: React.FC = () => {
   );
 
   useEffect(() => {
-    const applyIncomingSnapshot = (incoming: AppSnapshot) => {
+    const applyIncomingSnapshot = (incoming: AppSnapshot | null | undefined) => {
+      if (!incoming) return;
       setSnapshot((prev) => reconcileAppSnapshot(prev, incoming));
     };
-    void window.conductor.getSnapshot().then(applyIncomingSnapshot);
     const unsubSnap = window.conductor.onSnapshot(applyIncomingSnapshot);
+    void window.conductor.getSnapshot().then(applyIncomingSnapshot);
     const unsubAtt = window.conductor.onAttachmentFromBrowser((att) => {
       updateAttachments((prev) => [...prev, att]);
     });

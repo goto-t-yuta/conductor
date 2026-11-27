@@ -431,6 +431,8 @@ export interface RemoteAccessStatus {
 }
 
 export interface AppSnapshot {
+  snapshotEpoch?: string;
+  snapshotVersion?: number;
   projects: Project[];
   scanRoots: string[];
   tasks: AgentTask[];
