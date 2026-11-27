@@ -16,6 +16,9 @@ export type AppUpdateStatus =
   | "available"
   | "up_to_date"
   | "downloading"
+  | "staging"
+  | "ready_to_install"
+  | "installing"
   | "downloaded"
   | "error";
 
@@ -25,6 +28,9 @@ export type AppUpdateErrorCode =
   | "no_release"
   | "no_asset"
   | "download_failed"
+  | "staging_failed"
+  | "install_failed"
+  | "dev_mode_blocked"
   | "open_failed"
   | "cancelled";
 
@@ -62,6 +68,11 @@ export interface AppUpdateState {
   isDevMode: boolean;
   platform: string;
   arch: string;
+  canSelfUpdate: boolean;
+  targetAppPath: string | null;
+  stagedAppPath: string | null;
+  stagedVersionTag: string | null;
+  applyOnQuit: boolean;
   lastCheckedAt: string | null;
   latestRelease: AppUpdateReleaseInfo | null;
   updateAvailable: boolean;
@@ -395,8 +406,9 @@ function scoreAssetForPlatform(
       archScore = assetArch === "universal" ? 80 : 40;
     }
 
-    // Prefer .dmg > .pkg > .zip (dmg is smoothest for unsigned macOS installs)
-    const extScore = isDmg ? 30 : isPkg ? 20 : 10;
+    // Prefer .zip > .dmg > .pkg on macOS so background extraction via `ditto -x -k`
+    // completes silently without mounting disk images, with .dmg as a clean fallback.
+    const extScore = isZip ? 30 : isDmg ? 20 : 10;
     const osBonus = /(?:^|[-_.])(mac|macos|darwin|osx)(?:[-_.]|$)/.test(lower) ? 5 : 0;
     return archScore + extScore + osBonus;
   }
@@ -578,6 +590,8 @@ export function createInitialAppUpdateState(params: {
   isDevMode: boolean;
   platform: string;
   arch: string;
+  canSelfUpdate?: boolean;
+  targetAppPath?: string | null;
 }): AppUpdateState {
   return {
     status: "idle",
@@ -588,6 +602,11 @@ export function createInitialAppUpdateState(params: {
     isDevMode: params.isDevMode,
     platform: params.platform,
     arch: params.arch,
+    canSelfUpdate: Boolean(params.canSelfUpdate),
+    targetAppPath: params.targetAppPath ?? null,
+    stagedAppPath: null,
+    stagedVersionTag: null,
+    applyOnQuit: false,
     lastCheckedAt: null,
     latestRelease: null,
     updateAvailable: false,

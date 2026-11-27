@@ -20,6 +20,9 @@ conductor-data/
 .env
 .env.*
 !.env.example
+*.jks
+*.keystore
+keystore.properties
 
 # Logs
 *.log

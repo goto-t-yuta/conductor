@@ -102,6 +102,8 @@ export interface SettingsModalProps {
   onOpenDownloadedUpdate?: () => void;
   onShowDownloadedUpdateInFolder?: () => void;
   onOpenUpdateReleasePage?: (url?: string) => void;
+  onInstallAndRestartUpdate?: () => void;
+  onSetApplyUpdateOnQuit?: (enabled: boolean) => void;
 }
 
 export interface AppUpdateSettingsSectionProps {
@@ -113,6 +115,8 @@ export interface AppUpdateSettingsSectionProps {
   onOpenDownloadedUpdate?: () => void;
   onShowDownloadedUpdateInFolder?: () => void;
   onOpenUpdateReleasePage?: (url?: string) => void;
+  onInstallAndRestartUpdate?: () => void;
+  onSetApplyUpdateOnQuit?: (enabled: boolean) => void;
 }
 
 function formatUpdateTimestamp(iso: string | null, locale: UiLocale): string {
@@ -142,6 +146,12 @@ function resolveUpdateErrorText(appUpdate: AppUpdateState, locale: UiLocale): st
       return t(locale, "update.errorNoRelease");
     case "download_failed":
       return t(locale, "update.errorDownloadFailed");
+    case "staging_failed":
+      return t(locale, "update.errorStagingFailed");
+    case "install_failed":
+      return t(locale, "update.errorInstallFailed");
+    case "dev_mode_blocked":
+      return t(locale, "update.errorDevModeBlocked");
     case "open_failed":
       return t(locale, "update.errorOpenFailed");
     case "no_asset":
@@ -162,6 +172,8 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
   onOpenDownloadedUpdate,
   onShowDownloadedUpdateInFolder,
   onOpenUpdateReleasePage,
+  onInstallAndRestartUpdate,
+  onSetApplyUpdateOnQuit,
 }) => {
   const [copiedGatekeeperCmd, setCopiedGatekeeperCmd] = useState(false);
 
@@ -175,10 +187,16 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
 
   const isChecking = appUpdate.status === "checking";
   const isDownloading = appUpdate.status === "downloading";
+  const isStaging = appUpdate.status === "staging";
+  const isReadyToInstall = appUpdate.status === "ready_to_install";
+  const isInstalling = appUpdate.status === "installing";
   const isDownloaded = appUpdate.status === "downloaded";
   const isAvailable = appUpdate.status === "available";
   const isUpToDate = appUpdate.status === "up_to_date";
   const isError = appUpdate.status === "error";
+  const isBusyPreparing = isDownloading || isStaging || isInstalling;
+  const isMacStageFlow = appUpdate.platform === "darwin";
+  const canApplyStagedNow = appUpdate.canSelfUpdate && !appUpdate.isDevMode;
   const release = appUpdate.latestRelease;
   const asset = release?.selectedAsset ?? null;
   const progress = appUpdate.downloadProgress;
@@ -202,6 +220,24 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
       return {
         label: t(locale, "update.statusDownloading"),
         cls: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-300",
+      };
+    }
+    if (isStaging) {
+      return {
+        label: t(locale, "update.statusStaging"),
+        cls: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-300",
+      };
+    }
+    if (isReadyToInstall) {
+      return {
+        label: t(locale, "update.statusReadyToInstall"),
+        cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+      };
+    }
+    if (isInstalling) {
+      return {
+        label: t(locale, "update.statusInstalling"),
+        cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
       };
     }
     if (isDownloaded) {
@@ -260,7 +296,7 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
         <button
           type="button"
           data-testid="app-update-check-btn"
-          disabled={isChecking || isDownloading}
+          disabled={isChecking || isBusyPreparing}
           onClick={() => onCheckForUpdates?.()}
           className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shrink-0"
         >
@@ -310,7 +346,10 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
 
         {/* Dev mode info notice */}
         {appUpdate.isDevMode && (
-          <div className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-200 leading-relaxed">
+          <div
+            data-testid="app-update-dev-mode-notice"
+            className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-200 leading-relaxed"
+          >
             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>{t(locale, "update.devModeHint")}</span>
           </div>
@@ -337,8 +376,14 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
           </div>
         )}
 
-        {/* Release details when update is available / downloading / downloaded */}
-        {release && (appUpdate.updateAvailable || isDownloading || isDownloaded) && (
+        {/* Release details when update is available / downloading / staging / ready_to_install / installing / downloaded */}
+        {release &&
+          (appUpdate.updateAvailable ||
+            isDownloading ||
+            isStaging ||
+            isReadyToInstall ||
+            isInstalling ||
+            isDownloaded) && (
           <div className="space-y-2.5 pt-1 border-t border-zinc-200/80 dark:border-zinc-800">
             {/* Release notes excerpt */}
             {release.notesExcerpt && (
@@ -357,22 +402,43 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
 
             {/* Selected installer asset info */}
             {asset ? (
-              <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-600 dark:text-zinc-300">
-                <span className="text-zinc-400 shrink-0">
-                  {t(locale, "update.selectedAssetLabel")}:
-                </span>
-                <span
-                  data-testid="app-update-selected-asset"
-                  className="font-mono truncate"
-                  title={asset.name}
-                >
-                  {asset.name}
-                  {asset.size > 0 ? ` (${formatBytes(asset.size)})` : ""}
-                </span>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-600 dark:text-zinc-300">
+                  <span className="text-zinc-400 shrink-0">
+                    {t(locale, "update.selectedAssetLabel")}:
+                  </span>
+                  <span
+                    data-testid="app-update-selected-asset"
+                    className="font-mono truncate"
+                    title={asset.name}
+                  >
+                    {asset.name}
+                    {asset.size > 0 ? ` (${formatBytes(asset.size)})` : ""}
+                  </span>
+                </div>
+                {appUpdate.targetAppPath && (
+                  <div className="flex items-center justify-between gap-2 text-[10.5px] text-zinc-500 dark:text-zinc-400">
+                    <span className="shrink-0">{t(locale, "update.targetAppPathLabel")}:</span>
+                    <code
+                      data-testid="app-update-target-path"
+                      className="font-mono truncate"
+                      title={appUpdate.targetAppPath}
+                    >
+                      {appUpdate.targetAppPath}
+                    </code>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-200">
                 {t(locale, "update.noAssetForPlatform", { platform: platformLabel })}
+              </div>
+            )}
+
+            {/* macOS non-blocking background preparation hint */}
+            {isMacStageFlow && isAvailable && asset && (
+              <div className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                {t(locale, "update.prepareHintMac")}
               </div>
             )}
 
@@ -412,7 +478,69 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
               </div>
             )}
 
-            {/* Downloaded hint */}
+            {/* Background staging (extracting & verifying .app) progress */}
+            {isStaging && (
+              <div data-testid="app-update-staging-progress" className="space-y-1.5">
+                <div className="flex items-center gap-1.5 text-[11px] text-indigo-600 dark:text-indigo-300 font-medium">
+                  <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                  <span>{t(locale, "update.stagingProgress")}</span>
+                </div>
+                <div className="h-2 w-full rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+                  <div
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    className="h-full w-2/3 rounded-full bg-indigo-500 animate-pulse"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Ready to install (staged macOS .app verified) */}
+            {(isReadyToInstall || isInstalling) && (
+              <div
+                data-testid="app-update-ready-hint"
+                className="px-2.5 py-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-[11px] text-emerald-700 dark:text-emerald-300 space-y-2 leading-relaxed"
+              >
+                <div className="flex items-start gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    {canApplyStagedNow
+                      ? t(locale, "update.readyToInstallHint", {
+                          tag: appUpdate.stagedVersionTag ?? release.tagName,
+                        })
+                      : t(locale, "update.readyToInstallDevModeHint", {
+                          tag: appUpdate.stagedVersionTag ?? release.tagName,
+                        })}
+                  </span>
+                </div>
+
+                {canApplyStagedNow && (
+                  <label
+                    data-testid="app-update-apply-on-quit-toggle"
+                    className="flex items-start gap-2 pt-1.5 border-t border-emerald-500/20 cursor-pointer select-none"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={appUpdate.applyOnQuit}
+                      disabled={isInstalling}
+                      onChange={(e) => onSetApplyUpdateOnQuit?.(e.target.checked)}
+                      className="mt-0.5 rounded border-emerald-500/50 text-emerald-600 focus:ring-emerald-500"
+                    />
+                    <span className="space-y-0.5">
+                      <span className="block font-medium text-emerald-800 dark:text-emerald-200">
+                        {t(locale, "update.applyOnQuitLabel")}
+                      </span>
+                      <span className="block text-[10.5px] text-emerald-700/80 dark:text-emerald-300/80">
+                        {t(locale, "update.applyOnQuitHint")}
+                      </span>
+                    </span>
+                  </label>
+                )}
+              </div>
+            )}
+
+            {/* Downloaded hint (non-macOS or external installer fallback) */}
             {isDownloaded && (
               <div
                 data-testid="app-update-downloaded-hint"
@@ -470,11 +598,15 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-xs transition-colors cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>{t(locale, "update.downloadAndOpenBtn")}</span>
+                  <span>
+                    {isMacStageFlow
+                      ? t(locale, "update.prepareUpdateBtn")
+                      : t(locale, "update.downloadAndOpenBtn")}
+                  </span>
                 </button>
               )}
 
-              {isDownloading && (
+              {(isDownloading || isStaging) && (
                 <button
                   type="button"
                   data-testid="app-update-cancel-btn"
@@ -483,6 +615,27 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
                 >
                   <X className="w-3.5 h-3.5" />
                   <span>{t(locale, "update.cancelDownloadBtn")}</span>
+                </button>
+              )}
+
+              {(isReadyToInstall || isInstalling) && (
+                <button
+                  type="button"
+                  data-testid="app-update-restart-apply-btn"
+                  disabled={!canApplyStagedNow || isInstalling}
+                  onClick={() => onInstallAndRestartUpdate?.()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white shadow-xs transition-colors cursor-pointer"
+                >
+                  {isInstalling ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {isInstalling
+                      ? t(locale, "update.restartingBtn")
+                      : t(locale, "update.restartAndUpdateBtn")}
+                  </span>
                 </button>
               )}
 
@@ -523,7 +676,10 @@ export const AppUpdateSettingsSection: React.FC<AppUpdateSettingsSectionProps> =
         )}
 
         {/* Error notice with fallback button */}
-        {(isError || (isDownloaded && appUpdate.errorCode === "open_failed")) && localizedError && (
+        {(isError ||
+          (isDownloaded && appUpdate.errorCode === "open_failed") ||
+          (isReadyToInstall && Boolean(appUpdate.errorCode))) &&
+          localizedError && (
           <div
             data-testid="app-update-error"
             className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11.5px] text-rose-700 dark:text-rose-300 space-y-2"
@@ -1542,6 +1698,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onOpenDownloadedUpdate,
   onShowDownloadedUpdateInFolder,
   onOpenUpdateReleasePage,
+  onInstallAndRestartUpdate,
+  onSetApplyUpdateOnQuit,
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsModalTab>(initialTab);
   const [projectSearch, setProjectSearch] = useState("");
@@ -1674,6 +1832,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onOpenDownloadedUpdate={onOpenDownloadedUpdate}
                     onShowDownloadedUpdateInFolder={onShowDownloadedUpdateInFolder}
                     onOpenUpdateReleasePage={onOpenUpdateReleasePage}
+                    onInstallAndRestartUpdate={onInstallAndRestartUpdate}
+                    onSetApplyUpdateOnQuit={onSetApplyUpdateOnQuit}
                   />
                 </div>
               )}

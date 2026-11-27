@@ -55,10 +55,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.conductor.mobile.data.ConnectionTestResult
 import dev.conductor.mobile.model.AppSnapshot
+import dev.conductor.mobile.model.AppUpdateState
 import dev.conductor.mobile.model.ConnectUriParser
 import dev.conductor.mobile.model.ConnectionConfig
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.ThemeMode
+import dev.conductor.mobile.ui.components.AppUpdateCard
 import dev.conductor.mobile.ui.components.ConductorCard
 import dev.conductor.mobile.ui.components.ThemeModeSelector
 import dev.conductor.mobile.ui.components.transportStatusColor
@@ -73,7 +75,14 @@ fun SettingsScreen(
     snapshot: AppSnapshot?,
     isTesting: Boolean,
     lastTestResult: ConnectionTestResult?,
+    appUpdate: AppUpdateState,
     onSelectThemeMode: (ThemeMode) -> Unit,
+    onCheckForUpdates: () -> Unit,
+    onDownloadAndInstallUpdate: () -> Unit,
+    onCancelUpdateDownload: () -> Unit,
+    onInstallDownloadedApk: () -> Unit,
+    onOpenUnknownSourcesSettings: () -> Unit,
+    onOpenReleasePage: (String?) -> Unit,
     onOpenQrScanner: () -> Unit,
     onReconnect: () -> Unit,
     onTestConnection: (url: String, token: String) -> Unit,
@@ -180,6 +189,17 @@ fun SettingsScreen(
                     )
                 }
             }
+
+            // App Update Card (GitHub Releases standalone check + in-app APK download/install)
+            AppUpdateCard(
+                appUpdate = appUpdate,
+                onCheckForUpdates = onCheckForUpdates,
+                onDownloadAndInstall = onDownloadAndInstallUpdate,
+                onCancelDownload = onCancelUpdateDownload,
+                onInstallDownloaded = onInstallDownloadedApk,
+                onOpenUnknownSourcesSettings = onOpenUnknownSourcesSettings,
+                onOpenReleasePage = onOpenReleasePage,
+            )
 
             // Connection Status Card
             ConductorCard(

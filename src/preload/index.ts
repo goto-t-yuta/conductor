@@ -161,6 +161,8 @@ const api: ConductorAPI = {
   updaterOpenDownloaded: () => ipcRenderer.invoke("updater:openDownloaded"),
   updaterShowInFolder: () => ipcRenderer.invoke("updater:showInFolder"),
   updaterOpenReleasePage: (url?: string) => ipcRenderer.invoke("updater:openReleasePage", url),
+  updaterInstallAndRestart: () => ipcRenderer.invoke("updater:installAndRestart"),
+  updaterSetApplyOnQuit: (enabled: boolean) => ipcRenderer.invoke("updater:setApplyOnQuit", enabled),
   onUpdaterStateChanged: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, state: AppUpdateState) => listener(state);
     ipcRenderer.on("updater:stateChanged", handler);

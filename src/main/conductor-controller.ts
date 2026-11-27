@@ -263,6 +263,7 @@ export function buildOrchestratorDeveloperInstructions(
     "Core Philosophy (CRITICAL):",
     "1. **Speed first**: The user may rapid-fire multiple questions or requests without waiting. Keep chat replies fast, crisp, and non-blocking.",
     "2. **Always execute work via `start_worker` by default (DO NOT use `create_task` for work requests)**: Whenever the user asks to add, implement, fix, investigate, edit, build, test, or work on something in a project—including short phrases like 「追加して」「やって」「直して」「調べて」—DO NOT block this chat turn with long shell commands. ALWAYS call `start_worker` immediately (which both creates the task card in the left Agent Tasks sidebar and starts an asynchronous background worker in that project's cwd), then reply concisely confirming what you kicked off. Note that `start_worker` also accepts `task_id` (UUID or `T#` code) to start an existing `queued` task. Do NOT call `create_task` unless the user explicitly asks to only queue/memo/register a task without running it yet (e.g., 「キューに入れといて」「まだ動かさないで」「タスクだけ登録して」).",
+    "   - **Respect repository `AGENTS.md` policies in `start_worker` prompts**: Do NOT write narrower completion criteria in `start_worker`'s `prompt` than the target repository's `AGENTS.md` (or `CLAUDE.md` / `GEMINI.md`) verification, deployment, or operational policy (for example, do not tell a worker to stop at local tests when the repository requires dev deployment or live testing). Write instructions on the assumption that the worker will follow the repository's guidelines unless the user explicitly asks to exclude specific steps.",
     "3. **Non-blocking read-only task Q&A vs. `send_to_worker` steering (STRICT)**:",
     "   - When the user asks a **question, status/progress check, design/code inquiry, or error-cause investigation about a task** (e.g., 「今どうなってる？」「どこまで進んだ？」「どんな実装？」「なんでエラー？」), ONLY call `get_task_detail` (and read-only inspection of files/logs/worktree if needed) and answer **immediately**.",
     "   - NEVER call `send_to_worker` just to ask a question about a task, and NEVER wait or poll for a running task to finish before answering.",
@@ -272,6 +273,55 @@ export function buildOrchestratorDeveloperInstructions(
     "6. **Explicit target mentions**: Users may explicitly attach project/task mention chips (without repeating `@...` in the message text) or type `@<projectName>`, `@T<number>`, or `@<projectName>/T<number>` inline (e.g., `@agent_terminal_2`, `@T1`, `@agent_terminal_2/T1`). When an `[Explicitly Mentioned Context]` section is provided, treat those resolved projects and tasks as authoritative targets—operate directly on their exact path, project name, `task_id` (UUID), or `T#` code without guessing.",
     "7. **Answer quick questions directly**: For quick questions, status checks, or browser inspection, reply directly without creating unnecessary tasks.",
     `8. **Language (STRICT)**: ${buildOrchestratorLanguageInstruction(preferredLanguage)}`,
+  ].join("\n");
+}
+
+export const WORKER_REPO_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md", "GEMINI.md"] as const;
+
+function findInstructionFileInDir(dir: string): string | null {
+  for (const fileName of WORKER_REPO_INSTRUCTION_FILES) {
+    const candidate = path.join(dir, fileName);
+    try {
+      if (fs.statSync(candidate).isFile()) {
+        return candidate;
+      }
+    } catch {
+      // ignore missing/inaccessible candidate
+    }
+  }
+  return null;
+}
+
+export function findWorkerRepoInstructionFile(
+  cwd: string,
+  fallbackDir?: string | null,
+): string | null {
+  const trimmedCwd = cwd.trim();
+  if (trimmedCwd) {
+    const inCwd = findInstructionFileInDir(trimmedCwd);
+    if (inCwd) return inCwd;
+  }
+  const trimmedFallback = fallbackDir?.trim();
+  if (
+    trimmedFallback &&
+    (!trimmedCwd || path.resolve(trimmedFallback) !== path.resolve(trimmedCwd))
+  ) {
+    return findInstructionFileInDir(trimmedFallback);
+  }
+  return null;
+}
+
+export function buildWorkerRepoGuidelinesInstruction(
+  cwd: string,
+  fallbackDir?: string | null,
+): string | null {
+  const instructionFilePath = findWorkerRepoInstructionFile(cwd, fallbackDir);
+  if (!instructionFilePath) return null;
+  return [
+    "Repository Guidelines (REQUIRED):",
+    `- Required reading: ${instructionFilePath}`,
+    "- Read and follow this file BEFORE starting work.",
+    "- Include all deployment, verification, and operational rules documented there (e.g., mandatory dev deployment, live/staging checks, test procedures, cleanup steps) in this task's completion criteria unless explicitly excluded by the task instructions. Do not stop at local tests alone when the file requires further steps.",
   ].join("\n");
 }
 
@@ -287,17 +337,24 @@ export function buildWorkerVisualVerificationInstruction(): string {
 export function buildWorkerDeveloperInstructions(options: {
   projectName: string;
   cwd: string;
+  projectPath?: string | null;
   worktreeBranch?: string | null;
   preferredLanguage?: PreferredLanguage;
 }): string {
   const base = options.worktreeBranch
     ? `You are a focused coding worker for project "${options.projectName}" working in an isolated git worktree at ${options.cwd} (branch "${options.worktreeBranch}"). Complete the assigned task thoroughly, run checks/tests, and return a concise summary including changed files or local preview URLs.`
     : `You are a focused coding worker for project "${options.projectName}" (${options.cwd}). Complete the assigned task thoroughly, run checks/tests, and return a concise summary including changed files or local preview URLs.`;
+  const repoGuidelinesInstruction = buildWorkerRepoGuidelinesInstruction(
+    options.cwd,
+    options.projectPath,
+  );
   const visualInstruction = buildWorkerVisualVerificationInstruction();
   const langInstruction = buildWorkerLanguageInstruction(
     options.preferredLanguage ?? DEFAULT_PREFERRED_LANGUAGE,
   );
-  return `${base}\n\n${visualInstruction}\n\n${langInstruction}`;
+  return [base, repoGuidelinesInstruction, visualInstruction, langInstruction]
+    .filter((section): section is string => Boolean(section))
+    .join("\n\n");
 }
 
 export const DEFAULT_TASK_COMPLETION_EXCERPT_CHARS = 420;
@@ -3800,6 +3857,7 @@ export class ConductorController {
     const fullWorkerInstructions = buildWorkerDeveloperInstructions({
       projectName: project.name,
       cwd: workerCwd,
+      projectPath: project.path,
       worktreeBranch: task.worktreeBranch,
       preferredLanguage: this.preferredLanguage,
     });
@@ -4717,6 +4775,7 @@ export class ConductorController {
         const workerInstructions = buildWorkerDeveloperInstructions({
           projectName: project.name,
           cwd: workerCwd,
+          projectPath: project.path,
           worktreeBranch: wt.worktreeBranch,
           preferredLanguage: this.preferredLanguage,
         });
@@ -5384,6 +5443,7 @@ export class ConductorController {
       const workerInstructions = buildWorkerDeveloperInstructions({
         projectName: project.name,
         cwd: workerCwd,
+        projectPath: project.path,
         worktreeBranch: task.worktreeBranch,
         preferredLanguage: this.preferredLanguage,
       });
@@ -5614,6 +5674,7 @@ export class ConductorController {
       const fullWorkerInstructions = buildWorkerDeveloperInstructions({
         projectName: project.name,
         cwd: workerCwd,
+        projectPath: project.path,
         worktreeBranch: latestTask.worktreeBranch,
         preferredLanguage: this.preferredLanguage,
       });

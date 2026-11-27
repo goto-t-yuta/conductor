@@ -30,7 +30,7 @@ import {
   writeLocalMarkdownFile,
 } from "./markdown-viewer.js";
 import { registerProjectFileTreeIpcHandlers } from "./project-files.js";
-import { QuitGuard } from "./quit-guard.js";
+import { QuitGuard, buildUpdateRestartConfirmationDialog } from "./quit-guard.js";
 import { StateStore } from "./state-store.js";
 import { TerminalManager } from "./terminal-manager.js";
 import { VoiceTtsManager } from "./voice-tts.js";
@@ -62,11 +62,23 @@ function getAppUpdater(): AppUpdater {
     currentCommitSha: buildSha,
     currentRunNumber: buildRunNumber,
     isDevMode,
+    isPackaged: app.isPackaged,
+    execPath: process.execPath,
     downloadsDir,
     openPath: (filePath) => shell.openPath(filePath),
     showItemInFolder: (filePath) => shell.showItemInFolder(filePath),
     openExternal: (url) => shell.openExternal(url),
     onStateChange: (state) => sendToRenderer("updater:stateChanged", state),
+    requestRestartForUpdate: async ({ versionTag, onConfirmed }) => {
+      const runningTasks = controller?.getRunningTasks() ?? [];
+      return quitGuard.requestQuit({
+        dialogContent:
+          runningTasks.length > 0
+            ? buildUpdateRestartConfirmationDialog(runningTasks, versionTag)
+            : undefined,
+        onConfirmedBeforeShutdown: onConfirmed,
+      });
+    },
   });
   return appUpdater;
 }
@@ -87,7 +99,6 @@ const quitGuard = new QuitGuard({
       clearTimeout(startupUpdateTimer);
       startupUpdateTimer = null;
     }
-    appUpdater?.dispose();
     voiceTts.stop();
     markdownWatcher?.dispose();
     markdownWatcher = null;
@@ -99,6 +110,10 @@ const quitGuard = new QuitGuard({
         new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
       ]);
     }
+    // Launch detached macOS apply helper right before exit if a staged update is armed
+    // (either via "Restart & Update Now" or "Apply automatically on quit").
+    appUpdater?.launchPendingApplyHelperOnShutdown();
+    appUpdater?.dispose();
   },
   quitApp: () => {
     app.quit();
@@ -119,6 +134,13 @@ function createApplicationMenu(): void {
             label: app.name,
             submenu: [
               { role: "about" as const },
+              {
+                label: "アップデートを確認...",
+                click: () => {
+                  sendToRenderer("conductor:shortcut", "check-updates");
+                  void getAppUpdater().checkForUpdates({ silent: false });
+                },
+              },
               { type: "separator" as const },
               { role: "services" as const },
               { type: "separator" as const },
@@ -531,6 +553,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle("updater:showInFolder", () => getAppUpdater().showDownloadedInFolder());
   ipcMain.handle("updater:openReleasePage", (_e, url?: string) =>
     getAppUpdater().openReleasePage(url),
+  );
+  ipcMain.handle("updater:installAndRestart", () => getAppUpdater().installAndRestart());
+  ipcMain.handle("updater:setApplyOnQuit", (_e, enabled: boolean) =>
+    getAppUpdater().setApplyOnQuit(Boolean(enabled)),
   );
 }
 

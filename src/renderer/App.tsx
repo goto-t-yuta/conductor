@@ -1757,6 +1757,10 @@ export const App: React.FC = () => {
         case "capture-screenshot":
           void captureScreenshot();
           break;
+        case "check-updates":
+          setDismissedUpdateTag(null);
+          setSettingsModalTab("general");
+          break;
       }
     });
   }, [
@@ -2202,6 +2206,16 @@ export const App: React.FC = () => {
     void window.conductor.updaterOpenReleasePage?.(url);
   }, []);
 
+  const handleInstallAndRestartUpdate = useCallback(() => {
+    void window.conductor.updaterInstallAndRestart?.();
+  }, []);
+
+  const handleSetApplyUpdateOnQuit = useCallback((enabled: boolean) => {
+    void window.conductor.updaterSetApplyOnQuit?.(enabled).then((state) => {
+      if (state) setAppUpdate(state);
+    });
+  }, []);
+
   const handleDismissUpdateBanner = useCallback(() => {
     if (appUpdate?.latestRelease?.tagName) {
       setDismissedUpdateTag(appUpdate.latestRelease.tagName);
@@ -2361,6 +2375,7 @@ export const App: React.FC = () => {
           onOpenDownloadedUpdate={handleOpenDownloadedUpdate}
           onShowDownloadedUpdateInFolder={handleShowDownloadedUpdateInFolder}
           onOpenUpdateReleasePage={handleOpenUpdateReleasePage}
+          onInstallAndRestartUpdate={handleInstallAndRestartUpdate}
         />
       </div>
 
@@ -2515,6 +2530,8 @@ export const App: React.FC = () => {
           onOpenDownloadedUpdate={handleOpenDownloadedUpdate}
           onShowDownloadedUpdateInFolder={handleShowDownloadedUpdateInFolder}
           onOpenUpdateReleasePage={handleOpenUpdateReleasePage}
+          onInstallAndRestartUpdate={handleInstallAndRestartUpdate}
+          onSetApplyUpdateOnQuit={handleSetApplyUpdateOnQuit}
         />
       )}
     </div>

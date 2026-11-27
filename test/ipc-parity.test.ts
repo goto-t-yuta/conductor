@@ -162,6 +162,8 @@ describe("IPC handler registration & preload channel parity", () => {
     expect(allMainHandles).toContain("updater:getState");
     expect(allMainHandles).toContain("updater:check");
     expect(allMainHandles).toContain("updater:downloadAndOpen");
+    expect(allMainHandles).toContain("updater:installAndRestart");
+    expect(allMainHandles).toContain("updater:setApplyOnQuit");
     expect(allMainHandles).toContain("updater:openReleasePage");
     expect(preloadInvokes).toContain("fs:list-dir");
     expect(preloadInvokes).toContain("fs:read-text-file");

@@ -10,6 +10,7 @@ import {
   MAX_QUIT_DIALOG_TASKS,
   QuitGuard,
   buildQuitConfirmationDialog,
+  buildUpdateRestartConfirmationDialog,
   type QuitTaskSummary,
 } from "../src/main/quit-guard.js";
 import { StateStore } from "../src/main/state-store.js";
@@ -323,6 +324,56 @@ describe("Quit confirmation dialog & QuitGuard", () => {
     expect(quitApp).toHaveBeenCalledTimes(1);
     expect(finalPrevent).not.toHaveBeenCalled();
     expect(guard.getState().isQuitConfirmed).toBe(true);
+  });
+
+  it("supports programmatic requestQuit for staged updates with running-task confirmation and deferred onConfirmedBeforeShutdown", async () => {
+    const running: QuitTaskSummary[] = [
+      { id: "t1", taskNumber: 1, projectName: "conductor", title: "Run integration tests" },
+    ];
+    let allowConfirm = false;
+    const showConfirmationDialog = vi.fn(async () => allowConfirm);
+    const performShutdown = vi.fn().mockResolvedValue(undefined);
+    const quitApp = vi.fn();
+    const onConfirmed = vi.fn();
+
+    const guard = new QuitGuard({
+      getRunningTasks: () => running,
+      showConfirmationDialog,
+      performShutdown,
+      quitApp,
+    });
+
+    const dialogContent = buildUpdateRestartConfirmationDialog(running, "v0.1.0-42-1a351f7");
+    expect(dialogContent.message).toContain("再起動してアップデートを適用しますか");
+    expect(dialogContent.detail).toContain("v0.1.0-42-1a351f7");
+    expect(dialogContent.detail).toContain("[T1 · conductor] Run integration tests");
+
+    // Cancelled -> onConfirmedBeforeShutdown & shutdown are NOT called
+    allowConfirm = false;
+    const cancelled = await guard.requestQuit({
+      dialogContent,
+      onConfirmedBeforeShutdown: onConfirmed,
+    });
+    expect(cancelled).toBe(false);
+    expect(onConfirmed).not.toHaveBeenCalled();
+    expect(performShutdown).not.toHaveBeenCalled();
+    expect(quitApp).not.toHaveBeenCalled();
+
+    // Confirmed -> onConfirmedBeforeShutdown runs BEFORE performShutdown and quitApp
+    const order: string[] = [];
+    onConfirmed.mockImplementation(() => order.push("confirmed"));
+    performShutdown.mockImplementation(async () => {
+      order.push("shutdown");
+    });
+    quitApp.mockImplementation(() => order.push("quit"));
+
+    allowConfirm = true;
+    const confirmed = await guard.requestQuit({
+      dialogContent,
+      onConfirmedBeforeShutdown: onConfirmed,
+    });
+    expect(confirmed).toBe(true);
+    expect(order).toEqual(["confirmed", "shutdown", "quit"]);
   });
 });
 

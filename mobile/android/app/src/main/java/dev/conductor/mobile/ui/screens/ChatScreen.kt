@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -78,6 +79,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -100,6 +102,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import dev.conductor.mobile.data.AndroidImageAttachmentProcessor
@@ -130,6 +133,13 @@ private data class PreviewImageRequest(
     val bytes: ByteArray,
 )
 
+private data class ChatScrollObservation(
+    val metrics: ChatScrollMetrics,
+    val messageCount: Int,
+    val isUserScrolling: Boolean,
+    val isAnimatingScrollToBottom: Boolean,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
@@ -152,6 +162,8 @@ fun ChatScreen(
     onStopMessage: (String) -> Unit,
     onNewChat: () -> Unit,
     onOpenTask: (String) -> Unit,
+    listState: LazyListState = rememberLazyListState(),
+    scrollSessionState: ChatScrollSessionState = rememberChatScrollSessionState(),
 ) {
     val colors = ConductorTheme.colors
     val messages = snapshot?.messages.orEmpty()
@@ -160,12 +172,12 @@ fun ChatScreen(
     val tasksById = remember(tasks) { tasks.associateBy { it.id } }
     val projectsById = remember(projects) { projects.associateBy { it.id } }
     val activeResponders = snapshot?.activeResponderCount ?: 0
-    val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     var showMentionSheet by remember { mutableStateOf(false) }
     var previewImage by remember { mutableStateOf<PreviewImageRequest?>(null) }
     var isScrollingToBottom by remember { mutableStateOf(false) }
-    var hasInitializedScroll by remember { mutableStateOf(false) }
+    var isProgrammaticScrolling by remember { mutableStateOf(false) }
+    var hasHandledInitialCompositionEffect by remember { mutableStateOf(false) }
 
     val fallbackDocPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
@@ -212,36 +224,79 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isEmpty()) {
-            hasInitializedScroll = false
-            isScrollingToBottom = false
-        } else {
-            val bottomAnchorIndex = messages.size
-            val lastMessageIsUser = messages.lastOrNull()?.role == "user"
-            val shouldAutoScroll = !hasInitializedScroll ||
-                lastMessageIsUser ||
-                ChatScrollLogic.shouldAutoScrollOnMessageCountChange(
-                    metrics = listState.toChatScrollMetrics(),
-                    messageCount = messages.size,
-                    thresholdPx = bottomThresholdPx,
-                )
-            hasInitializedScroll = true
-            if (shouldAutoScroll) {
-                listState.scrollToItem(bottomAnchorIndex)
-            }
+    LaunchedEffect(listState, bottomThresholdPx, scrollSessionState) {
+        var wasUserScrolling = false
+        snapshotFlow {
+            val metrics = listState.toChatScrollMetrics()
+            val userScrolling = listState.isScrollInProgress &&
+                !isProgrammaticScrolling &&
+                !isScrollingToBottom
+            ChatScrollObservation(
+                metrics = metrics,
+                messageCount = latestMessageCount,
+                isUserScrolling = userScrolling,
+                isAnimatingScrollToBottom = isScrollingToBottom,
+            )
         }
+            .distinctUntilChanged()
+            .collect { obs ->
+                val nextPinned = ChatScrollLogic.resolvePinnedToBottomAfterScroll(
+                    currentPinned = scrollSessionState.snapshot.isPinnedToBottom,
+                    metrics = obs.metrics,
+                    messageCount = obs.messageCount,
+                    thresholdPx = bottomThresholdPx,
+                    isUserScrolling = obs.isUserScrolling,
+                    wasUserScrolling = wasUserScrolling,
+                    isAnimatingScrollToBottom = obs.isAnimatingScrollToBottom,
+                )
+                wasUserScrolling = obs.isUserScrolling
+                scrollSessionState.updatePinnedToBottom(nextPinned)
+            }
     }
 
-    LaunchedEffect(messages.lastOrNull()?.id, messages.lastOrNull()?.text?.length) {
-        if (messages.isNotEmpty() && !isScrollingToBottom) {
-            val shouldAutoScroll = ChatScrollLogic.shouldAutoScrollOnStreamingUpdate(
-                metrics = listState.toChatScrollMetrics(),
-                messageCount = messages.size,
-                thresholdPx = bottomThresholdPx,
-            )
-            if (shouldAutoScroll) {
-                listState.scrollToItem(messages.size)
+    val lastMessage = messages.lastOrNull()
+    val lastMessageFingerprint = ChatScrollLogic.buildMessageContentFingerprint(lastMessage)
+    val timelineSnapshot = remember(
+        snapshot?.activeChatSessionId,
+        messages.size,
+        messages.firstOrNull()?.id,
+        lastMessage?.id,
+        lastMessage?.role,
+        lastMessageFingerprint,
+    ) {
+        ChatTimelineSnapshot(
+            sessionId = snapshot?.activeChatSessionId.orEmpty(),
+            messageCount = messages.size,
+            firstMessageId = messages.firstOrNull()?.id,
+            lastMessageId = lastMessage?.id,
+            lastMessageRole = lastMessage?.role,
+            lastMessageContentFingerprint = lastMessageFingerprint,
+        )
+    }
+
+    LaunchedEffect(timelineSnapshot, scrollSessionState) {
+        val isCompositionEntry = !hasHandledInitialCompositionEffect
+        hasHandledInitialCompositionEffect = true
+        if (timelineSnapshot.messageCount <= 0) {
+            isScrollingToBottom = false
+        }
+        val userScrolling = listState.isScrollInProgress &&
+            !isProgrammaticScrolling &&
+            !isScrollingToBottom
+        val resolution = ChatScrollLogic.resolveScrollOnTimelineUpdate(
+            previous = scrollSessionState.snapshot,
+            current = timelineSnapshot,
+            isCompositionEntry = isCompositionEntry,
+            isUserScrolling = userScrolling,
+            isAnimatingScrollToBottom = isScrollingToBottom,
+        )
+        scrollSessionState.apply(resolution.nextSession)
+        if (resolution.shouldScrollToBottom && timelineSnapshot.messageCount > 0) {
+            isProgrammaticScrolling = true
+            try {
+                listState.scrollToItem(timelineSnapshot.messageCount)
+            } finally {
+                isProgrammaticScrolling = false
             }
         }
     }
@@ -341,6 +396,7 @@ fun ChatScreen(
                         isScrollingToBottom = true
                         try {
                             listState.animateScrollToItem(targetIndex)
+                            scrollSessionState.updatePinnedToBottom(true)
                         } finally {
                             isScrollingToBottom = false
                         }
@@ -367,7 +423,12 @@ fun ChatScreen(
             onPreviewPendingAttachment = { att ->
                 previewImage = PreviewImageRequest(label = att.label, bytes = att.previewBytes)
             },
-            onSend = onSend,
+            onSend = {
+                if (composerText.isNotBlank() || pendingAttachments.isNotEmpty()) {
+                    scrollSessionState.updatePinnedToBottom(true)
+                }
+                onSend()
+            },
         )
     }
 
