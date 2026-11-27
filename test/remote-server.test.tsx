@@ -1700,6 +1700,135 @@ describe("RemoteBridgeServer authenticated local image media endpoint (/api/medi
       imagePath: "/tmp/ui.png",
     });
   });
+
+  it("includes compact activityCount/latestActivity/outputLength in remote snapshots, supports skipGit=1 on /api/tasks/:id, and serves authenticated /api/media/video", async () => {
+    const tmpDir = makeTempDir("conductor-remote-task-progress-");
+    const sampleMp4Path = path.join(tmpDir, "walkthrough.mp4");
+    const mp4Bytes = Buffer.from("00000018667479706d70343200000000", "hex");
+    fs.writeFileSync(sampleMp4Path, mp4Bytes);
+
+    const longOutput = "A".repeat(4_500) + "\n## 完了サマリー\nすべて成功しました。";
+    const task = makeTask({
+      id: "t-live",
+      taskNumber: 7,
+      status: "running",
+      currentStep: "テスト実行中: pnpm test",
+      latestOutput: longOutput,
+      activities: [
+        {
+          id: "a1",
+          kind: "system",
+          title: "Codex ワーカー開始",
+          detail: null,
+          timestamp: "2026-11-28T01:00:00.000Z",
+        },
+        {
+          id: "a2",
+          kind: "command",
+          title: "$ pnpm test",
+          detail: "PASS test/remote-server.test.tsx",
+          timestamp: "2026-11-28T01:01:00.000Z",
+        },
+      ],
+    });
+
+    let gitStatusCalls = 0;
+    let worktreeStatusCalls = 0;
+    const mock = createMockBridgeController([task]);
+    const controller: RemoteBridgeController = {
+      ...mock.controller,
+      getTaskGitStatus: (id) => {
+        gitStatusCalls += 1;
+        return mock.controller.getTaskGitStatus(id);
+      },
+      getTaskWorktreeStatus: (id) => {
+        worktreeStatusCalls += 1;
+        return mock.controller.getTaskWorktreeStatus(id);
+      },
+    };
+
+    const srv = new RemoteBridgeServer(controller, {
+      host: "127.0.0.1",
+      port: 0,
+      token: "progress-test-token-123456",
+      detectNetwork: () => ({ tailscaleIp: null, magicDnsName: null, lanIp: "127.0.0.1" }),
+    });
+    activeServers.push(srv);
+    await srv.start();
+    const baseUrl = `http://127.0.0.1:${srv.getPort()}`;
+    const headers = { Authorization: "Bearer progress-test-token-123456" };
+
+    // 1. Remote snapshot includes activityCount, latestActivity, and full outputLength while keeping activities empty
+    const snapRes = await fetch(`${baseUrl}/api/snapshot`, { headers });
+    expect(snapRes.status).toBe(200);
+    const snapJson = (await snapRes.json()) as {
+      tasks: Array<{
+        activities: unknown[];
+        activityCount: number;
+        latestActivity?: { id: string; kind: string; title: string };
+        outputLength: number;
+        latestOutput: string;
+      }>;
+    };
+    expect(snapJson.tasks[0].activities).toEqual([]);
+    expect(snapJson.tasks[0].activityCount).toBe(2);
+    expect(snapJson.tasks[0].latestActivity?.id).toBe("a2");
+    expect(snapJson.tasks[0].latestActivity?.title).toBe("$ pnpm test");
+    expect(snapJson.tasks[0].outputLength).toBe(longOutput.length);
+    expect(snapJson.tasks[0].latestOutput.length).toBeLessThanOrEqual(3_000);
+
+    // 2. GET /api/tasks/:id?skipGit=1 returns full activities & output without running git subprocesses
+    const fastDetailRes = await fetch(`${baseUrl}/api/tasks/t-live?skipGit=1`, { headers });
+    expect(fastDetailRes.status).toBe(200);
+    const fastDetail = (await fastDetailRes.json()) as {
+      ok: boolean;
+      task: AgentTask;
+      worktreeStatus: TaskWorktreeStatus | null;
+      gitStatus: string | null;
+    };
+    expect(fastDetail.ok).toBe(true);
+    expect(fastDetail.task.activities).toHaveLength(2);
+    expect(fastDetail.task.latestOutput).toBe(longOutput);
+    expect(fastDetail.worktreeStatus).toBeNull();
+    expect(fastDetail.gitStatus).toBeNull();
+    expect(gitStatusCalls).toBe(0);
+    expect(worktreeStatusCalls).toBe(0);
+
+    // 3. Regular GET /api/tasks/:id includes worktreeStatus and gitStatus
+    const fullDetailRes = await fetch(`${baseUrl}/api/tasks/t-live`, { headers });
+    expect(fullDetailRes.status).toBe(200);
+    const fullDetail = (await fullDetailRes.json()) as {
+      worktreeStatus: TaskWorktreeStatus | null;
+      gitStatus: string | null;
+    };
+    expect(fullDetail.worktreeStatus?.hasWorktree).toBe(true);
+    expect(fullDetail.gitStatus).toBe("M src/app.ts");
+    expect(gitStatusCalls).toBe(1);
+    expect(worktreeStatusCalls).toBe(1);
+
+    // 4. GET /api/media/video enforces auth and supports Range 206
+    const unauthVideo = await fetch(`${baseUrl}/api/media/video?path=${encodeURIComponent(sampleMp4Path)}`);
+    expect(unauthVideo.status).toBe(401);
+
+    const okVideo = await fetch(`${baseUrl}/api/media/video?path=${encodeURIComponent(sampleMp4Path)}`, { headers });
+    expect(okVideo.status).toBe(200);
+    expect(okVideo.headers.get("content-type")).toBe("video/mp4");
+    expect(Buffer.from(await okVideo.arrayBuffer()).equals(mp4Bytes)).toBe(true);
+
+    const rangeVideo = await fetch(`${baseUrl}/api/media/video?path=${encodeURIComponent(sampleMp4Path)}`, {
+      headers: { ...headers, Range: "bytes=0-3" },
+    });
+    expect(rangeVideo.status).toBe(206);
+    expect(rangeVideo.headers.get("content-range")).toBe(`bytes 0-3/${mp4Bytes.length}`);
+    expect(Buffer.from(await rangeVideo.arrayBuffer()).equals(mp4Bytes.subarray(0, 4))).toBe(true);
+
+    // 5. Mobile Web UI HTML exposes live activity log, Markdown, media hydration, and skipGit refresh
+    const uiHtml = await (await fetch(`${baseUrl}/`)).text();
+    expect(uiHtml).toContain("partitionTaskActivities");
+    expect(uiHtml).toContain("mergeTaskForDisplay");
+    expect(uiHtml).toContain("hydrateProtectedMedia");
+    expect(uiHtml).toContain("?skipGit=1");
+  });
 });
 
 describe("RemoteBridgeServer authenticated local video streaming (/api/media/video) & mobile web media", () => {

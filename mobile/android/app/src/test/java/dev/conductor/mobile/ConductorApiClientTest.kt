@@ -741,4 +741,67 @@ class ConductorApiClientTest {
         coordinator.pauseAllInline()
         assertEquals(null, coordinator.activeInlineKey.value)
     }
+
+    @Test
+    fun getTaskDetailSupportsSkipGitAndParsesActivitiesAndProgressMetadata() = runBlocking {
+        val seenPaths = mutableListOf<String>()
+        server.handler = { reqLine, _, out, _ ->
+            val path = reqLine.split(" ").getOrNull(1).orEmpty()
+            seenPaths.add(path)
+            val body = """
+                {
+                  "ok": true,
+                  "task": {
+                    "id": "task-live",
+                    "taskNumber": 9,
+                    "title": "Stream logs",
+                    "status": "running",
+                    "currentStep": "テスト実行中",
+                    "latestOutput": "実行ログ出力中...",
+                    "outputLength": 11,
+                    "activityCount": 2,
+                    "latestActivity": {
+                      "id": "a2",
+                      "kind": "command",
+                      "title": "$ pnpm test",
+                      "detail": "PASS",
+                      "timestamp": "2026-11-28T01:02:00Z"
+                    },
+                    "activities": [
+                      {"id": "a1", "kind": "system", "title": "開始", "timestamp": "2026-11-28T01:00:00Z"},
+                      {"id": "a2", "kind": "command", "title": "$ pnpm test", "detail": "PASS", "timestamp": "2026-11-28T01:02:00Z"}
+                    ]
+                  },
+                  "worktreeStatus": null,
+                  "gitStatus": null
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            val head = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                "Content-Length: ${body.size}\r\n" +
+                "Connection: close\r\n\r\n"
+            out.write(head.toByteArray(Charsets.UTF_8))
+            out.write(body)
+            out.flush()
+        }
+
+        val client = ConductorApiClient()
+        val cfg = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token)
+        try {
+            val fastRes = client.getTaskDetail(cfg, "task-live", skipGit = true)
+            assertTrue(fastRes.isSuccess)
+            val detail = fastRes.getOrThrow()
+            assertEquals("/api/tasks/task-live?skipGit=1", seenPaths[0])
+            assertEquals(2, detail.task?.activities?.size)
+            assertEquals(2, detail.task?.effectiveActivityCount)
+            assertEquals("$ pnpm test", detail.task?.latestActivity?.title)
+            assertEquals("実行ログ出力中...", detail.task?.latestOutput)
+
+            val fullRes = client.getTaskDetail(cfg, "task-live", skipGit = false)
+            assertTrue(fullRes.isSuccess)
+            assertEquals("/api/tasks/task-live", seenPaths[1])
+        } finally {
+            client.close()
+        }
+    }
 }

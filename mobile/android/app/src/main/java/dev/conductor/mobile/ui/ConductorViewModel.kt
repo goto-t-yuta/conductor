@@ -37,7 +37,9 @@ import dev.conductor.mobile.model.MentionAutocomplete
 import dev.conductor.mobile.model.PendingImageAttachment
 import dev.conductor.mobile.model.SnapshotSyncGuard
 import dev.conductor.mobile.model.StreamTransportState
+import dev.conductor.mobile.model.TaskDetailRefreshPlan
 import dev.conductor.mobile.model.TaskDetailResponse
+import dev.conductor.mobile.model.TaskDetailSync
 import dev.conductor.mobile.model.TaskStatusActions
 import dev.conductor.mobile.model.TerminalConnectionState
 import dev.conductor.mobile.model.TerminalUiState
@@ -132,6 +134,9 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var streamJob: Job? = null
     private var streamingSyncJob: Job? = null
+    private var taskDetailRefreshJob: Job? = null
+    private var openTaskDetailPollJob: Job? = null
+    private var lastTaskDetailFetchedAtMs: Long = 0L
     private var terminalJob: Job? = null
     private var terminalHandle: TerminalConnectionHandle? = null
     private var activeTerminalConfig: ConnectionConfig? = null
@@ -341,6 +346,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun disconnect() {
         stopRealtimeSync()
+        stopOpenTaskDetailSync()
         stopTerminalConnection(resetState = true)
         attachmentImageCache.clear()
         imageLoader.clear()
@@ -385,11 +391,17 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun applyIncomingSnapshot(snap: AppSnapshot, fromSse: Boolean) {
         var accepted = false
+        var previousSnapshot: AppSnapshot? = null
+        var openTaskId: String? = null
+        var openTaskDetail: TaskDetailResponse? = null
         _uiState.update { state ->
             if (!SnapshotSyncGuard.shouldAccept(state.snapshot, snap, fromSse)) {
                 return@update state
             }
             accepted = true
+            previousSnapshot = state.snapshot
+            openTaskId = state.selectedTaskId
+            openTaskDetail = state.selectedTaskDetail
             state.copy(
                 snapshot = snap,
                 transportState = if (fromSse) StreamTransportState.CONNECTED_SSE else state.transportState,
@@ -398,8 +410,10 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
         if (!accepted) return
         lastSnapshotReceivedAtMs = System.currentTimeMillis()
-        val hasStreaming = snap.activeResponderCount > 0 || snap.messages.any { it.isStreaming }
-        if (hasStreaming) {
+        val hasActiveWork = snap.activeResponderCount > 0 ||
+            snap.messages.any { it.isStreaming } ||
+            snap.tasks.any { it.status == TaskStatusActions.STATUS_RUNNING }
+        if (hasActiveWork) {
             val cfg = activeSyncConfig ?: _uiState.value.config
             if (cfg.isConfigured) {
                 ensureStreamingSync(cfg)
@@ -408,11 +422,35 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
             streamingSyncJob?.cancel()
             streamingSyncJob = null
         }
+
+        // Keep the open Task Detail bottom sheet in sync with live activity/output/status updates
+        val activeTaskId = openTaskId
+        if (activeTaskId != null) {
+            val prevTask = previousSnapshot?.tasks?.find { it.id == activeTaskId }
+            val nextTask = snap.tasks.find { it.id == activeTaskId }
+            val refreshPlan = TaskDetailSync.resolveDetailRefreshPlan(
+                previousSnapshotTask = prevTask,
+                incomingSnapshotTask = nextTask,
+                currentDetailTask = openTaskDetail?.task,
+            )
+            when (refreshPlan) {
+                TaskDetailRefreshPlan.FULL_WITH_GIT -> {
+                    taskDetailRefreshJob?.cancel()
+                    refreshTaskDetail(activeTaskId, skipGit = false, silent = true)
+                }
+
+                TaskDetailRefreshPlan.ACTIVITIES_ONLY -> {
+                    scheduleTaskDetailRefresh(activeTaskId, skipGit = true)
+                }
+
+                TaskDetailRefreshPlan.NONE -> Unit
+            }
+        }
     }
 
     /**
-     * Safety net while an assistant response is actively streaming:
-     * if SSE stalls or is temporarily reconnecting, poll /api/snapshot so responses always appear promptly.
+     * Safety net while an assistant response or background worker task is actively running:
+     * if SSE stalls or is temporarily reconnecting, poll /api/snapshot so progress and outputs appear promptly.
      */
     private fun ensureStreamingSync(config: ConnectionConfig) {
         if (streamingSyncJob?.isActive == true) return
@@ -420,10 +458,11 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
             while (isActive) {
                 delay(1_500L)
                 val current = _uiState.value.snapshot
-                val stillStreaming = current == null ||
+                val stillActive = current == null ||
                     current.activeResponderCount > 0 ||
-                    current.messages.any { it.isStreaming }
-                if (!stillStreaming) break
+                    current.messages.any { it.isStreaming } ||
+                    current.tasks.any { it.status == TaskStatusActions.STATUS_RUNNING }
+                if (!stillActive) break
 
                 val sinceLastMs = System.currentTimeMillis() - lastSnapshotReceivedAtMs
                 val sseConnected = _uiState.value.transportState == StreamTransportState.CONNECTED_SSE
@@ -773,6 +812,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     // --- Task Actions ---
 
     fun openTaskDetail(taskId: String) {
+        stopOpenTaskDetailSync()
         _uiState.update {
             it.copy(
                 selectedTaskId = taskId,
@@ -781,10 +821,12 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                 taskDetailError = null,
             )
         }
-        refreshTaskDetail(taskId)
+        refreshTaskDetail(taskId, skipGit = false, silent = false)
+        startOpenTaskDetailPolling(taskId)
     }
 
     fun closeTaskDetail() {
+        stopOpenTaskDetailSync()
         _uiState.update {
             it.copy(
                 selectedTaskId = null,
@@ -795,19 +837,78 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun refreshSelectedTaskDetail() {
+        val taskId = _uiState.value.selectedTaskId ?: return
+        _uiState.update { it.copy(isLoadingTaskDetail = true) }
+        refreshTaskDetail(taskId, skipGit = false, silent = false)
+    }
+
     fun clearTaskDetailError() {
         _uiState.update { it.copy(taskDetailError = null) }
     }
 
-    fun refreshTaskDetail(taskId: String) {
+    private fun stopOpenTaskDetailSync() {
+        taskDetailRefreshJob?.cancel()
+        taskDetailRefreshJob = null
+        openTaskDetailPollJob?.cancel()
+        openTaskDetailPollJob = null
+    }
+
+    private fun scheduleTaskDetailRefresh(taskId: String, skipGit: Boolean) {
+        if (taskDetailRefreshJob?.isActive == true) return
+        taskDetailRefreshJob = viewModelScope.launch {
+            delay(700L)
+            if (_uiState.value.selectedTaskId == taskId) {
+                refreshTaskDetail(taskId, skipGit = skipGit, silent = true)
+            }
+            taskDetailRefreshJob = null
+        }
+    }
+
+    private fun startOpenTaskDetailPolling(taskId: String) {
+        openTaskDetailPollJob?.cancel()
+        openTaskDetailPollJob = viewModelScope.launch {
+            while (isActive) {
+                delay(2_500L)
+                val state = _uiState.value
+                if (state.selectedTaskId != taskId) break
+                val merged = TaskDetailSync.mergeLiveTask(
+                    snapshotTask = state.snapshot?.tasks?.find { it.id == taskId },
+                    detailTask = state.selectedTaskDetail?.task,
+                )
+                if (merged?.status == TaskStatusActions.STATUS_RUNNING) {
+                    val sinceFetch = System.currentTimeMillis() - lastTaskDetailFetchedAtMs
+                    if (sinceFetch >= 2_200L) {
+                        refreshTaskDetail(taskId, skipGit = true, silent = true)
+                    }
+                }
+            }
+            openTaskDetailPollJob = null
+        }
+    }
+
+    fun refreshTaskDetail(
+        taskId: String,
+        skipGit: Boolean = false,
+        silent: Boolean = false,
+    ) {
         val cfg = _uiState.value.config
         if (!cfg.isConfigured) return
+        if (!silent && _uiState.value.selectedTaskId == taskId) {
+            _uiState.update { it.copy(isLoadingTaskDetail = true) }
+        }
         viewModelScope.launch {
-            api.getTaskDetail(cfg, taskId)
+            api.getTaskDetail(cfg, taskId, skipGit = skipGit)
                 .onSuccess { detail ->
+                    lastTaskDetailFetchedAtMs = System.currentTimeMillis()
                     if (_uiState.value.selectedTaskId == taskId) {
-                        _uiState.update {
-                            it.copy(selectedTaskDetail = detail, isLoadingTaskDetail = false)
+                        _uiState.update { current ->
+                            val mergedDetail = TaskDetailSync.mergeDetailResponse(
+                                previous = current.selectedTaskDetail,
+                                incoming = detail,
+                                skipGit = skipGit,
+                            )
+                            current.copy(selectedTaskDetail = mergedDetail, isLoadingTaskDetail = false)
                         }
                     }
                 }

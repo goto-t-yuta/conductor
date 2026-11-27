@@ -45,13 +45,19 @@ data class AgentTask(
     val currentStep: String? = null,
     val previewURL: String? = null,
     val latestOutput: String = "",
+    val outputLength: Int? = null,
     val activities: List<WorkerActivityEntry> = emptyList(),
+    val activityCount: Int? = null,
+    val latestActivity: WorkerActivityEntry? = null,
     val worktreePath: String? = null,
     val worktreeBranch: String? = null,
+    val baseBranch: String? = null,
     val landStatus: String? = null,
     val landedBranch: String? = null,
+    val landedCommit: String? = null,
     val prUrl: String? = null,
     val landError: String? = null,
+    val conflictFiles: List<String> = emptyList(),
     val createdAt: String = "",
     val updatedAt: String = "",
 ) {
@@ -63,6 +69,9 @@ data class AgentTask(
             if (landStatus in setOf("landed", "pushed", "pr_created")) return false
             return hasWorktree || landStatus in setOf("unlanded", "landing", "conflict", "error")
         }
+
+    val effectiveActivityCount: Int
+        get() = maxOf(activities.size, activityCount ?: 0)
 }
 
 @Serializable

@@ -469,6 +469,7 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                         onToggleGroupByProject = viewModel::toggleGroupTasksByProject,
                         onOpenTask = viewModel::openTaskDetail,
                         onCloseTask = viewModel::closeTaskDetail,
+                        onRefreshTaskDetail = viewModel::refreshSelectedTaskDetail,
                         onDismissTaskDetailError = viewModel::clearTaskDetailError,
                         onMarkDone = { id -> viewModel.updateTaskStatus(id, "done") },
                         onForceMarkDone = { id -> viewModel.updateTaskStatus(id, "done", force = true) },

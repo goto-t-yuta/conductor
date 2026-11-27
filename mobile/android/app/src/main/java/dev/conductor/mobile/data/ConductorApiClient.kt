@@ -644,11 +644,16 @@ class ConductorApiClient(
         payload = json.encodeToString(ChatSessionSelectRequest(sessionId = sessionId.trim())),
     )
 
-    suspend fun getTaskDetail(config: ConnectionConfig, taskId: String): Result<TaskDetailResponse> =
+    suspend fun getTaskDetail(
+        config: ConnectionConfig,
+        taskId: String,
+        skipGit: Boolean = false,
+    ): Result<TaskDetailResponse> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val encodedId = encodePathSegment(taskId)
-                val req = authRequestBuilder(config, "/api/tasks/$encodedId").get().build()
+                val suffix = if (skipGit) "?skipGit=1" else ""
+                val req = authRequestBuilder(config, "/api/tasks/$encodedId$suffix").get().build()
                 restClient.newCall(req).execute().use { res ->
                     val body = res.body?.string().orEmpty()
                     if (!res.isSuccessful) {
