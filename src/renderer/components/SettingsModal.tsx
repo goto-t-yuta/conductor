@@ -35,6 +35,10 @@ import { DEFAULT_PREFERRED_LANGUAGE, LANGUAGE_OPTIONS } from "../../shared/langu
 import {
   ANDROID_APK_DOWNLOAD_URL,
   ANDROID_RELEASES_PAGE_URL,
+  resolvePairingEndpoints,
+  resolvePairingTarget,
+  type PairingTransportMode,
+  type TailscaleAddressKind,
 } from "../../shared/remote-access.js";
 import type {
   AppUpdateState,
@@ -637,6 +641,8 @@ export const LanguageSettingsSection: React.FC<LanguageSettingsSectionProps> = (
 export interface RemoteAccessSettingsSectionProps {
   remoteAccess: RemoteAccessStatus;
   locale?: UiLocale;
+  initialPairingTransport?: PairingTransportMode;
+  initialTailscaleAddressKind?: TailscaleAddressKind;
   onSetRemoteAccessEnabled?: (enabled: boolean) => void;
   onSetRemoteAccessPort?: (port: number) => void;
   onRegenerateRemoteAccessToken?: () => void;
@@ -647,6 +653,8 @@ export interface RemoteAccessSettingsSectionProps {
 export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionProps> = ({
   remoteAccess,
   locale = "ja",
+  initialPairingTransport,
+  initialTailscaleAddressKind,
   onSetRemoteAccessEnabled,
   onSetRemoteAccessPort,
   onRegenerateRemoteAccessToken,
@@ -656,10 +664,28 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
   const [portDraft, setPortDraft] = useState(String(remoteAccess.port || 4789));
   const [showToken, setShowToken] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [selectedTransport, setSelectedTransport] = useState<PairingTransportMode | null>(
+    initialPairingTransport ?? null,
+  );
+  const [selectedTailscaleKind, setSelectedTailscaleKind] =
+    useState<TailscaleAddressKind | null>(initialTailscaleAddressKind ?? null);
 
   useEffect(() => {
     setPortDraft(String(remoteAccess.port || 4789));
   }, [remoteAccess.port]);
+
+  const pairingEndpoints = useMemo(
+    () => resolvePairingEndpoints(remoteAccess),
+    [remoteAccess],
+  );
+  const pairingTarget = useMemo(
+    () =>
+      resolvePairingTarget(remoteAccess, {
+        transport: selectedTransport,
+        tailscaleAddressKind: selectedTailscaleKind,
+      }),
+    [remoteAccess, selectedTransport, selectedTailscaleKind],
+  );
 
   const copyText = (key: string, value: string | null | undefined) => {
     if (!value) return;
@@ -684,7 +710,17 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
       ? `${remoteAccess.token.slice(0, 6)}${"•".repeat(16)}${remoteAccess.token.slice(-4)}`
       : "•".repeat(16);
 
-  const canShowPairingQr = Boolean(remoteAccess.running && remoteAccess.connectUri);
+  const isRunning = Boolean(remoteAccess.running);
+  const activeEndpointUrl = pairingTarget.url ?? remoteAccess.url;
+  const activeConnectUri = pairingTarget.connectUri ?? remoteAccess.connectUri;
+  const activeEndpointBadge =
+    pairingTarget.endpointKind === "tailscale-magicdns"
+      ? t(locale, "remote.step2MagicDnsBtn")
+      : pairingTarget.endpointKind === "tailscale-ip"
+        ? t(locale, "remote.step2TailscaleIpBtn")
+        : pairingTarget.endpointKind === "lan"
+          ? t(locale, "remote.step2ModeLan")
+          : null;
 
   const handleOpenExternalLink = (e: React.MouseEvent<HTMLAnchorElement>, url: string) => {
     if (onOpenExternalUrl) {
@@ -805,7 +841,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
           >
             <div className="space-y-1">
               <div className="flex items-center gap-1.5">
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-300">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-300 shrink-0 whitespace-nowrap">
                   <Download className="w-2.5 h-2.5" />
                   <span>{t(locale, "remote.step1Badge")}</span>
                 </span>
@@ -879,7 +915,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
           >
             <div className="space-y-1">
               <div className="flex items-center gap-1.5">
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-500/12 text-emerald-700 dark:text-emerald-300">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 shrink-0 whitespace-nowrap">
                   <Link2 className="w-2.5 h-2.5" />
                   <span>{t(locale, "remote.step2Badge")}</span>
                 </span>
@@ -888,37 +924,240 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
                 </span>
               </div>
               <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                {canShowPairingQr
+                {isRunning
                   ? t(locale, "remote.step2DescActive")
                   : t(locale, "remote.step2DisabledDesc")}
               </p>
             </div>
 
-            {canShowPairingQr && remoteAccess.connectUri ? (
-              <>
-                <div className="flex justify-center py-1">
-                  <QrCodeSvg
-                    value={remoteAccess.connectUri}
-                    size={136}
-                    ariaLabel={t(locale, "remote.step2QrAria")}
-                    testId="remote-access-qr-pair"
-                  />
+            {isRunning ? (
+              <div className="flex-1 flex flex-col justify-between gap-2">
+                {/* Tailscale / LAN endpoint selector */}
+                <div className="space-y-1.5">
+                  <div
+                    role="tablist"
+                    aria-label={t(locale, "remote.step2EndpointSelectorAria")}
+                    data-testid="remote-access-qr-endpoint-selector"
+                    className="grid grid-cols-2 p-0.5 rounded-lg bg-zinc-100 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      data-testid="remote-access-qr-mode-tailscale"
+                      aria-selected={pairingTarget.transport === "tailscale"}
+                      onClick={() => setSelectedTransport("tailscale")}
+                      className={`inline-flex items-center justify-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+                        pairingTarget.transport === "tailscale"
+                          ? "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-xs"
+                          : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200"
+                      }`}
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                          pairingEndpoints.hasTailscale
+                            ? "bg-emerald-500"
+                            : "bg-amber-400 dark:bg-amber-500/80"
+                        }`}
+                      />
+                      <span>{t(locale, "remote.step2ModeTailscale")}</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      data-testid="remote-access-qr-mode-lan"
+                      aria-selected={pairingTarget.transport === "lan"}
+                      onClick={() => setSelectedTransport("lan")}
+                      className={`inline-flex items-center justify-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+                        pairingTarget.transport === "lan"
+                          ? "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-xs"
+                          : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200"
+                      }`}
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                          pairingEndpoints.lanUrl
+                            ? "bg-indigo-500"
+                            : "bg-zinc-300 dark:bg-zinc-600"
+                        }`}
+                      />
+                      <span>{t(locale, "remote.step2ModeLan")}</span>
+                    </button>
+                  </div>
+
+                  {/* Tailscale IP / MagicDNS sub-selector when both are detected */}
+                  {pairingTarget.transport === "tailscale" &&
+                    pairingEndpoints.hasBothTailscaleEndpoints && (
+                      <div
+                        role="group"
+                        aria-label={t(locale, "remote.step2TailscaleVariantAria")}
+                        data-testid="remote-access-qr-tailscale-variant"
+                        className="flex items-center justify-center gap-1"
+                      >
+                        <button
+                          type="button"
+                          data-testid="remote-access-qr-tailscale-ip-btn"
+                          aria-pressed={pairingTarget.tailscaleAddressKind === "ip"}
+                          onClick={() => setSelectedTailscaleKind("ip")}
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-medium border transition-colors cursor-pointer ${
+                            pairingTarget.tailscaleAddressKind === "ip"
+                              ? "bg-emerald-500/12 border-emerald-500/40 text-emerald-700 dark:text-emerald-300"
+                              : "bg-zinc-50 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200"
+                          }`}
+                        >
+                          {t(locale, "remote.step2TailscaleIpBtn")}
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="remote-access-qr-tailscale-magicdns-btn"
+                          aria-pressed={pairingTarget.tailscaleAddressKind === "magicdns"}
+                          onClick={() => setSelectedTailscaleKind("magicdns")}
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-medium border transition-colors cursor-pointer ${
+                            pairingTarget.tailscaleAddressKind === "magicdns"
+                              ? "bg-emerald-500/12 border-emerald-500/40 text-emerald-700 dark:text-emerald-300"
+                              : "bg-zinc-50 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200"
+                          }`}
+                        >
+                          {t(locale, "remote.step2MagicDnsBtn")}
+                        </button>
+                      </div>
+                    )}
                 </div>
-                <div className="space-y-1">
-                  {!remoteAccess.tailscaleIp && (
+
+                {pairingTarget.linkUri && pairingTarget.url ? (
+                  <>
+                    <div
+                      className="flex justify-center py-0.5"
+                      data-pairing-uri={pairingTarget.linkUri}
+                    >
+                      <QrCodeSvg
+                        value={pairingTarget.linkUri}
+                        size={136}
+                        ariaLabel={t(locale, "remote.step2QrAria")}
+                        testId="remote-access-qr-pair"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      {/* Current endpoint URL below QR */}
+                      <div
+                        data-testid="remote-access-qr-endpoint-url"
+                        className="px-2 py-1.5 rounded-md bg-zinc-100/90 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800 space-y-1"
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="text-[9.5px] font-medium text-zinc-500 dark:text-zinc-400">
+                            {t(locale, "remote.step2CurrentUrlLabel")}
+                          </span>
+                          {activeEndpointBadge && (
+                            <span
+                              data-testid="remote-access-qr-endpoint-badge"
+                              className={`px-1.5 py-0.25 rounded text-[9px] font-semibold ${
+                                pairingTarget.transport === "tailscale"
+                                  ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                                  : "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300"
+                              }`}
+                            >
+                              {activeEndpointBadge}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <code className="flex-1 min-w-0 break-all font-mono text-[9.5px] leading-snug text-zinc-800 dark:text-zinc-200">
+                            {pairingTarget.url}
+                          </code>
+                          <button
+                            type="button"
+                            data-testid="remote-access-qr-copy-url"
+                            onClick={() => copyText("qrEndpointUrl", pairingTarget.url)}
+                            aria-label={t(locale, "remote.copyBtn")}
+                            className="p-1 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 text-zinc-600 dark:text-zinc-300 cursor-pointer shrink-0"
+                          >
+                            {copiedKey === "qrEndpointUrl" ? (
+                              <Check className="w-2.5 h-2.5 text-emerald-500" />
+                            ) : (
+                              <Copy className="w-2.5 h-2.5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {!pairingEndpoints.hasTailscale && (
+                        <div
+                          data-testid="remote-access-qr-tailscale-warning"
+                          className="flex items-start gap-1.5 px-2 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[10px] text-amber-700 dark:text-amber-300 leading-snug"
+                        >
+                          <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+                          <span>{t(locale, "remote.step2TailscaleLanHint")}</span>
+                        </div>
+                      )}
+                      <p className="text-[10px] text-zinc-500 dark:text-zinc-400 leading-snug">
+                        {t(locale, "remote.step2TokenHint")}
+                      </p>
+                    </div>
+                  </>
+                ) : pairingTarget.transport === "tailscale" ? (
+                  <div
+                    data-testid="remote-access-qr-tailscale-unavailable"
+                    className="flex-1 flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-dashed border-amber-400/60 dark:border-amber-600/50 bg-amber-500/5 text-center"
+                  >
+                    <AlertTriangle className="w-6 h-6 text-amber-500" />
                     <div
                       data-testid="remote-access-qr-tailscale-warning"
-                      className="flex items-start gap-1.5 px-2 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[10px] text-amber-700 dark:text-amber-300 leading-snug"
+                      className="space-y-1"
                     >
-                      <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
-                      <span>{t(locale, "remote.step2TailscaleWarning")}</span>
+                      <div className="text-[11.5px] font-semibold text-amber-800 dark:text-amber-200">
+                        {t(locale, "remote.step2TailscaleUnavailableTitle")}
+                      </div>
+                      <p className="text-[10.5px] text-amber-700/90 dark:text-amber-300/90 leading-snug">
+                        {t(locale, "remote.step2TailscaleUnavailableDesc")}
+                      </p>
                     </div>
-                  )}
-                  <p className="text-[10px] text-zinc-500 dark:text-zinc-400 leading-snug">
-                    {t(locale, "remote.step2TokenHint")}
-                  </p>
-                </div>
-              </>
+                    <div className="flex items-center justify-center gap-1.5 flex-wrap pt-0.5">
+                      <button
+                        type="button"
+                        data-testid="remote-access-qr-tailscale-redetect"
+                        onClick={() => onRefreshRemoteAccessStatus?.()}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10.5px] font-medium bg-white dark:bg-zinc-900 border border-amber-400/60 dark:border-amber-600/60 text-amber-800 dark:text-amber-200 hover:bg-amber-50 dark:hover:bg-amber-950/40 cursor-pointer"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        <span>{t(locale, "remote.refreshBtn")}</span>
+                      </button>
+                      {pairingEndpoints.lanUrl && (
+                        <button
+                          type="button"
+                          data-testid="remote-access-qr-switch-lan"
+                          onClick={() => setSelectedTransport("lan")}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10.5px] font-medium bg-indigo-500/12 border border-indigo-500/30 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-500/20 cursor-pointer"
+                        >
+                          <span>{t(locale, "remote.step2SwitchToLanBtn")}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    data-testid="remote-access-qr-lan-unavailable"
+                    className="flex-1 flex flex-col items-center justify-center gap-2 py-4 px-3 rounded-xl border border-dashed border-zinc-300 dark:border-zinc-700 bg-zinc-50/70 dark:bg-zinc-900/50 text-center"
+                  >
+                    <AlertTriangle className="w-6 h-6 text-zinc-400" />
+                    <div className="space-y-1">
+                      <div className="text-[11.5px] font-semibold text-zinc-700 dark:text-zinc-200">
+                        {t(locale, "remote.step2LanUnavailableTitle")}
+                      </div>
+                      <p className="text-[10.5px] text-zinc-500 dark:text-zinc-400 leading-snug">
+                        {t(locale, "remote.step2LanUnavailableDesc")}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRefreshRemoteAccessStatus?.()}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10.5px] font-medium bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>{t(locale, "remote.refreshBtn")}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             ) : (
               <div
                 data-testid="remote-access-qr-pair-disabled"
@@ -982,7 +1221,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
             </div>
             <div className="text-[11.5px] font-mono text-zinc-800 dark:text-zinc-200 space-y-0.5">
               <div>
-                IPv4:{" "}
+                Tailscale:{" "}
                 <span data-testid="remote-access-tailscale-ip">
                   {remoteAccess.tailscaleIp ?? t(locale, "remote.notDetected")}
                 </span>
@@ -992,6 +1231,12 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
                   MagicDNS: {remoteAccess.magicDnsName}
                 </div>
               )}
+              <div className="text-[10.5px] text-zinc-500 dark:text-zinc-400">
+                {t(locale, "remote.lanIpLabel")}:{" "}
+                <span data-testid="remote-access-lan-ip">
+                  {remoteAccess.lanIp ?? t(locale, "remote.notDetected")}
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -1006,11 +1251,11 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               data-testid="remote-access-url"
               className="flex-1 min-w-0 truncate px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono text-[11.5px] text-zinc-800 dark:text-zinc-200"
             >
-              {remoteAccess.url ?? `http://<tailscale-ip>:${remoteAccess.port}`}
+              {activeEndpointUrl ?? `http://<tailscale-ip>:${remoteAccess.port}`}
             </code>
             <button
               type="button"
-              onClick={() => copyText("url", remoteAccess.url)}
+              onClick={() => copyText("url", activeEndpointUrl)}
               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-indigo-500/60 cursor-pointer shrink-0"
             >
               {copiedKey === "url" ? (
@@ -1023,7 +1268,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
               </span>
             </button>
           </div>
-          {remoteAccess.magicDnsUrl && remoteAccess.magicDnsUrl !== remoteAccess.url && (
+          {remoteAccess.magicDnsUrl && remoteAccess.magicDnsUrl !== activeEndpointUrl && (
             <div className="flex items-center justify-between gap-2 text-[10.5px] text-zinc-500 dark:text-zinc-400 font-mono">
               <span className="truncate">MagicDNS URL: {remoteAccess.magicDnsUrl}</span>
               <button
@@ -1090,7 +1335,7 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
         </div>
 
         {/* One-Paste Android Connection URI */}
-        {remoteAccess.connectUri && (
+        {activeConnectUri && (
           <div className="space-y-1">
             <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
               {t(locale, "remote.connectUriLabel")}
@@ -1101,12 +1346,12 @@ export const RemoteAccessSettingsSection: React.FC<RemoteAccessSettingsSectionPr
                 className="flex-1 min-w-0 truncate px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 font-mono text-[11px] text-indigo-600 dark:text-indigo-300"
               >
                 {showToken
-                  ? remoteAccess.connectUri
-                  : remoteAccess.connectUri.replace(/token=[^&]+/, "token=••••••••")}
+                  ? activeConnectUri
+                  : activeConnectUri.replace(/token=[^&]+/, "token=••••••••")}
               </code>
               <button
                 type="button"
-                onClick={() => copyText("uri", remoteAccess.connectUri)}
+                onClick={() => copyText("uri", activeConnectUri)}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-indigo-500 text-white hover:bg-indigo-600 cursor-pointer shrink-0"
               >
                 {copiedKey === "uri" ? (

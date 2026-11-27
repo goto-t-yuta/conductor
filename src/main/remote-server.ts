@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import {
   buildConductorConnectUri,
+  buildConductorLinkUri,
   parseConductorConnectUri,
 } from "../shared/remote-access.js";
 import type {
@@ -20,7 +21,7 @@ import type {
   TaskWorktreeStatus,
 } from "../shared/types.js";
 
-export { buildConductorConnectUri, parseConductorConnectUri };
+export { buildConductorConnectUri, buildConductorLinkUri, parseConductorConnectUri };
 
 export const DEFAULT_REMOTE_ACCESS_PORT = 4789;
 const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB
@@ -139,6 +140,9 @@ function defaultRunTailscaleCli(args: string[]): string | null {
     "/usr/local/bin/tailscale",
     "/opt/homebrew/bin/tailscale",
     "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    ...(process.platform === "win32"
+      ? ["C:\\Program Files\\Tailscale\\tailscale.exe"]
+      : []),
   ];
   for (const bin of candidates) {
     try {
@@ -162,48 +166,70 @@ export function detectTailscaleNetwork(options?: {
   runTailscale?: (args: string[]) => string | null;
 }): TailscaleNetworkInfo {
   const interfaces = options?.interfaces ?? os.networkInterfaces();
-  const runTailscale = options?.runTailscale ?? defaultRunTailscaleCli;
+  const rawRunTailscale = options?.runTailscale ?? defaultRunTailscaleCli;
+  const safeRunTailscale = (args: string[]): string | null => {
+    try {
+      const out = rawRunTailscale(args);
+      return typeof out === "string" && out.trim() ? out.trim() : null;
+    } catch {
+      return null;
+    }
+  };
 
   let tailscaleIp = detectTailscaleIpv4FromInterfaces(interfaces);
   let magicDnsName: string | null = null;
   const lanIp = detectLanIpv4FromInterfaces(interfaces);
+  let tailscaleExplicitlyDisconnected = false;
 
-  if (!tailscaleIp) {
-    const ipOut = runTailscale(["ip", "-4"]);
-    if (ipOut) {
-      const firstLine = ipOut.split(/\r?\n/)[0]?.trim() ?? "";
-      if (isTailscaleIpv4(firstLine)) {
-        tailscaleIp = firstLine;
-      }
-    }
-  }
-
-  const statusRaw = runTailscale(["status", "--json"]);
+  const statusRaw = safeRunTailscale(["status", "--json"]);
   if (statusRaw) {
     try {
       const parsed = JSON.parse(statusRaw) as {
+        BackendState?: unknown;
         TailscaleIPs?: unknown;
         Self?: { DNSName?: unknown; TailscaleIPs?: unknown };
       };
-      const dnsRaw = typeof parsed.Self?.DNSName === "string" ? parsed.Self.DNSName.trim() : "";
-      const cleanedDns = dnsRaw.replace(/\.+$/, "");
-      if (cleanedDns && cleanedDns.includes(".")) {
-        magicDnsName = cleanedDns;
-      }
-      if (!tailscaleIp) {
-        const ipList = [
-          ...(Array.isArray(parsed.Self?.TailscaleIPs) ? parsed.Self.TailscaleIPs : []),
-          ...(Array.isArray(parsed.TailscaleIPs) ? parsed.TailscaleIPs : []),
-        ];
-        for (const candidate of ipList) {
-          if (typeof candidate === "string" && isTailscaleIpv4(candidate)) {
-            tailscaleIp = candidate.trim();
-            break;
+      const backendState =
+        typeof parsed.BackendState === "string" ? parsed.BackendState.trim() : "";
+      if (backendState && backendState.toLowerCase() !== "running") {
+        // Tailscale daemon is installed but stopped / logged out — avoid returning stale data
+        tailscaleExplicitlyDisconnected = true;
+        tailscaleIp = null;
+        magicDnsName = null;
+      } else {
+        const dnsRaw = typeof parsed.Self?.DNSName === "string" ? parsed.Self.DNSName.trim() : "";
+        const cleanedDns = dnsRaw.replace(/\.+$/, "");
+        if (cleanedDns && cleanedDns.includes(".")) {
+          magicDnsName = cleanedDns;
+        }
+        if (!tailscaleIp) {
+          const ipList = [
+            ...(Array.isArray(parsed.Self?.TailscaleIPs) ? parsed.Self.TailscaleIPs : []),
+            ...(Array.isArray(parsed.TailscaleIPs) ? parsed.TailscaleIPs : []),
+          ];
+          for (const candidate of ipList) {
+            if (typeof candidate === "string" && isTailscaleIpv4(candidate)) {
+              tailscaleIp = candidate.trim();
+              break;
+            }
           }
         }
       }
     } catch {
       // ignore malformed CLI output
+    }
+  }
+
+  if (!tailscaleIp && !tailscaleExplicitlyDisconnected) {
+    const ipOut = safeRunTailscale(["ip", "-4"]);
+    if (ipOut) {
+      for (const line of ipOut.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (isTailscaleIpv4(trimmed)) {
+          tailscaleIp = trimmed;
+          break;
+        }
+      }
     }
   }
 
@@ -380,10 +406,13 @@ export class RemoteBridgeServer {
     const running = this.isRunning();
     const port = this.actualPort ?? this.configuredPort;
     const { tailscaleIp, magicDnsName, lanIp } = this.networkInfo;
+    const tailscaleUrl = tailscaleIp && port > 0 ? `http://${tailscaleIp}:${port}` : null;
+    const magicDnsUrl = magicDnsName && port > 0 ? `http://${magicDnsName}:${port}` : null;
+    const lanUrl = lanIp && port > 0 ? `http://${lanIp}:${port}` : null;
     const preferredHost = tailscaleIp ?? magicDnsName ?? lanIp ?? "127.0.0.1";
     const url = port > 0 ? `http://${preferredHost}:${port}` : null;
-    const magicDnsUrl = magicDnsName && port > 0 ? `http://${magicDnsName}:${port}` : null;
     const connectUri = url && this.token ? buildConductorConnectUri(url, this.token) : null;
+    const linkUri = url && this.token ? buildConductorLinkUri(url, this.token) : null;
 
     return {
       enabled: enabled ?? running,
@@ -395,8 +424,11 @@ export class RemoteBridgeServer {
       magicDnsName,
       lanIp,
       url,
+      tailscaleUrl,
       magicDnsUrl,
+      lanUrl,
       connectUri,
+      linkUri,
       connectedClients: this.sseClients.size,
       error: this.lastError,
     };
