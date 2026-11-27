@@ -3,13 +3,23 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { ChatComposer } from "../src/renderer/components/ChatComposer.js";
 import { ImageLightboxModal } from "../src/renderer/components/ImageLightboxModal.js";
+import { ImageViewerPane } from "../src/renderer/components/ImageViewerPane.js";
 import { TaskInspectorModal } from "../src/renderer/components/TaskInspectorModal.js";
 import { UnifiedChat } from "../src/renderer/components/UnifiedChat.js";
 import {
   buildAttachmentFromMarkdownImage,
   buildImageTabFromAttachment,
+  computeDragPanScroll,
+  computeWheelZoomUpdate,
   extractImageFileName,
+  formatZoomLabel,
+  isImageOverflowingViewport,
+  MAX_ZOOM,
   mergeLoadedImageIntoAttachment,
+  MIN_ZOOM,
+  resolveImageZoomCursorClass,
+  shouldDismissLightboxOnBackdropClick,
+  stepZoom,
   type ImageViewerTab,
 } from "../src/renderer/lib/image-viewer.js";
 import { t } from "../src/shared/i18n.js";
@@ -180,8 +190,21 @@ describe("ImageLightboxModal UI", () => {
     expect(html).toContain('data-testid="image-lightbox-open-right-pane"');
     expect(html).toContain(t("ja", "image.lightboxOpenInRightPane"));
     expect(html).toContain('data-testid="image-lightbox-close"');
+    expect(html).toContain('data-testid="image-lightbox-zoom-controls"');
+    expect(html).toContain('data-testid="image-lightbox-fit"');
+    expect(html).toContain('data-testid="image-lightbox-actual-size"');
+    expect(html).toContain('data-testid="image-lightbox-zoom-out"');
+    expect(html).toContain('data-testid="image-lightbox-zoom-label"');
+    expect(html).toContain('data-testid="image-lightbox-zoom-in"');
+    expect(html).toContain('data-testid="image-lightbox-viewport"');
     expect(html).toContain('data-testid="image-lightbox-img"');
     expect(html).toContain('src="data:image/png;base64,iVBORw0KGgo="');
+    expect(html).toContain("cursor-zoom-in");
+    expect(html).toContain(t("ja", "image.fitTitle"));
+    expect(html).toContain(t("ja", "image.actualSizeTitle"));
+    expect(html).toContain(t("ja", "image.zoomOutTitle"));
+    expect(html).toContain(t("ja", "image.zoomInTitle"));
+    expect(html).toContain(t("ja", "image.dblClickActualSizeTitle"));
     expect(html).toContain(t("ja", "image.lightboxEscHint"));
     expect(html).toContain("/Users/dev/conductor/shots/dashboard-after.png");
   });
@@ -205,10 +228,14 @@ describe("ImageLightboxModal UI", () => {
     expect(html).toContain("Open in Right Pane");
     expect(html).toContain("Close image preview");
     expect(html).toContain("Press Esc or click outside to close");
+    expect(html).toContain("Fit to pane (0)");
+    expect(html).toContain("Actual size 100% (1)");
+    expect(html).toContain("Zoom out (-)");
+    expect(html).toContain("Zoom in (+)");
     expect(JAPANESE_CHAR_RE.test(html)).toBe(false);
   });
 
-  it("renders loading and error states with retry button cleanly", () => {
+  it("renders loading and error states with retry button and disabled zoom controls cleanly", () => {
     const loadingHtml = renderToStaticMarkup(
       <ImageLightboxModal
         image={{ ...sampleImage, src: null, isLoading: true, error: null }}
@@ -219,6 +246,11 @@ describe("ImageLightboxModal UI", () => {
     );
     expect(loadingHtml).toContain(t("ja", "image.loading"));
     expect(loadingHtml).not.toContain('data-testid="image-lightbox-img"');
+    expect(loadingHtml).not.toContain('data-testid="image-lightbox-viewport"');
+    expect(loadingHtml).toMatch(/data-testid="image-lightbox-fit"[^>]*disabled=""/);
+    expect(loadingHtml).toMatch(/data-testid="image-lightbox-actual-size"[^>]*disabled=""/);
+    expect(loadingHtml).toMatch(/data-testid="image-lightbox-zoom-out"[^>]*disabled=""/);
+    expect(loadingHtml).toMatch(/data-testid="image-lightbox-zoom-in"[^>]*disabled=""/);
 
     const errorHtml = renderToStaticMarkup(
       <ImageLightboxModal
@@ -237,6 +269,139 @@ describe("ImageLightboxModal UI", () => {
     expect(errorHtml).toContain(t("ja", "image.errorHeading"));
     expect(errorHtml).toContain("File not found");
     expect(errorHtml).toContain(t("ja", "common.reload"));
+    expect(errorHtml).toMatch(/data-testid="image-lightbox-zoom-in"[^>]*disabled=""/);
+  });
+
+  it("keeps zoom controls and tooltips aligned with the right-pane ImageViewerPane", () => {
+    const lightboxHtml = renderToStaticMarkup(
+      <ImageLightboxModal
+        image={sampleImage}
+        locale="ja"
+        onClose={vi.fn()}
+        onOpenInRightPane={vi.fn()}
+      />,
+    );
+    const paneHtml = renderToStaticMarkup(
+      <ImageViewerPane
+        activeTab={sampleImage}
+        locale="ja"
+        onCloseActiveTab={vi.fn()}
+        onRetryLoadTab={vi.fn()}
+        onImageLoadError={vi.fn()}
+        onOpenUrl={vi.fn()}
+        onRevealInFinder={vi.fn()}
+      />,
+    );
+
+    for (const key of [
+      "image.fitTitle",
+      "image.actualSizeTitle",
+      "image.zoomOutTitle",
+      "image.zoomOutAria",
+      "image.zoomInTitle",
+      "image.zoomInAria",
+      "image.dblClickActualSizeTitle",
+    ] as const) {
+      expect(lightboxHtml).toContain(t("ja", key));
+      expect(paneHtml).toContain(t("ja", key));
+    }
+
+    // Both start in Fit mode with zoom-in cursor
+    expect(lightboxHtml).toContain(">Fit<");
+    expect(paneHtml).toContain(">Fit<");
+    expect(lightboxHtml).toContain(">100%<");
+    expect(paneHtml).toContain(">100%<");
+    expect(lightboxHtml).toContain("cursor-zoom-in");
+    expect(paneHtml).toContain("cursor-zoom-in");
+  });
+
+  it("supports end-to-end zoom stepping, pinch zoom, drag-pan, backdrop guard, and Fit reset", () => {
+    // 1. Start in Fit mode -> step zoom in -> 100% -> 125% -> clamp MAX_ZOOM -> step out -> clamp MIN_ZOOM
+    let scale = 1;
+    expect(formatZoomLabel("fit", scale)).toBe("Fit");
+    scale = stepZoom(scale, "in");
+    expect(scale).toBe(1.25);
+    expect(formatZoomLabel("custom", scale)).toBe("125%");
+    scale = stepZoom(MAX_ZOOM, "in");
+    expect(scale).toBe(MAX_ZOOM);
+    scale = stepZoom(MIN_ZOOM, "out");
+    expect(scale).toBe(MIN_ZOOM);
+
+    // 2. Trackpad pinch zoom from Fit mode transitions smoothly and anchors under cursor
+    const pinched = computeWheelZoomUpdate({
+      prevMode: "fit",
+      prevScale: 0.5,
+      deltaY: -69.3147, // ~2x zoom in -> 100%
+      naturalWidth: 2000,
+      naturalHeight: 1400,
+      viewportWidth: 1000,
+      viewportHeight: 700,
+      scrollLeft: 0,
+      scrollTop: 0,
+      cursorX: 500,
+      cursorY: 350,
+    });
+    expect(pinched).not.toBeNull();
+    expect(pinched!.mode).toBe("custom");
+    expect(pinched!.scale).toBeCloseTo(1, 2);
+
+    // 3. Overflowing zoomed image exposes grab -> grabbing cursor and updates scroll on drag pan
+    const overflowing = isImageOverflowingViewport({
+      zoomMode: pinched!.mode,
+      zoomScale: pinched!.scale,
+      naturalSize: { width: 2000, height: 1400 },
+      viewportWidth: 1000,
+      viewportHeight: 700,
+    });
+    expect(overflowing).toBe(true);
+    expect(
+      resolveImageZoomCursorClass({
+        zoomMode: "custom",
+        isDraggingPan: false,
+        isOverflowingViewport: overflowing,
+      }),
+    ).toBe("cursor-grab");
+    expect(
+      resolveImageZoomCursorClass({
+        zoomMode: "custom",
+        isDraggingPan: true,
+        isOverflowingViewport: overflowing,
+      }),
+    ).toBe("cursor-grabbing");
+
+    const panResult = computeDragPanScroll(
+      {
+        pointerId: 1,
+        startX: 400,
+        startY: 300,
+        startScrollLeft: pinched!.scrollLeft,
+        startScrollTop: pinched!.scrollTop,
+        hasMoved: false,
+      },
+      280,
+      210,
+    );
+    expect(panResult.hasMoved).toBe(true);
+    expect(panResult.scrollLeft).toBeCloseTo(pinched!.scrollLeft + 120, 4);
+    expect(panResult.scrollTop).toBeCloseTo(pinched!.scrollTop + 90, 4);
+
+    // 4. Releasing a pan drag over the backdrop does not close the modal, while a clean backdrop click does
+    expect(
+      shouldDismissLightboxOnBackdropClick({
+        isTargetBackdrop: true,
+        pointerDownOrigin: "dialog",
+        isDraggingPan: false,
+        suppressNextBackdropClick: panResult.hasMoved,
+      }),
+    ).toBe(false);
+    expect(
+      shouldDismissLightboxOnBackdropClick({
+        isTargetBackdrop: true,
+        pointerDownOrigin: "backdrop",
+        isDraggingPan: false,
+        suppressNextBackdropClick: false,
+      }),
+    ).toBe(true);
   });
 
   it("uses lightbox-oriented tooltips/labels for image thumbnails in ChatComposer, UnifiedChat, and TaskInspectorModal", () => {
