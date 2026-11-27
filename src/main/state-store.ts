@@ -144,10 +144,27 @@ export class StateStore {
   }
 
   savePngBuffer(buffer: Buffer, prefix = "capture"): { imagePath: string; imageDataUrl: string } {
-    const name = `${prefix}-${crypto.randomUUID().slice(0, 8)}.png`;
+    return this.saveImageBuffer(buffer, "image/png", prefix);
+  }
+
+  saveImageBuffer(
+    buffer: Buffer,
+    mimeType = "image/png",
+    prefix = "capture",
+  ): { imagePath: string; imageDataUrl: string } {
+    const normalized = mimeType.trim().toLowerCase();
+    const { ext, canonicalMime } =
+      normalized === "image/jpeg" || normalized === "image/jpg"
+        ? { ext: ".jpg", canonicalMime: "image/jpeg" }
+        : normalized === "image/webp"
+          ? { ext: ".webp", canonicalMime: "image/webp" }
+          : normalized === "image/gif"
+            ? { ext: ".gif", canonicalMime: "image/gif" }
+            : { ext: ".png", canonicalMime: "image/png" };
+    const name = `${prefix}-${crypto.randomUUID().slice(0, 8)}${ext}`;
     const imagePath = path.join(this.attachmentsDir, name);
     fs.writeFileSync(imagePath, buffer);
-    const imageDataUrl = `data:image/png;base64,${buffer.toString("base64")}`;
+    const imageDataUrl = `data:${canonicalMime};base64,${buffer.toString("base64")}`;
     return { imagePath, imageDataUrl };
   }
 

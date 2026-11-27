@@ -34,6 +34,30 @@ export type ResolvedImagePath =
   | { ok: true; filePath: string }
   | { ok: false; error: string };
 
+export type LocalImageErrorCode =
+  | "invalid"
+  | "not_found"
+  | "forbidden"
+  | "too_large"
+  | "io_error";
+
+export type InspectedLocalImage =
+  | {
+      ok: true;
+      filePath: string;
+      realPath: string;
+      fileName: string;
+      mimeType: string;
+      sizeBytes: number;
+      mtimeMs: number;
+    }
+  | {
+      ok: false;
+      filePath: string;
+      error: string;
+      errorCode: LocalImageErrorCode;
+    };
+
 function expandHomePath(rawPath: string): string {
   if (rawPath === "~") {
     return os.homedir();
@@ -47,6 +71,7 @@ function expandHomePath(rawPath: string): string {
 function resolveBaseDirectory(baseFilePath?: string): string | null {
   const trimmed = baseFilePath?.trim();
   if (!trimmed || trimmed.includes("\0")) return null;
+  let candidate: string;
   if (/^file:\/\//i.test(trimmed)) {
     try {
       const parsed = new URL(trimmed);
@@ -54,14 +79,23 @@ function resolveBaseDirectory(baseFilePath?: string): string | null {
       parsed.search = "";
       const filePath = fileURLToPath(parsed);
       if (filePath.includes("\0")) return null;
-      return path.dirname(path.resolve(filePath));
+      candidate = path.resolve(filePath);
     } catch {
       return null;
     }
+  } else {
+    const expanded = expandHomePath(trimmed);
+    if (!path.isAbsolute(expanded)) return null;
+    candidate = path.resolve(expanded);
   }
-  const expanded = expandHomePath(trimmed);
-  if (!path.isAbsolute(expanded)) return null;
-  return path.dirname(path.resolve(expanded));
+  try {
+    if (fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+  } catch {
+    // Non-existent path: treat as a file path and use its parent directory
+  }
+  return path.dirname(candidate);
 }
 
 function stripQueryAndHashIfNotLiteral(rawPath: string, baseDir: string | null): string {
@@ -218,13 +252,13 @@ export function resolveLocalImagePath(
   return { ok: true, filePath: resolved };
 }
 
-export function readLocalImageFile(
+export function inspectLocalImageFile(
   input: string,
   baseFilePath?: string,
-): ImageReadResult {
+): InspectedLocalImage {
   const resolved = resolveLocalImagePath(input, baseFilePath);
   if (!resolved.ok) {
-    return { ok: false, filePath: input, error: resolved.error };
+    return { ok: false, filePath: input, error: resolved.error, errorCode: "invalid" };
   }
 
   let targetPath = resolved.filePath;
@@ -241,20 +275,28 @@ export function readLocalImageFile(
         try {
           realPath = fs.realpathSync(targetPath);
         } catch (fallbackErr) {
+          const fallbackCode = (fallbackErr as NodeJS.ErrnoException)?.code;
           return {
             ok: false,
             filePath: targetPath,
             error: `画像ファイルにアクセスできません: ${(fallbackErr as Error).message}`,
+            errorCode: fallbackCode === "EACCES" || fallbackCode === "EPERM" ? "forbidden" : "io_error",
           };
         }
       } else {
-        return { ok: false, filePath: targetPath, error: "画像ファイルが見つかりません。" };
+        return {
+          ok: false,
+          filePath: targetPath,
+          error: "画像ファイルが見つかりません。",
+          errorCode: "not_found",
+        };
       }
     } else {
       return {
         ok: false,
         filePath: targetPath,
         error: `画像ファイルにアクセスできません: ${(err as Error).message}`,
+        errorCode: code === "EACCES" || code === "EPERM" ? "forbidden" : "io_error",
       };
     }
   }
@@ -266,6 +308,7 @@ export function readLocalImageFile(
       ok: false,
       filePath: targetPath,
       error: "リンク先が画像ファイルではないため読み込みを拒否しました。",
+      errorCode: "forbidden",
     };
   }
 
@@ -273,15 +316,22 @@ export function readLocalImageFile(
   try {
     stat = fs.statSync(realPath);
   } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
     return {
       ok: false,
       filePath: targetPath,
       error: `画像情報を取得できません: ${(err as Error).message}`,
+      errorCode: code === "EACCES" || code === "EPERM" ? "forbidden" : "io_error",
     };
   }
 
   if (!stat.isFile()) {
-    return { ok: false, filePath: targetPath, error: "指定されたパスは通常ファイルではありません。" };
+    return {
+      ok: false,
+      filePath: targetPath,
+      error: "指定されたパスは通常ファイルではありません。",
+      errorCode: "invalid",
+    };
   }
 
   if (stat.size > MAX_IMAGE_FILE_BYTES) {
@@ -289,24 +339,45 @@ export function readLocalImageFile(
       ok: false,
       filePath: targetPath,
       error: `画像サイズが大きすぎます (上限 ${(MAX_IMAGE_FILE_BYTES / (1024 * 1024)).toFixed(0)}MB)。`,
+      errorCode: "too_large",
     };
   }
 
+  return {
+    ok: true,
+    filePath: targetPath,
+    realPath,
+    fileName: path.basename(targetPath),
+    mimeType,
+    sizeBytes: stat.size,
+    mtimeMs: stat.mtimeMs,
+  };
+}
+
+export function readLocalImageFile(
+  input: string,
+  baseFilePath?: string,
+): ImageReadResult {
+  const inspected = inspectLocalImageFile(input, baseFilePath);
+  if (!inspected.ok) {
+    return { ok: false, filePath: inspected.filePath, error: inspected.error };
+  }
+
   try {
-    const buf = fs.readFileSync(realPath);
-    const dataUrl = `data:${mimeType};base64,${buf.toString("base64")}`;
+    const buf = fs.readFileSync(inspected.realPath);
+    const dataUrl = `data:${inspected.mimeType};base64,${buf.toString("base64")}`;
     return {
       ok: true,
-      filePath: targetPath,
-      fileName: path.basename(targetPath),
+      filePath: inspected.filePath,
+      fileName: inspected.fileName,
       dataUrl,
-      mimeType,
-      sizeBytes: stat.size,
+      mimeType: inspected.mimeType,
+      sizeBytes: inspected.sizeBytes,
     };
   } catch (err) {
     return {
       ok: false,
-      filePath: targetPath,
+      filePath: inspected.filePath,
       error: `画像を読み込めませんでした: ${(err as Error).message}`,
     };
   }

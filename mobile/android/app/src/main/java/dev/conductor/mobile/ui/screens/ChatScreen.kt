@@ -1,10 +1,25 @@
 package dev.conductor.mobile.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,7 +45,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddComment
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AlternateEmail
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bolt
@@ -39,6 +56,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.WarningAmber
@@ -53,16 +71,25 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -70,10 +97,19 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import dev.conductor.mobile.data.AndroidImageAttachmentProcessor
+import dev.conductor.mobile.data.ImageAttachmentLogic
 import dev.conductor.mobile.model.AgentTask
 import dev.conductor.mobile.model.AppSnapshot
+import dev.conductor.mobile.model.ChatAttachment
 import dev.conductor.mobile.model.ChatMessage
 import dev.conductor.mobile.model.ExplicitMentionTarget
+import dev.conductor.mobile.model.PendingImageAttachment
 import dev.conductor.mobile.model.Project
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.ToolActivityChip
@@ -89,6 +125,11 @@ import dev.conductor.mobile.ui.components.parseConductorHexColor
 import dev.conductor.mobile.ui.components.transportStatusColor
 import dev.conductor.mobile.ui.theme.ConductorTheme
 
+private data class PreviewImageRequest(
+    val label: String,
+    val bytes: ByteArray,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
@@ -96,10 +137,16 @@ fun ChatScreen(
     transportState: StreamTransportState,
     composerText: String,
     selectedMentions: List<ExplicitMentionTarget>,
+    pendingAttachments: List<PendingImageAttachment>,
+    isProcessingImages: Boolean,
     isSending: Boolean,
     onComposerTextChange: (String) -> Unit,
     onAddMention: (ExplicitMentionTarget) -> Unit,
     onRemoveMention: (ExplicitMentionTarget) -> Unit,
+    onPickImageUris: (List<Uri>) -> Unit,
+    onRemoveAttachment: (String) -> Unit,
+    getCachedAttachmentImage: (String) -> ByteArray?,
+    loadAttachmentImage: suspend (String) -> ByteArray?,
     onSend: () -> Unit,
     onStopAll: () -> Unit,
     onStopMessage: (String) -> Unit,
@@ -114,24 +161,87 @@ fun ChatScreen(
     val projectsById = remember(projects) { projects.associateBy { it.id } }
     val activeResponders = snapshot?.activeResponderCount ?: 0
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
     var showMentionSheet by remember { mutableStateOf(false) }
+    var previewImage by remember { mutableStateOf<PreviewImageRequest?>(null) }
+    var isScrollingToBottom by remember { mutableStateOf(false) }
+    var hasInitializedScroll by remember { mutableStateOf(false) }
+
+    val fallbackDocPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            onPickImageUris(uris)
+        }
+    }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(ImageAttachmentLogic.MAX_ATTACHMENTS),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            onPickImageUris(uris)
+        }
+    }
+
+    val launchImagePicker: () -> Unit = {
+        val launched = runCatching {
+            photoPickerLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        }.isSuccess
+        if (!launched) {
+            runCatching {
+                fallbackDocPickerLauncher.launch(arrayOf("image/*"))
+            }
+        }
+    }
+
+    val density = LocalDensity.current
+    val bottomThresholdPx = remember(density) {
+        with(density) { ChatScrollLogic.BOTTOM_THRESHOLD_DP.dp.roundToPx() }
+    }
+    val latestMessageCount by rememberUpdatedState(messages.size)
+    val showScrollToBottom by remember(listState, bottomThresholdPx) {
+        derivedStateOf {
+            ChatScrollLogic.shouldShowScrollToBottomButton(
+                metrics = listState.toChatScrollMetrics(),
+                messageCount = latestMessageCount,
+                isScrollingToBottom = isScrollingToBottom,
+                thresholdPx = bottomThresholdPx,
+            )
+        }
+    }
 
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            val nearBottom = messages.size <= 2 || lastVisibleIndex >= messages.lastIndex - 2
-            if (nearBottom) {
-                listState.scrollToItem(messages.lastIndex)
+        if (messages.isEmpty()) {
+            hasInitializedScroll = false
+            isScrollingToBottom = false
+        } else {
+            val bottomAnchorIndex = messages.size
+            val lastMessageIsUser = messages.lastOrNull()?.role == "user"
+            val shouldAutoScroll = !hasInitializedScroll ||
+                lastMessageIsUser ||
+                ChatScrollLogic.shouldAutoScrollOnMessageCountChange(
+                    metrics = listState.toChatScrollMetrics(),
+                    messageCount = messages.size,
+                    thresholdPx = bottomThresholdPx,
+                )
+            hasInitializedScroll = true
+            if (shouldAutoScroll) {
+                listState.scrollToItem(bottomAnchorIndex)
             }
         }
     }
 
     LaunchedEffect(messages.lastOrNull()?.id, messages.lastOrNull()?.text?.length) {
-        if (messages.isNotEmpty()) {
-            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            val nearBottom = lastVisibleIndex >= messages.lastIndex - 1
-            if (nearBottom) {
-                listState.scrollToItem(messages.lastIndex)
+        if (messages.isNotEmpty() && !isScrollingToBottom) {
+            val shouldAutoScroll = ChatScrollLogic.shouldAutoScrollOnStreamingUpdate(
+                metrics = listState.toChatScrollMetrics(),
+                messageCount = messages.size,
+                thresholdPx = bottomThresholdPx,
+            )
+            if (shouldAutoScroll) {
+                listState.scrollToItem(messages.size)
             }
         }
     }
@@ -180,46 +290,83 @@ fun ChatScreen(
             HorizontalDivider(thickness = 1.dp, color = colors.roseBorder)
         }
 
-        // Message stream or welcome empty state
-        if (messages.isEmpty()) {
-            EmptyChatWelcome(
-                isSyncing = snapshot == null,
-                projectCount = projects.size,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-            )
-        } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
-            ) {
-                items(messages, key = { it.id }) { msg ->
-                    val linkedTask = msg.relatedTaskId?.let { tasksById[it] }
-                    val linkedProject = linkedTask?.projectId?.let { projectsById[it] }
-                    ChatMessageRow(
-                        message = msg,
-                        linkedTask = linkedTask,
-                        linkedProjectColorHex = linkedProject?.colorHex,
-                        onStop = { onStopMessage(msg.id) },
-                        onOpenTask = onOpenTask,
-                    )
+        // Message stream or welcome empty state, with floating scroll-to-bottom button
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+        ) {
+            if (messages.isEmpty()) {
+                EmptyChatWelcome(
+                    isSyncing = snapshot == null,
+                    projectCount = projects.size,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 0.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                ) {
+                    items(messages, key = { it.id }) { msg ->
+                        val linkedTask = msg.relatedTaskId?.let { tasksById[it] }
+                        val linkedProject = linkedTask?.projectId?.let { projectsById[it] }
+                        ChatMessageRow(
+                            message = msg,
+                            linkedTask = linkedTask,
+                            linkedProjectColorHex = linkedProject?.colorHex,
+                            getCachedAttachmentImage = getCachedAttachmentImage,
+                            loadAttachmentImage = loadAttachmentImage,
+                            onPreviewImage = { label, bytes ->
+                                previewImage = PreviewImageRequest(label = label, bytes = bytes)
+                            },
+                            onStop = { onStopMessage(msg.id) },
+                            onOpenTask = onOpenTask,
+                        )
+                    }
+                    // Bottom anchor ensures animateScrollToItem reaches the very end even for tall messages
+                    item(key = CHAT_BOTTOM_ANCHOR_KEY) {
+                        Spacer(modifier = Modifier.height(1.dp))
+                    }
                 }
             }
+
+            ScrollToBottomFloatingButton(
+                visible = showScrollToBottom,
+                onClick = {
+                    val targetIndex = messages.size
+                    if (targetIndex <= 0) return@ScrollToBottomFloatingButton
+                    coroutineScope.launch {
+                        isScrollingToBottom = true
+                        try {
+                            listState.animateScrollToItem(targetIndex)
+                        } finally {
+                            isScrollingToBottom = false
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 12.dp),
+            )
         }
 
         // Desktop-aligned floating rounded composer
         ChatComposerBar(
             composerText = composerText,
             selectedMentions = selectedMentions,
+            pendingAttachments = pendingAttachments,
+            isProcessingImages = isProcessingImages,
             isSending = isSending,
             onComposerTextChange = onComposerTextChange,
             onOpenMentionPicker = { showMentionSheet = true },
             onRemoveMention = onRemoveMention,
+            onOpenImagePicker = launchImagePicker,
+            onRemoveAttachment = onRemoveAttachment,
+            onPreviewPendingAttachment = { att ->
+                previewImage = PreviewImageRequest(label = att.label, bytes = att.previewBytes)
+            },
             onSend = onSend,
         )
     }
@@ -233,6 +380,14 @@ fun ChatScreen(
                 onAddMention(target)
                 showMentionSheet = false
             },
+        )
+    }
+
+    previewImage?.let { request ->
+        ImagePreviewDialog(
+            label = request.label,
+            imageBytes = request.bytes,
+            onDismiss = { previewImage = null },
         )
     }
 }
@@ -456,11 +611,19 @@ private fun ChatMessageRow(
     message: ChatMessage,
     linkedTask: AgentTask?,
     linkedProjectColorHex: String?,
+    getCachedAttachmentImage: (String) -> ByteArray?,
+    loadAttachmentImage: suspend (String) -> ByteArray?,
+    onPreviewImage: (label: String, bytes: ByteArray) -> Unit,
     onStop: () -> Unit,
     onOpenTask: (String) -> Unit,
 ) {
     when (message.role) {
-        "user" -> UserMessageItem(message = message)
+        "user" -> UserMessageItem(
+            message = message,
+            getCachedAttachmentImage = getCachedAttachmentImage,
+            loadAttachmentImage = loadAttachmentImage,
+            onPreviewImage = onPreviewImage,
+        )
         "taskEvent" -> TaskEventCard(
             message = message,
             linkedTask = linkedTask,
@@ -475,12 +638,23 @@ private fun ChatMessageRow(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun UserMessageItem(message: ChatMessage) {
+private fun UserMessageItem(
+    message: ChatMessage,
+    getCachedAttachmentImage: (String) -> ByteArray?,
+    loadAttachmentImage: suspend (String) -> ByteArray?,
+    onPreviewImage: (label: String, bytes: ByteArray) -> Unit,
+) {
     val colors = ConductorTheme.colors
     val allMentions = remember(message.mentions, message.inferredMentions) {
         (message.mentions + message.inferredMentions).distinctBy {
             "${it.kind}:${it.taskId ?: it.projectId ?: it.projectName}:${it.taskNumber}"
         }
+    }
+    val imageAttachments = remember(message.attachments) {
+        message.attachments.filter { it.kind == "image" }
+    }
+    val otherAttachments = remember(message.attachments) {
+        message.attachments.filter { it.kind != "image" }
     }
 
     Column(
@@ -488,7 +662,7 @@ private fun UserMessageItem(message: ChatMessage) {
         horizontalAlignment = Alignment.End,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (allMentions.isNotEmpty() || message.attachments.isNotEmpty()) {
+        if (allMentions.isNotEmpty() || otherAttachments.isNotEmpty()) {
             FlowRow(
                 modifier = Modifier.widthIn(max = 320.dp),
                 horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.End),
@@ -497,7 +671,7 @@ private fun UserMessageItem(message: ChatMessage) {
                 allMentions.forEach { ref ->
                     MentionBadgeChip(mention = ref)
                 }
-                message.attachments.forEach { att ->
+                otherAttachments.forEach { att ->
                     Surface(
                         color = colors.surfaceSubtle,
                         shape = RoundedCornerShape(8.dp),
@@ -516,19 +690,150 @@ private fun UserMessageItem(message: ChatMessage) {
             }
         }
 
-        // Desktop-aligned soft indigo tinted user bubble (bg-indigo-500/12 dark:bg-indigo-500/20)
-        Surface(
-            color = colors.userBubbleBg,
-            shape = RoundedCornerShape(16.dp),
-            border = BorderStroke(1.dp, colors.userBubbleBorder),
-            modifier = Modifier.widthIn(max = 316.dp),
-        ) {
-            ConductorMarkdown(
-                markdown = message.text,
-                variant = MarkdownVariant.USER_BUBBLE,
-                textColor = colors.textPrimary,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            )
+        if (imageAttachments.isNotEmpty()) {
+            FlowRow(
+                modifier = Modifier.widthIn(max = 316.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                val single = imageAttachments.size == 1
+                imageAttachments.forEach { att ->
+                    RemoteAttachmentImageCard(
+                        attachment = att,
+                        isSingle = single,
+                        getCachedAttachmentImage = getCachedAttachmentImage,
+                        loadAttachmentImage = loadAttachmentImage,
+                        onPreviewImage = onPreviewImage,
+                    )
+                }
+            }
+        }
+
+        if (message.text.isNotBlank()) {
+            // Desktop-aligned soft indigo tinted user bubble (bg-indigo-500/12 dark:bg-indigo-500/20)
+            Surface(
+                color = colors.userBubbleBg,
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, colors.userBubbleBorder),
+                modifier = Modifier.widthIn(max = 316.dp),
+            ) {
+                ConductorMarkdown(
+                    markdown = message.text,
+                    variant = MarkdownVariant.USER_BUBBLE,
+                    textColor = colors.textPrimary,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemoteAttachmentImageCard(
+    attachment: ChatAttachment,
+    isSingle: Boolean,
+    getCachedAttachmentImage: (String) -> ByteArray?,
+    loadAttachmentImage: suspend (String) -> ByteArray?,
+    onPreviewImage: (label: String, bytes: ByteArray) -> Unit,
+) {
+    val colors = ConductorTheme.colors
+    val label = attachment.label.ifBlank { "Image" }
+    var imageBytes by remember(attachment.id) { mutableStateOf(getCachedAttachmentImage(attachment.id)) }
+    var bitmap by remember(attachment.id) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(attachment.id) { mutableStateOf(imageBytes == null && attachment.id.isNotBlank()) }
+
+    LaunchedEffect(attachment.id) {
+        val current = imageBytes ?: run {
+            if (attachment.id.isBlank()) {
+                isLoading = false
+                return@LaunchedEffect
+            }
+            isLoading = true
+            val fetched = loadAttachmentImage(attachment.id)
+            imageBytes = fetched
+            isLoading = false
+            fetched
+        }
+        if (current != null && bitmap == null) {
+            val decoded = withContext(Dispatchers.Default) {
+                AndroidImageAttachmentProcessor.decodeBitmapSafe(current, 512)?.asImageBitmap()
+            }
+            bitmap = decoded
+        }
+    }
+
+    val cardWidth = if (isSingle) 172.dp else 104.dp
+    val imageHeight = if (isSingle) 124.dp else 88.dp
+
+    Surface(
+        color = colors.surfaceSubtle,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, colors.border),
+        modifier = Modifier
+            .width(cardWidth)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = imageBytes != null) {
+                imageBytes?.let { bytes -> onPreviewImage(label, bytes) }
+            },
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(imageHeight)
+                    .background(colors.surfaceSecondary),
+                contentAlignment = Alignment.Center,
+            ) {
+                val rendered = bitmap
+                when {
+                    rendered != null -> {
+                        Image(
+                            bitmap = rendered,
+                            contentDescription = label,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+
+                    isLoading -> {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = colors.indigo,
+                        )
+                    }
+
+                    else -> {
+                        Icon(
+                            imageVector = Icons.Default.Image,
+                            contentDescription = label,
+                            tint = colors.textSubtle,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 7.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Image,
+                    contentDescription = null,
+                    tint = colors.indigoText,
+                    modifier = Modifier.size(11.dp),
+                )
+                Text(
+                    text = label,
+                    fontSize = 10.5.sp,
+                    color = colors.textSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -867,6 +1172,7 @@ private fun TaskEventCard(
                 markdown = message.text,
                 variant = MarkdownVariant.COMPACT,
                 textColor = colors.textPrimary,
+                basePath = linkedTask?.worktreePath ?: linkedTask?.projectPath,
             )
 
             if (targetTaskId != null) {
@@ -931,15 +1237,25 @@ private fun SystemMessageItem(message: ChatMessage) {
 private fun ChatComposerBar(
     composerText: String,
     selectedMentions: List<ExplicitMentionTarget>,
+    pendingAttachments: List<PendingImageAttachment>,
+    isProcessingImages: Boolean,
     isSending: Boolean,
     onComposerTextChange: (String) -> Unit,
     onOpenMentionPicker: () -> Unit,
     onRemoveMention: (ExplicitMentionTarget) -> Unit,
+    onOpenImagePicker: () -> Unit,
+    onRemoveAttachment: (String) -> Unit,
+    onPreviewPendingAttachment: (PendingImageAttachment) -> Unit,
     onSend: () -> Unit,
 ) {
     val colors = ConductorTheme.colors
     var isFocused by remember { mutableStateOf(false) }
-    val canSend = composerText.isNotBlank() && !isSending
+    val canSend = (composerText.isNotBlank() || pendingAttachments.isNotEmpty()) &&
+        !isSending &&
+        !isProcessingImages
+    val canPickMoreImages = !isSending &&
+        !isProcessingImages &&
+        pendingAttachments.size < ImageAttachmentLogic.MAX_ATTACHMENTS
 
     Column(
         modifier = Modifier
@@ -962,6 +1278,42 @@ private fun ChatComposerBar(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
+                // Pending image attachment previews (desktop-aligned above mentions & text input)
+                if (pendingAttachments.isNotEmpty() || isProcessingImages) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        pendingAttachments.forEach { att ->
+                            PendingImagePreviewChip(
+                                attachment = att,
+                                onPreview = { onPreviewPendingAttachment(att) },
+                                onRemove = { onRemoveAttachment(att.id) },
+                            )
+                        }
+                        if (isProcessingImages) {
+                            Surface(
+                                color = colors.surfaceSubtle,
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, colors.border),
+                                modifier = Modifier.size(64.dp),
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = colors.indigo,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Selected @mention chips inside composer
                 if (selectedMentions.isNotEmpty()) {
                     Row(
@@ -1025,7 +1377,11 @@ private fun ChatComposerBar(
                 ) {
                     if (composerText.isEmpty()) {
                         Text(
-                            text = "Conductor に指示を送る...",
+                            text = if (pendingAttachments.isNotEmpty()) {
+                                "画像について指示を入力（任意）..."
+                            } else {
+                                "Conductor に指示を送る..."
+                            },
                             fontSize = 14.sp,
                             color = colors.textSubtle,
                         )
@@ -1046,7 +1402,7 @@ private fun ChatComposerBar(
                     )
                 }
 
-                // Bottom composer toolbar: @ mention pill on left, circular indigo send arrow on right
+                // Bottom composer toolbar: image attach + @ mention pills on left, circular indigo send arrow on right
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1054,31 +1410,91 @@ private fun ChatComposerBar(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Surface(
-                        color = colors.surfaceSubtle,
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, colors.borderSubtle),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable(onClick = onOpenMentionPicker),
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        val hasImages = pendingAttachments.isNotEmpty()
+                        Surface(
+                            color = if (hasImages) colors.indigoBg else colors.surfaceSubtle,
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(
+                                1.dp,
+                                if (hasImages) colors.indigoBorder else colors.borderSubtle,
+                            ),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(enabled = canPickMoreImages, onClick = onOpenImagePicker)
+                                .semantics { contentDescription = "画像を添付" },
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.AlternateEmail,
-                                contentDescription = "@メンション追加",
-                                tint = colors.indigoText,
-                                modifier = Modifier.size(14.dp),
-                            )
-                            Text(
-                                text = "メンション",
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = colors.textSecondary,
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                if (isProcessingImages) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(13.dp),
+                                        strokeWidth = 1.8.dp,
+                                        color = colors.indigo,
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.AddPhotoAlternate,
+                                        contentDescription = null,
+                                        tint = if (canPickMoreImages) {
+                                            colors.indigoText
+                                        } else {
+                                            colors.textSubtle
+                                        },
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                }
+                                Text(
+                                    text = if (hasImages) {
+                                        "画像 (${pendingAttachments.size})"
+                                    } else {
+                                        "画像"
+                                    },
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = if (!canPickMoreImages) {
+                                        colors.textSubtle
+                                    } else if (hasImages) {
+                                        colors.indigoText
+                                    } else {
+                                        colors.textSecondary
+                                    },
+                                )
+                            }
+                        }
+
+                        Surface(
+                            color = colors.surfaceSubtle,
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, colors.borderSubtle),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onOpenMentionPicker),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AlternateEmail,
+                                    contentDescription = "@メンション追加",
+                                    tint = colors.indigoText,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                                Text(
+                                    text = "メンション",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = colors.textSecondary,
+                                )
+                            }
                         }
                     }
 
@@ -1105,6 +1521,168 @@ private fun ChatComposerBar(
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PendingImagePreviewChip(
+    attachment: PendingImageAttachment,
+    onPreview: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val colors = ConductorTheme.colors
+    var thumbBitmap by remember(attachment.id) { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(attachment.id) {
+        thumbBitmap = withContext(Dispatchers.Default) {
+            AndroidImageAttachmentProcessor.decodeBitmapSafe(attachment.previewBytes, 240)?.asImageBitmap()
+        }
+    }
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+        modifier = Modifier.width(68.dp),
+    ) {
+        Box(modifier = Modifier.size(64.dp)) {
+            Surface(
+                color = colors.surfaceSubtle,
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.dp, colors.border),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(onClick = onPreview),
+            ) {
+                val bmp = thumbBitmap
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp,
+                        contentDescription = attachment.label,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.Image,
+                            contentDescription = attachment.label,
+                            tint = colors.textSubtle,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+            }
+
+            // Crisp circular remove badge at top-end
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(3.dp)
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .clickable(onClick = onRemove)
+                    .semantics { contentDescription = "画像を削除: ${attachment.label}" },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(12.dp),
+                )
+            }
+        }
+        Text(
+            text = attachment.label,
+            fontSize = 10.sp,
+            color = colors.textMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun ImagePreviewDialog(
+    label: String,
+    imageBytes: ByteArray,
+    onDismiss: () -> Unit,
+) {
+    var fullBitmap by remember(imageBytes) { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(imageBytes) {
+        fullBitmap = withContext(Dispatchers.Default) {
+            AndroidImageAttachmentProcessor.decodeBitmapSafe(imageBytes, 2048)?.asImageBitmap()
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.92f))
+                .clickable(onClick = onDismiss),
+        ) {
+            val bmp = fullBitmap
+            if (bmp != null) {
+                Image(
+                    bitmap = bmp,
+                    contentDescription = label,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp, vertical = 64.dp),
+                )
+            } else {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = label,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.16f))
+                        .clickable(onClick = onDismiss),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "閉じる",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp),
+                    )
                 }
             }
         }
@@ -1259,6 +1837,62 @@ private fun MentionPickerSheet(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+private const val CHAT_BOTTOM_ANCHOR_KEY = "__chat_bottom_anchor__"
+
+@Composable
+private fun ScrollToBottomFloatingButton(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = ConductorTheme.colors
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+
+    val containerColor = colors.card.copy(alpha = 0.96f)
+    val borderColor = if (isPressed) {
+        colors.indigo.copy(alpha = 0.55f)
+    } else if (colors.isDark) {
+        colors.borderStrong
+    } else {
+        colors.border
+    }
+    val iconTint = if (isPressed) colors.indigoText else colors.textSecondary
+
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(animationSpec = tween(durationMillis = 180)) +
+            scaleIn(initialScale = 0.85f, animationSpec = tween(durationMillis = 180)) +
+            slideInVertically(animationSpec = tween(durationMillis = 180)) { it / 2 },
+        exit = fadeOut(animationSpec = tween(durationMillis = 150)) +
+            scaleOut(targetScale = 0.85f, animationSpec = tween(durationMillis = 150)) +
+            slideOutVertically(animationSpec = tween(durationMillis = 150)) { it / 2 },
+        modifier = modifier,
+    ) {
+        Surface(
+            onClick = onClick,
+            shape = CircleShape,
+            color = containerColor,
+            border = BorderStroke(1.dp, borderColor),
+            shadowElevation = 4.dp,
+            tonalElevation = 0.dp,
+            interactionSource = interactionSource,
+            modifier = Modifier
+                .size(40.dp)
+                .semantics { contentDescription = "最新メッセージへ" },
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = Icons.Default.ArrowDownward,
+                    contentDescription = null,
+                    tint = iconTint,
+                    modifier = Modifier.size(19.dp),
+                )
             }
         }
     }

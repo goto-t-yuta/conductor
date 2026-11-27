@@ -118,12 +118,14 @@ import {
   type MCPToolCallContext,
   type MCPToolResult,
 } from "./local-mcp-server.js";
+import { getMimeTypeForImagePath, MAX_IMAGE_FILE_BYTES } from "./image-viewer.js";
 import { mergeDiscoveredProjects, scanLocalProjectSeeds } from "./project-discovery.js";
 import {
   DEFAULT_REMOTE_ACCESS_PORT,
   RemoteBridgeServer,
   generateRemoteAccessToken,
   normalizeRemoteAccessPort,
+  parseImageDataUrl,
   type TailscaleNetworkInfo,
 } from "./remote-server.js";
 import {
@@ -1374,6 +1376,51 @@ export class ConductorController {
     return this.getRemoteAccessStatus();
   }
 
+  public saveRemoteImageAttachment(args: {
+    buffer: Buffer;
+    mimeType: string;
+    label?: string;
+  }): { imagePath: string; imageDataUrl: string } {
+    return this.store.saveImageBuffer(args.buffer, args.mimeType, "mobile");
+  }
+
+  public getAttachmentImage(attachmentId: string): { buffer: Buffer; mimeType: string } | null {
+    const trimmed = attachmentId.trim();
+    if (!trimmed) return null;
+    const orderedSessions = [
+      this.getActiveChatSession(),
+      ...this.chatSessions.filter((s) => s.id !== this.activeChatSessionId),
+    ];
+    for (const session of orderedSessions) {
+      for (let i = session.messages.length - 1; i >= 0; i -= 1) {
+        const msg = session.messages[i];
+        const att = (msg.attachments ?? []).find((a) => a.id === trimmed && a.kind === "image");
+        if (!att) continue;
+        if (att.imagePath) {
+          const mimeType = getMimeTypeForImagePath(att.imagePath);
+          if (mimeType) {
+            try {
+              const stat = fs.statSync(att.imagePath);
+              if (stat.isFile() && stat.size <= MAX_IMAGE_FILE_BYTES) {
+                return { buffer: fs.readFileSync(att.imagePath), mimeType };
+              }
+            } catch {
+              // fall back to imageDataUrl if available
+            }
+          }
+        }
+        if (att.imageDataUrl) {
+          const parsed = parseImageDataUrl(att.imageDataUrl, MAX_IMAGE_FILE_BYTES);
+          if (parsed.ok) {
+            return { buffer: parsed.buffer, mimeType: parsed.mimeType };
+          }
+        }
+        return null;
+      }
+    }
+    return null;
+  }
+
   private recordTurnUsage(input: {
     source: UsageSource;
     provider: AgentProvider;
@@ -1678,7 +1725,21 @@ export class ConductorController {
 
   public async sendMessage(payload: SendMessagePayload): Promise<void> {
     const trimmed = payload.text.trim();
-    const attachments = payload.attachments ?? [];
+    const rawAttachments = payload.attachments ?? [];
+    const attachments: ChatAttachment[] = rawAttachments.map((att) => {
+      if (att.kind === "image" && !att.imagePath && att.imageDataUrl) {
+        const parsed = parseImageDataUrl(att.imageDataUrl, MAX_IMAGE_FILE_BYTES);
+        if (parsed.ok) {
+          const saved = this.store.saveImageBuffer(parsed.buffer, parsed.mimeType, "mobile");
+          return {
+            ...att,
+            imagePath: saved.imagePath,
+            imageDataUrl: saved.imageDataUrl,
+          };
+        }
+      }
+      return att;
+    });
     const explicitMentions = Array.isArray(payload.mentions) ? payload.mentions : [];
     if (!trimmed && attachments.length === 0) return;
 

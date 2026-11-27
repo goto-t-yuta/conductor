@@ -10,6 +10,7 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -28,10 +29,13 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
@@ -49,6 +53,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import dev.conductor.mobile.ui.ConductorViewModel
+import dev.conductor.mobile.ui.components.ConductorImageContext
+import dev.conductor.mobile.ui.components.LocalConductorImageContext
 import dev.conductor.mobile.ui.screens.ChatScreen
 import dev.conductor.mobile.ui.screens.QrScannerScreen
 import dev.conductor.mobile.ui.screens.SettingsScreen
@@ -85,8 +91,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            val imageContext = remember(viewModel.imageLoader, state.config) {
+                ConductorImageContext(
+                    loader = viewModel.imageLoader,
+                    config = state.config.takeIf { it.isConfigured },
+                )
+            }
+
             ConductorTheme(themeMode = state.themeMode) {
-                ConductorMobileApp(viewModel = viewModel)
+                CompositionLocalProvider(LocalConductorImageContext provides imageContext) {
+                    ConductorMobileApp(viewModel = viewModel)
+                }
             }
         }
     }
@@ -122,10 +137,20 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
     var currentTab by rememberSaveable { mutableStateOf(MainTab.CHAT) }
     var showQrScanner by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(state.bannerMessage) {
-        val msg = state.bannerMessage ?: return@LaunchedEffect
-        snackbarHostState.showSnackbar(msg)
-        viewModel.clearBanner()
+    LaunchedEffect(state.banner?.id) {
+        val banner = state.banner ?: return@LaunchedEffect
+        val result = snackbarHostState.showSnackbar(
+            message = banner.message,
+            actionLabel = banner.actionLabel,
+            duration = if (banner.actionLabel != null) SnackbarDuration.Long else SnackbarDuration.Short,
+        )
+        if (result == SnackbarResult.ActionPerformed &&
+            banner.undoTaskId != null &&
+            banner.undoStatus != null
+        ) {
+            viewModel.updateTaskStatus(banner.undoTaskId, banner.undoStatus, isUndo = true)
+        }
+        viewModel.clearBanner(banner.id)
     }
 
     if (showQrScanner) {
@@ -158,7 +183,12 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
             containerColor = colors.canvas,
             snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { innerPadding ->
-            Box(modifier = Modifier.padding(innerPadding)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .consumeWindowInsets(innerPadding),
+            ) {
                 SetupScreen(
                     initialConfig = state.config,
                     pendingDeepLink = state.pendingDeepLinkConfig,
@@ -281,7 +311,8 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
+                .padding(innerPadding)
+                .consumeWindowInsets(innerPadding),
         ) {
             when (currentTab) {
                 MainTab.CHAT -> ChatScreen(
@@ -289,10 +320,16 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                     transportState = state.transportState,
                     composerText = state.composerText,
                     selectedMentions = state.selectedMentions,
+                    pendingAttachments = state.pendingAttachments,
+                    isProcessingImages = state.isProcessingImages,
                     isSending = state.isSending,
                     onComposerTextChange = viewModel::updateComposerText,
                     onAddMention = viewModel::addMention,
                     onRemoveMention = viewModel::removeMention,
+                    onPickImageUris = viewModel::addImageUris,
+                    onRemoveAttachment = viewModel::removePendingAttachment,
+                    getCachedAttachmentImage = viewModel::getCachedAttachmentImageBytes,
+                    loadAttachmentImage = viewModel::loadAttachmentImageBytes,
                     onSend = viewModel::sendChatMessage,
                     onStopAll = { viewModel.stopChat(null) },
                     onStopMessage = { id -> viewModel.stopChat(id) },
@@ -309,7 +346,8 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                     selectedTaskId = state.selectedTaskId,
                     selectedTaskDetail = state.selectedTaskDetail,
                     isLoadingDetail = state.isLoadingTaskDetail,
-                    actionInProgress = state.taskActionInProgress,
+                    updatingTaskIds = state.updatingTaskIds,
+                    landingTaskIds = state.landingTaskIds,
                     onToggleGroupByProject = viewModel::toggleGroupTasksByProject,
                     onOpenTask = viewModel::openTaskDetail,
                     onCloseTask = viewModel::closeTaskDetail,
@@ -317,6 +355,7 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                     onReopen = { id -> viewModel.updateTaskStatus(id, "needs_review") },
                     onStopTask = viewModel::stopTask,
                     onLandTask = { id -> viewModel.landTask(id, createPr = false) },
+                    onShowFeedback = viewModel::showMessage,
                     onMentionTaskInChat = { target ->
                         viewModel.addMention(target)
                         currentTab = MainTab.CHAT

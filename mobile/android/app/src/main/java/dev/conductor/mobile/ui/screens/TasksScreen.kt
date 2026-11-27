@@ -1,9 +1,11 @@
 package dev.conductor.mobile.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -58,9 +61,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -71,9 +79,11 @@ import dev.conductor.mobile.model.AgentTask
 import dev.conductor.mobile.model.AppSnapshot
 import dev.conductor.mobile.model.ExplicitMentionTarget
 import dev.conductor.mobile.model.Project
+import dev.conductor.mobile.model.QuickTaskAction
 import dev.conductor.mobile.model.TaskDetailResponse
 import dev.conductor.mobile.model.TaskFiltering
 import dev.conductor.mobile.model.TaskProjectGroup
+import dev.conductor.mobile.model.TaskStatusActions
 import dev.conductor.mobile.ui.components.ConductorCard
 import dev.conductor.mobile.ui.components.ConductorMarkdown
 import dev.conductor.mobile.ui.components.MarkdownVariant
@@ -93,7 +103,8 @@ fun TasksScreen(
     selectedTaskId: String?,
     selectedTaskDetail: TaskDetailResponse?,
     isLoadingDetail: Boolean,
-    actionInProgress: Boolean,
+    updatingTaskIds: Set<String>,
+    landingTaskIds: Set<String>,
     onToggleGroupByProject: () -> Unit,
     onOpenTask: (String) -> Unit,
     onCloseTask: () -> Unit,
@@ -101,6 +112,7 @@ fun TasksScreen(
     onReopen: (String) -> Unit,
     onStopTask: (String) -> Unit,
     onLandTask: (String) -> Unit,
+    onShowFeedback: (String) -> Unit,
     onMentionTaskInChat: (ExplicitMentionTarget) -> Unit,
 ) {
     val colors = ConductorTheme.colors
@@ -338,7 +350,13 @@ fun TasksScreen(
                                             task = task,
                                             projectColorHex = projectColorById[task.projectId],
                                             hideProjectPill = true,
+                                            isUpdating = task.id in updatingTaskIds,
+                                            isLanding = task.id in landingTaskIds,
                                             onClick = { onOpenTask(task.id) },
+                                            onMarkDone = { onMarkDone(task.id) },
+                                            onReopen = { onReopen(task.id) },
+                                            onLandTask = { onLandTask(task.id) },
+                                            onBlockedDone = onShowFeedback,
                                         )
                                     }
                                 }
@@ -350,7 +368,13 @@ fun TasksScreen(
                                 task = task,
                                 projectColorHex = projectColorById[task.projectId],
                                 hideProjectPill = false,
+                                isUpdating = task.id in updatingTaskIds,
+                                isLanding = task.id in landingTaskIds,
                                 onClick = { onOpenTask(task.id) },
+                                onMarkDone = { onMarkDone(task.id) },
+                                onReopen = { onReopen(task.id) },
+                                onLandTask = { onLandTask(task.id) },
+                                onBlockedDone = onShowFeedback,
                             )
                         }
                     }
@@ -427,7 +451,13 @@ fun TasksScreen(
                                                 task = task,
                                                 projectColorHex = projectColorById[task.projectId],
                                                 hideProjectPill = true,
+                                                isUpdating = task.id in updatingTaskIds,
+                                                isLanding = task.id in landingTaskIds,
                                                 onClick = { onOpenTask(task.id) },
+                                                onMarkDone = { onMarkDone(task.id) },
+                                                onReopen = { onReopen(task.id) },
+                                                onLandTask = { onLandTask(task.id) },
+                                                onBlockedDone = onShowFeedback,
                                             )
                                         }
                                     }
@@ -439,7 +469,13 @@ fun TasksScreen(
                                     task = task,
                                     projectColorHex = projectColorById[task.projectId],
                                     hideProjectPill = false,
+                                    isUpdating = task.id in updatingTaskIds,
+                                    isLanding = task.id in landingTaskIds,
                                     onClick = { onOpenTask(task.id) },
+                                    onMarkDone = { onMarkDone(task.id) },
+                                    onReopen = { onReopen(task.id) },
+                                    onLandTask = { onLandTask(task.id) },
+                                    onBlockedDone = onShowFeedback,
                                 )
                             }
                         }
@@ -450,12 +486,13 @@ fun TasksScreen(
     }
 
     if (selectedTaskId != null && activeSheetTask != null) {
+        val isSheetTaskBusy = activeSheetTask.id in updatingTaskIds || activeSheetTask.id in landingTaskIds
         TaskDetailBottomSheet(
             task = activeSheetTask,
             projectColorHex = projectColorById[activeSheetTask.projectId],
             detail = selectedTaskDetail,
             isLoadingDetail = isLoadingDetail,
-            actionInProgress = actionInProgress,
+            actionInProgress = isSheetTaskBusy,
             onDismiss = onCloseTask,
             onMarkDone = { onMarkDone(activeSheetTask.id) },
             onReopen = { onReopen(activeSheetTask.id) },
@@ -733,10 +770,20 @@ private fun TaskCard(
     task: AgentTask,
     projectColorHex: String?,
     hideProjectPill: Boolean,
+    isUpdating: Boolean,
+    isLanding: Boolean,
     onClick: () -> Unit,
+    onMarkDone: () -> Unit,
+    onReopen: () -> Unit,
+    onLandTask: () -> Unit,
+    onBlockedDone: (String) -> Unit,
 ) {
     val colors = ConductorTheme.colors
     val isDone = task.status == "done"
+    val quickTransition = TaskStatusActions.getQuickTransition(task)
+    val canQuickLand = TaskStatusActions.canQuickLand(task)
+    val effectiveLanding = isLanding || task.landStatus == "landing"
+    val isBusy = isUpdating || effectiveLanding
 
     ConductorCard(
         containerColor = if (isDone) colors.cardMuted else colors.card,
@@ -869,18 +916,162 @@ private fun TaskCard(
                 }
             }
 
-            // Row 4: Current step or summary subtitle
-            val subtitle = task.currentStep?.takeIf { it.isNotBlank() } ?: task.summary
-            if (subtitle.isNotBlank()) {
-                Text(
-                    text = subtitle,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp,
-                    color = colors.textMuted,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+            // Row 4: Current step / summary subtitle + inline quick actions (desktop TaskCard parity)
+            val subtitle = if (isDone) {
+                task.summary.takeIf { it.isNotBlank() } ?: task.currentStep.orEmpty()
+            } else {
+                task.currentStep?.takeIf { it.isNotBlank() } ?: task.summary
+            }
+            if (subtitle.isNotBlank() || canQuickLand || quickTransition != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (subtitle.isNotBlank()) {
+                        Text(
+                            text = subtitle,
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp,
+                            color = colors.textMuted,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+
+                    if (canQuickLand || quickTransition != null) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (canQuickLand) {
+                                val hasLandErr = task.landStatus == "conflict" || task.landStatus == "error"
+                                TaskQuickActionChip(
+                                    label = if (effectiveLanding) "Land中" else "Land",
+                                    icon = Icons.AutoMirrored.Filled.CallMerge,
+                                    containerColor = if (hasLandErr) colors.amberBg else colors.indigoBg,
+                                    borderColor = if (hasLandErr) colors.amberBorder else colors.indigoBorder,
+                                    contentColor = if (hasLandErr) colors.amberText else colors.indigoText,
+                                    isLoading = effectiveLanding,
+                                    isMuted = isBusy && !effectiveLanding,
+                                    accessibilityLabel = "T${task.taskNumber} を Land",
+                                    onClick = {
+                                        if (!isBusy) onLandTask()
+                                    },
+                                )
+                            }
+
+                            if (quickTransition != null) {
+                                when (quickTransition.action) {
+                                    QuickTaskAction.DONE -> {
+                                        val isBlocked = quickTransition.isBlocked
+                                        TaskQuickActionChip(
+                                            label = if (isUpdating) "更新中" else quickTransition.label,
+                                            icon = Icons.Default.Check,
+                                            containerColor = if (isBlocked) colors.surfaceSubtle else colors.emeraldBg,
+                                            borderColor = if (isBlocked) colors.border else colors.emeraldBorder,
+                                            contentColor = if (isBlocked) colors.textSubtle else colors.emeraldText,
+                                            isLoading = isUpdating,
+                                            isMuted = isBlocked || (isBusy && !isUpdating),
+                                            accessibilityLabel = "T${task.taskNumber} を完了にする",
+                                            onClick = {
+                                                if (isBusy) return@TaskQuickActionChip
+                                                if (isBlocked) {
+                                                    onBlockedDone(
+                                                        quickTransition.blockedReason
+                                                            ?: TaskStatusActions.UNLANDED_DONE_BLOCKED_REASON,
+                                                    )
+                                                } else {
+                                                    onMarkDone()
+                                                }
+                                            },
+                                        )
+                                    }
+
+                                    QuickTaskAction.REOPEN -> {
+                                        TaskQuickActionChip(
+                                            label = if (isUpdating) "更新中" else quickTransition.label,
+                                            icon = Icons.Default.Replay,
+                                            containerColor = colors.surfaceSubtle,
+                                            borderColor = colors.border,
+                                            contentColor = colors.textSecondary,
+                                            isLoading = isUpdating,
+                                            isMuted = isBusy && !isUpdating,
+                                            accessibilityLabel = "T${task.taskNumber} を再オープン",
+                                            onClick = {
+                                                if (!isBusy) onReopen()
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TaskQuickActionChip(
+    label: String,
+    icon: ImageVector,
+    containerColor: Color,
+    borderColor: Color,
+    contentColor: Color,
+    isLoading: Boolean,
+    isMuted: Boolean,
+    accessibilityLabel: String,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(8.dp)
+    val interactionSource = remember { MutableInteractionSource() }
+    Surface(
+        color = containerColor,
+        shape = shape,
+        border = BorderStroke(1.dp, borderColor),
+        modifier = Modifier
+            .alpha(if (isMuted) 0.65f else 1f)
+            .defaultMinSize(minHeight = 32.dp)
+            .clip(shape)
+            .semantics { contentDescription = accessibilityLabel }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = if (isLoading) null else LocalIndication.current,
+                role = Role.Button,
+                onClick = onClick,
+            ),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(12.dp),
+                    strokeWidth = 1.6.dp,
+                    color = contentColor,
+                )
+            } else {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = contentColor,
+                    modifier = Modifier.size(13.dp),
                 )
             }
+            Text(
+                text = label,
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = contentColor,
+                maxLines = 1,
+            )
         }
     }
 }
@@ -992,10 +1183,16 @@ private fun TaskDetailBottomSheet(
                     markdown = task.summary,
                     variant = MarkdownVariant.DEFAULT,
                     textColor = colors.textSecondary,
+                    basePath = task.worktreePath ?: task.projectPath,
                 )
             }
 
             // Action buttons row
+            val sheetDoneBlockedReason = if (task.status != "done" && task.status != "running") {
+                TaskStatusActions.getMarkDoneBlockedReason(task)
+            } else {
+                null
+            }
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1032,10 +1229,10 @@ private fun TaskDetailBottomSheet(
                     }
                 }
 
-                if (task.status != "done") {
+                if (task.status != "done" && task.status != "running") {
                     Button(
                         onClick = onMarkDone,
-                        enabled = !actionInProgress,
+                        enabled = !actionInProgress && sheetDoneBlockedReason == null,
                         shape = RoundedCornerShape(10.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = colors.emerald,
@@ -1046,7 +1243,7 @@ private fun TaskDetailBottomSheet(
                         Spacer(modifier = Modifier.width(5.dp))
                         Text("完了にする", fontSize = 12.5.sp)
                     }
-                } else {
+                } else if (task.status == "done") {
                     OutlinedButton(
                         onClick = onReopen,
                         enabled = !actionInProgress,
@@ -1067,6 +1264,23 @@ private fun TaskDetailBottomSheet(
                     Icon(Icons.Default.AlternateEmail, contentDescription = null, modifier = Modifier.size(15.dp))
                     Spacer(modifier = Modifier.width(5.dp))
                     Text("チャットで参照", fontSize = 12.5.sp)
+                }
+            }
+
+            if (sheetDoneBlockedReason != null) {
+                Surface(
+                    color = colors.amberBg,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, colors.amberBorder),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = sheetDoneBlockedReason,
+                        fontSize = 11.5.sp,
+                        lineHeight = 16.sp,
+                        color = colors.amberText,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                    )
                 }
             }
 
@@ -1134,9 +1348,10 @@ private fun TaskDetailBottomSheet(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     ConductorMarkdown(
-                        markdown = task.latestOutput.take(3500),
+                        markdown = task.latestOutput,
                         variant = MarkdownVariant.COMPACT,
                         textColor = colors.textPrimary,
+                        basePath = task.worktreePath ?: task.projectPath,
                         modifier = Modifier.padding(12.dp),
                     )
                 }

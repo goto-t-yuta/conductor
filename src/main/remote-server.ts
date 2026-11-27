@@ -1,9 +1,16 @@
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import zlib from "node:zlib";
+import {
+  getMimeTypeForImagePath,
+  inspectLocalImageFile,
+  MAX_IMAGE_FILE_BYTES,
+  type LocalImageErrorCode,
+} from "./image-viewer.js";
 import {
   buildConductorConnectUri,
   buildConductorLinkUri,
@@ -25,7 +32,9 @@ import type {
 export { buildConductorConnectUri, buildConductorLinkUri, parseConductorConnectUri };
 
 export const DEFAULT_REMOTE_ACCESS_PORT = 4789;
-const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB
+const MAX_JSON_BODY_BYTES = 25 * 1024 * 1024; // 25 MiB (supports multi-image base64 uploads)
+const MAX_REMOTE_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MiB decoded per image
+const MAX_REMOTE_ATTACHMENTS = 10;
 const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 const DEFAULT_SSE_THROTTLE_MS = 200;
 const SSE_MAX_BACKPRESSURE_BYTES = 512 * 1024; // 512 KiB
@@ -57,6 +66,12 @@ export interface RemoteBridgeController {
   stopAllResponders(): Promise<void>;
   startFreshChat(): Promise<void>;
   selectChatSession?(sessionId: string): Promise<void>;
+  saveRemoteImageAttachment?(args: {
+    buffer: Buffer;
+    mimeType: string;
+    label?: string;
+  }): { imagePath: string; imageDataUrl: string };
+  getAttachmentImage?(attachmentId: string): { buffer: Buffer; mimeType: string } | null;
   updateTaskStatus(taskId: string, status: AgentTaskStatus): TaskStatusUpdateResult;
   stopTaskWorker(taskId: string): Promise<void>;
   landTask(taskId: string, options?: { createPr?: boolean }): Promise<LandTaskResult>;
@@ -310,8 +325,83 @@ function sanitizeMentions(raw: unknown): ExplicitMentionTarget[] | undefined {
   return out;
 }
 
-function sanitizeAttachments(raw: unknown): ChatAttachment[] {
-  if (!Array.isArray(raw)) return [];
+const IMAGE_DATA_URL_RE = /^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i;
+
+export function parseImageDataUrl(
+  dataUrl: string,
+  maxBytes = MAX_REMOTE_IMAGE_BYTES,
+): { ok: true; mimeType: string; buffer: Buffer } | { ok: false; error: string } {
+  const trimmed = dataUrl.trim();
+  const match = IMAGE_DATA_URL_RE.exec(trimmed);
+  if (!match) {
+    return {
+      ok: false,
+      error: "Invalid imageDataUrl format (expected base64 png/jpeg/webp/gif data URL)",
+    };
+  }
+  const rawMime = match[1].toLowerCase();
+  const mimeType = rawMime === "image/jpg" ? "image/jpeg" : rawMime;
+  const cleanedBase64 = match[2].replace(/\s+/g, "");
+  if (!cleanedBase64) {
+    return { ok: false, error: "Empty image payload" };
+  }
+  const buffer = Buffer.from(cleanedBase64, "base64");
+  if (buffer.length === 0) {
+    return { ok: false, error: "Empty image payload" };
+  }
+  if (buffer.length > maxBytes) {
+    return {
+      ok: false,
+      error: `Image attachment exceeds size limit (${Math.round(maxBytes / (1024 * 1024))}MB)`,
+    };
+  }
+  return { ok: true, mimeType, buffer };
+}
+
+function readAttachmentImageFromSnapshot(
+  snapshot: AppSnapshot,
+  attachmentId: string,
+): { buffer: Buffer; mimeType: string } | null {
+  for (let i = snapshot.messages.length - 1; i >= 0; i -= 1) {
+    const msg = snapshot.messages[i];
+    const att = (msg.attachments ?? []).find((a) => a.id === attachmentId && a.kind === "image");
+    if (!att) continue;
+    if (att.imagePath) {
+      const mimeType = getMimeTypeForImagePath(att.imagePath);
+      if (mimeType) {
+        try {
+          const stat = fs.statSync(att.imagePath);
+          if (stat.isFile() && stat.size <= MAX_IMAGE_FILE_BYTES) {
+            return { buffer: fs.readFileSync(att.imagePath), mimeType };
+          }
+        } catch {
+          // fall back to imageDataUrl if present
+        }
+      }
+    }
+    if (att.imageDataUrl) {
+      const parsed = parseImageDataUrl(att.imageDataUrl, MAX_IMAGE_FILE_BYTES);
+      if (parsed.ok) {
+        return { buffer: parsed.buffer, mimeType: parsed.mimeType };
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
+function sanitizeAttachments(
+  raw: unknown,
+  saveImage?: RemoteBridgeController["saveRemoteImageAttachment"],
+): { ok: true; attachments: ChatAttachment[] } | { ok: false; status: number; error: string } {
+  if (!Array.isArray(raw)) return { ok: true, attachments: [] };
+  if (raw.length > MAX_REMOTE_ATTACHMENTS) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Too many attachments (max ${MAX_REMOTE_ATTACHMENTS})`,
+    };
+  }
   const validKinds = new Set([
     "image",
     "browserElement",
@@ -325,17 +415,54 @@ function sanitizeAttachments(raw: unknown): ChatAttachment[] {
     const rec = item as Record<string, unknown>;
     const kind = typeof rec.kind === "string" && validKinds.has(rec.kind) ? rec.kind : null;
     if (!kind) continue;
+    const id = typeof rec.id === "string" && rec.id.trim() ? rec.id.trim() : crypto.randomUUID();
+    const label =
+      typeof rec.label === "string" && rec.label.trim() ? rec.label.trim() : kind;
+
+    if (kind === "image") {
+      if (typeof rec.imageDataUrl !== "string" || !rec.imageDataUrl.trim()) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Image attachment requires imageDataUrl",
+        };
+      }
+      const parsed = parseImageDataUrl(rec.imageDataUrl);
+      if (!parsed.ok) {
+        return {
+          ok: false,
+          status: parsed.error.includes("exceeds size limit") ? 413 : 400,
+          error: parsed.error,
+        };
+      }
+      const saved = saveImage?.({
+        buffer: parsed.buffer,
+        mimeType: parsed.mimeType,
+        label,
+      });
+      const normalizedDataUrl =
+        saved?.imageDataUrl ??
+        `data:${parsed.mimeType};base64,${parsed.buffer.toString("base64")}`;
+      out.push({
+        id,
+        kind: "image",
+        label,
+        ...(saved?.imagePath ? { imagePath: saved.imagePath } : {}),
+        imageDataUrl: normalizedDataUrl,
+        ...(typeof rec.metadataText === "string" ? { metadataText: rec.metadataText } : {}),
+      });
+      continue;
+    }
+
     out.push({
-      id: typeof rec.id === "string" && rec.id ? rec.id : crypto.randomUUID(),
+      id,
       kind: kind as ChatAttachment["kind"],
-      label: typeof rec.label === "string" ? rec.label : kind,
-      ...(typeof rec.imagePath === "string" ? { imagePath: rec.imagePath } : {}),
-      ...(typeof rec.imageDataUrl === "string" ? { imageDataUrl: rec.imageDataUrl } : {}),
+      label,
       ...(typeof rec.url === "string" ? { url: rec.url } : {}),
       ...(typeof rec.metadataText === "string" ? { metadataText: rec.metadataText } : {}),
     });
   }
-  return out;
+  return { ok: true, attachments: out };
 }
 
 /**
@@ -389,6 +516,7 @@ export function buildRemoteSnapshot(snapshot: AppSnapshot): Record<string, unkno
       id: att.id,
       kind: att.kind,
       label: att.label,
+      ...(att.imagePath ? { imagePath: att.imagePath } : {}),
       ...(att.url ? { url: att.url } : {}),
     })),
     ...(m.mentions && m.mentions.length > 0 ? { mentions: m.mentions } : {}),
@@ -1001,7 +1129,7 @@ export class RemoteBridgeServer {
       }
 
       try {
-        await this.handleAuthenticatedApi(method, pathname, req, res);
+        await this.handleAuthenticatedApi(method, pathname, parsedUrl, req, res);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (!res.headersSent) {
@@ -1017,6 +1145,7 @@ export class RemoteBridgeServer {
   private async handleAuthenticatedApi(
     method: string,
     pathname: string,
+    parsedUrl: URL,
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): Promise<void> {
@@ -1030,6 +1159,42 @@ export class RemoteBridgeServer {
       return;
     }
 
+    const attachmentMatch = /^\/api\/attachments\/([^/]+)$/.exec(pathname);
+    if (attachmentMatch && method === "GET") {
+      let attachmentId = "";
+      try {
+        attachmentId = decodeURIComponent(attachmentMatch[1]).trim();
+      } catch {
+        this.sendJson(res, 400, { ok: false, error: "Invalid attachment ID" }, req);
+        return;
+      }
+      if (!attachmentId) {
+        this.sendJson(res, 400, { ok: false, error: "Invalid attachment ID" }, req);
+        return;
+      }
+      const resolved =
+        this.controller.getAttachmentImage?.(attachmentId) ??
+        readAttachmentImageFromSnapshot(this.controller.getSnapshot(), attachmentId);
+      if (!resolved) {
+        this.sendJson(res, 404, { ok: false, error: "Attachment not found" }, req);
+        return;
+      }
+      this.applyCorsHeaders(res);
+      res.writeHead(200, {
+        "Content-Type": resolved.mimeType,
+        "Content-Length": resolved.buffer.length,
+        "Cache-Control": "private, max-age=3600",
+        "X-Content-Type-Options": "nosniff",
+      });
+      res.end(resolved.buffer);
+      return;
+    }
+
+    if ((method === "GET" || method === "HEAD") && pathname === "/api/media/image") {
+      this.handleLocalImageMedia(method, parsedUrl, req, res);
+      return;
+    }
+
     if (method === "POST" && pathname === "/api/chat/send") {
       const parsed = await this.readJsonBody(req);
       if (!parsed.ok) {
@@ -1037,7 +1202,22 @@ export class RemoteBridgeServer {
         return;
       }
       const text = typeof parsed.data.text === "string" ? parsed.data.text : "";
-      const attachments = sanitizeAttachments(parsed.data.attachments);
+      const sanitizedAttachments = sanitizeAttachments(
+        parsed.data.attachments,
+        this.controller.saveRemoteImageAttachment
+          ? (args) => this.controller.saveRemoteImageAttachment!(args)
+          : undefined,
+      );
+      if (!sanitizedAttachments.ok) {
+        this.sendJson(
+          res,
+          sanitizedAttachments.status,
+          { ok: false, error: sanitizedAttachments.error },
+          req,
+        );
+        return;
+      }
+      const attachments = sanitizedAttachments.attachments;
       const explicitMentions = sanitizeMentions(
         parsed.data.explicitMentions ?? parsed.data.mentions,
       );
@@ -1196,6 +1376,89 @@ export class RemoteBridgeServer {
     }
 
     this.sendJson(res, 404, { ok: false, error: "Not Found" });
+  }
+
+  private mapImageErrorToHttpStatus(errorCode: LocalImageErrorCode): number {
+    switch (errorCode) {
+      case "invalid":
+        return 400;
+      case "forbidden":
+        return 403;
+      case "not_found":
+        return 404;
+      case "too_large":
+        return 413;
+      case "io_error":
+        return 500;
+    }
+  }
+
+  private handleLocalImageMedia(
+    method: string,
+    parsedUrl: URL,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const rawPath = parsedUrl.searchParams.get("path")?.trim() ?? "";
+    const rawBase = parsedUrl.searchParams.get("base")?.trim() || undefined;
+    if (!rawPath) {
+      this.sendJson(res, 400, { ok: false, error: "path query parameter is required" }, req);
+      return;
+    }
+
+    const inspected = inspectLocalImageFile(rawPath, rawBase);
+    if (!inspected.ok) {
+      this.sendJson(
+        res,
+        this.mapImageErrorToHttpStatus(inspected.errorCode),
+        { ok: false, error: inspected.error },
+        req,
+      );
+      return;
+    }
+
+    const etag = `"${inspected.sizeBytes}-${Math.trunc(inspected.mtimeMs)}"`;
+    this.applyCorsHeaders(res);
+
+    const commonHeaders: http.OutgoingHttpHeaders = {
+      "Content-Type": inspected.mimeType,
+      "Content-Disposition": "inline",
+      "Cache-Control": "private, max-age=300",
+      ETag: etag,
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+    };
+
+    if (req.headers["if-none-match"] === etag) {
+      res.writeHead(304, commonHeaders);
+      res.end();
+      return;
+    }
+
+    res.writeHead(200, {
+      ...commonHeaders,
+      "Content-Length": inspected.sizeBytes,
+    });
+
+    if (method === "HEAD") {
+      res.end();
+      return;
+    }
+
+    const stream = fs.createReadStream(inspected.realPath);
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        this.sendJson(res, 500, { ok: false, error: "Failed to stream image file" }, req);
+      } else {
+        res.destroy();
+      }
+    });
+    res.on("close", () => {
+      if (!stream.destroyed) {
+        stream.destroy();
+      }
+    });
+    stream.pipe(res);
   }
 
   private handleSseStream(req: http.IncomingMessage, res: http.ServerResponse): void {
