@@ -490,4 +490,73 @@ class ConductorApiClientTest {
             client.close()
         }
     }
+
+    @Test
+    fun updateTaskStatusParsesUpdatedTaskAndSurfacesConflictError() = runBlocking {
+        var seenPath: String? = null
+        var seenAuth: String? = null
+        server.handler = { reqLine, headers, out, _ ->
+            seenPath = reqLine.split(" ").getOrNull(1)
+            seenAuth = headers["authorization"]
+            if (seenPath == "/api/tasks/task-14/status") {
+                val body = """
+                    {
+                      "ok": true,
+                      "task": {
+                        "id": "task-14",
+                        "taskNumber": 14,
+                        "title": "Fix OAuth redirect",
+                        "projectName": "web-app",
+                        "status": "done"
+                      }
+                    }
+                """.trimIndent().toByteArray(Charsets.UTF_8)
+                val head = "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: application/json; charset=utf-8\r\n" +
+                    "Content-Length: ${body.size}\r\n" +
+                    "Connection: close\r\n\r\n"
+                out.write(head.toByteArray(Charsets.UTF_8))
+                out.write(body)
+                out.flush()
+            } else {
+                val body = """
+                    {"ok":false,"error":"実行中のタスクは直接完了にできません。先にワーカーを停止してください。"}
+                """.trimIndent().toByteArray(Charsets.UTF_8)
+                val head = "HTTP/1.1 409 Conflict\r\n" +
+                    "Content-Type: application/json; charset=utf-8\r\n" +
+                    "Content-Length: ${body.size}\r\n" +
+                    "Connection: close\r\n\r\n"
+                out.write(head.toByteArray(Charsets.UTF_8))
+                out.write(body)
+                out.flush()
+            }
+        }
+
+        val client = ConductorApiClient()
+        try {
+            val okRes = client.updateTaskStatus(
+                config = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token),
+                taskId = "task-14",
+                status = "done",
+            )
+            assertTrue(okRes.isSuccess)
+            assertEquals("Bearer $token", seenAuth)
+            assertEquals("/api/tasks/task-14/status", seenPath)
+            assertTrue(server.lastRequestBody.contains("\"status\":\"done\""))
+            val updated = okRes.getOrThrow().task
+            assertNotNull(updated)
+            assertEquals("done", updated?.status)
+            assertEquals(14, updated?.taskNumber)
+
+            val conflictRes = client.updateTaskStatus(
+                config = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token),
+                taskId = "task-running",
+                status = "done",
+            )
+            assertTrue(conflictRes.isFailure)
+            assertTrue(conflictRes.exceptionOrNull()?.message?.contains("実行中のタスク") == true)
+        } finally {
+            client.close()
+        }
+    }
 }

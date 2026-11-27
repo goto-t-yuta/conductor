@@ -29,8 +29,10 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -135,10 +137,20 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
     var currentTab by rememberSaveable { mutableStateOf(MainTab.CHAT) }
     var showQrScanner by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(state.bannerMessage) {
-        val msg = state.bannerMessage ?: return@LaunchedEffect
-        snackbarHostState.showSnackbar(msg)
-        viewModel.clearBanner()
+    LaunchedEffect(state.banner?.id) {
+        val banner = state.banner ?: return@LaunchedEffect
+        val result = snackbarHostState.showSnackbar(
+            message = banner.message,
+            actionLabel = banner.actionLabel,
+            duration = if (banner.actionLabel != null) SnackbarDuration.Long else SnackbarDuration.Short,
+        )
+        if (result == SnackbarResult.ActionPerformed &&
+            banner.undoTaskId != null &&
+            banner.undoStatus != null
+        ) {
+            viewModel.updateTaskStatus(banner.undoTaskId, banner.undoStatus, isUndo = true)
+        }
+        viewModel.clearBanner(banner.id)
     }
 
     if (showQrScanner) {
@@ -334,7 +346,8 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                     selectedTaskId = state.selectedTaskId,
                     selectedTaskDetail = state.selectedTaskDetail,
                     isLoadingDetail = state.isLoadingTaskDetail,
-                    actionInProgress = state.taskActionInProgress,
+                    updatingTaskIds = state.updatingTaskIds,
+                    landingTaskIds = state.landingTaskIds,
                     onToggleGroupByProject = viewModel::toggleGroupTasksByProject,
                     onOpenTask = viewModel::openTaskDetail,
                     onCloseTask = viewModel::closeTaskDetail,
@@ -342,6 +355,7 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                     onReopen = { id -> viewModel.updateTaskStatus(id, "needs_review") },
                     onStopTask = viewModel::stopTask,
                     onLandTask = { id -> viewModel.landTask(id, createPr = false) },
+                    onShowFeedback = viewModel::showMessage,
                     onMentionTaskInChat = { target ->
                         viewModel.addMention(target)
                         currentTab = MainTab.CHAT

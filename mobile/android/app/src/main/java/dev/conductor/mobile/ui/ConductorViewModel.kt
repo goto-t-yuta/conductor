@@ -19,6 +19,7 @@ import dev.conductor.mobile.model.ExplicitMentionTarget
 import dev.conductor.mobile.model.PendingImageAttachment
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.TaskDetailResponse
+import dev.conductor.mobile.model.TaskStatusActions
 import dev.conductor.mobile.model.ThemeMode
 import dev.conductor.mobile.ui.components.ConductorImageLoader
 import kotlinx.coroutines.Job
@@ -33,6 +34,14 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+
+data class UiBanner(
+    val id: Long,
+    val message: String,
+    val actionLabel: String? = null,
+    val undoTaskId: String? = null,
+    val undoStatus: String? = null,
+)
 
 data class ConductorUiState(
     val isLoaded: Boolean = false,
@@ -50,11 +59,12 @@ data class ConductorUiState(
     val selectedTaskId: String? = null,
     val selectedTaskDetail: TaskDetailResponse? = null,
     val isLoadingTaskDetail: Boolean = false,
-    val taskActionInProgress: Boolean = false,
+    val updatingTaskIds: Set<String> = emptySet(),
+    val landingTaskIds: Set<String> = emptySet(),
     val isTestingConnection: Boolean = false,
     val lastTestResult: ConnectionTestResult? = null,
     val pendingDeepLinkConfig: ConnectionConfig? = null,
-    val bannerMessage: String? = null,
+    val banner: UiBanner? = null,
 )
 
 class ConductorViewModel(application: Application) : AndroidViewModel(application) {
@@ -71,6 +81,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     private var streamingSyncJob: Job? = null
     private var activeSyncConfig: ConnectionConfig? = null
     private var lastSnapshotReceivedAtMs: Long = 0L
+    private var nextBannerId: Long = 1L
     private val reconnectSignal = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     init {
@@ -129,9 +140,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun handleIncomingConnectUri(rawUri: String): Boolean {
         val parsed = ConnectUriParser.parse(rawUri) ?: run {
-            _uiState.update {
-                it.copy(bannerMessage = "無効なリンク形式です（Step 2 の QR または接続 URI を使用してください）")
-            }
+            showBanner("無効なリンク形式です（Step 2 の QR または接続 URI を使用してください）")
             return false
         }
         viewModelScope.launch {
@@ -141,9 +150,9 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                 it.copy(
                     pendingDeepLinkConfig = parsed,
                     lastTestResult = null,
-                    bannerMessage = "デスクトップとリンクしました (${parsed.serverUrl})",
                 )
             }
+            showBanner("デスクトップとリンクしました (${parsed.serverUrl})")
             if (sameConfig) {
                 startRealtimeSync(parsed)
             }
@@ -155,8 +164,34 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         _uiState.update { it.copy(pendingDeepLinkConfig = null) }
     }
 
-    fun clearBanner() {
-        _uiState.update { it.copy(bannerMessage = null) }
+    fun showMessage(message: String) {
+        showBanner(message)
+    }
+
+    fun clearBanner(id: Long? = null) {
+        _uiState.update { state ->
+            if (id == null || state.banner?.id == id) state.copy(banner = null) else state
+        }
+    }
+
+    private fun showBanner(
+        message: String,
+        actionLabel: String? = null,
+        undoTaskId: String? = null,
+        undoStatus: String? = null,
+    ) {
+        val id = nextBannerId++
+        _uiState.update {
+            it.copy(
+                banner = UiBanner(
+                    id = id,
+                    message = message,
+                    actionLabel = actionLabel,
+                    undoTaskId = undoTaskId,
+                    undoStatus = undoStatus,
+                ),
+            )
+        }
     }
 
     fun testConnection(serverUrl: String, bearerToken: String) {
@@ -182,13 +217,14 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
             bearerToken = bearerToken.trim(),
         )
         if (!normalized.isConfigured) {
-            _uiState.update { it.copy(bannerMessage = "URL と Bearer Token を入力してください") }
+            showBanner("URL と Bearer Token を入力してください")
             return
         }
         viewModelScope.launch {
             val sameConfig = normalized == _uiState.value.config
             store.save(normalized)
-            _uiState.update { it.copy(lastTestResult = null, bannerMessage = "接続設定を保存しました") }
+            _uiState.update { it.copy(lastTestResult = null) }
+            showBanner("接続設定を保存しました")
             if (sameConfig) {
                 startRealtimeSync(normalized)
             }
@@ -199,7 +235,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         val cfg = _uiState.value.config
         if (!cfg.isConfigured) return
         startRealtimeSync(cfg)
-        _uiState.update { it.copy(bannerMessage = "再接続しています...") }
+        showBanner("再接続しています...")
     }
 
     fun onAppForegrounded() {
@@ -230,14 +266,16 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                     snapshot = null,
                     selectedTaskId = null,
                     selectedTaskDetail = null,
+                    updatingTaskIds = emptySet(),
+                    landingTaskIds = emptySet(),
                     selectedMentions = emptyList(),
                     pendingAttachments = emptyList(),
                     isProcessingImages = false,
                     transportState = StreamTransportState.DISCONNECTED,
                     transportDetail = "切断済み",
-                    bannerMessage = "接続を解除しました",
                 )
             }
+            showBanner("接続を解除しました")
         }
     }
 
@@ -421,9 +459,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         val existingCount = _uiState.value.pendingAttachments.size
         val remaining = ImageAttachmentLogic.MAX_ATTACHMENTS - existingCount
         if (remaining <= 0) {
-            _uiState.update {
-                it.copy(bannerMessage = "画像は最大 ${ImageAttachmentLogic.MAX_ATTACHMENTS} 枚まで添付できます")
-            }
+            showBanner("画像は最大 ${ImageAttachmentLogic.MAX_ATTACHMENTS} 枚まで添付できます")
             return
         }
         val toProcess = uris.take(remaining)
@@ -448,18 +484,20 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         failureCount += 1
                     }
             }
+            val bannerText = when {
+                failureCount > 0 && added.isEmpty() -> "画像の読み込みに失敗しました"
+                failureCount > 0 -> "${added.size}枚の画像を添付しました（${failureCount}枚は読み込み失敗）"
+                truncated -> "画像は最大 ${ImageAttachmentLogic.MAX_ATTACHMENTS} 枚まで添付できます（先頭${added.size}枚を追加）"
+                else -> null
+            }
             _uiState.update { state ->
-                val banner = when {
-                    failureCount > 0 && added.isEmpty() -> "画像の読み込みに失敗しました"
-                    failureCount > 0 -> "${added.size}枚の画像を添付しました（${failureCount}枚は読み込み失敗）"
-                    truncated -> "画像は最大 ${ImageAttachmentLogic.MAX_ATTACHMENTS} 枚まで添付できます（先頭${added.size}枚を追加）"
-                    else -> state.bannerMessage
-                }
                 state.copy(
                     pendingAttachments = state.pendingAttachments + added,
                     isProcessingImages = false,
-                    bannerMessage = banner,
                 )
+            }
+            if (bannerText != null) {
+                showBanner(bannerText)
             }
         }
     }
@@ -533,9 +571,9 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                             composerText = text,
                             selectedMentions = mentions,
                             pendingAttachments = pendingImages,
-                            bannerMessage = "送信エラー: ${err.message}",
                         )
                     }
+                    showBanner("送信エラー: ${err.message}")
                 }
             _uiState.update { it.copy(isSending = false) }
         }
@@ -550,7 +588,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                     res.snapshot?.let { applyIncomingSnapshot(it, fromSse = false) }
                 }
                 .onFailure { err ->
-                    _uiState.update { it.copy(bannerMessage = "停止エラー: ${err.message}") }
+                    showBanner("停止エラー: ${err.message}")
                 }
         }
     }
@@ -566,12 +604,12 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         it.copy(
                             selectedMentions = emptyList(),
                             pendingAttachments = emptyList(),
-                            bannerMessage = "新しいチャットを開始しました",
                         )
                     }
+                    showBanner("新しいチャットを開始しました")
                 }
                 .onFailure { err ->
-                    _uiState.update { it.copy(bannerMessage = "新規チャット作成エラー: ${err.message}") }
+                    showBanner("新規チャット作成エラー: ${err.message}")
                 }
         }
     }
@@ -619,55 +657,144 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun updateTaskStatus(taskId: String, nextStatus: String) {
-        val cfg = _uiState.value.config
-        if (!cfg.isConfigured || _uiState.value.taskActionInProgress) return
+    fun updateTaskStatus(taskId: String, nextStatus: String, isUndo: Boolean = false) {
+        val state = _uiState.value
+        val cfg = state.config
+        if (!cfg.isConfigured || taskId in state.updatingTaskIds || taskId in state.landingTaskIds) {
+            return
+        }
+        val currentTask = state.snapshot?.tasks?.find { it.id == taskId }
+            ?: state.selectedTaskDetail?.task?.takeIf { it.id == taskId }
+        if (nextStatus == TaskStatusActions.STATUS_DONE && currentTask != null) {
+            TaskStatusActions.getMarkDoneBlockedReason(currentTask)?.let { blockedReason ->
+                showBanner(blockedReason)
+                return
+            }
+        }
+        val previousStatus = currentTask?.status
+
         viewModelScope.launch {
-            _uiState.update { it.copy(taskActionInProgress = true) }
-            api.updateTaskStatus(cfg, taskId, nextStatus)
-                .onSuccess {
-                    val label = if (nextStatus == "done") "タスクを完了にしました" else "タスクを再オープンしました"
-                    _uiState.update { it.copy(bannerMessage = label) }
-                    refreshTaskDetail(taskId)
-                }
-                .onFailure { err ->
-                    _uiState.update { it.copy(bannerMessage = err.message ?: "ステータス更新に失敗しました") }
-                }
-            _uiState.update { it.copy(taskActionInProgress = false) }
+            _uiState.update { it.copy(updatingTaskIds = it.updatingTaskIds + taskId) }
+            try {
+                api.updateTaskStatus(cfg, taskId, nextStatus)
+                    .onSuccess { res ->
+                        val updatedTask = res.task
+                        _uiState.update { current ->
+                            val nextSnapshot = TaskStatusActions.applyTaskUpdate(
+                                snapshot = current.snapshot,
+                                taskId = taskId,
+                                updatedTask = updatedTask,
+                                fallbackStatus = nextStatus,
+                            )
+                            val nextDetail = if (current.selectedTaskId == taskId && current.selectedTaskDetail != null) {
+                                val patchedTask = updatedTask
+                                    ?: current.selectedTaskDetail.task?.copy(status = nextStatus)
+                                current.selectedTaskDetail.copy(task = patchedTask)
+                            } else {
+                                current.selectedTaskDetail
+                            }
+                            current.copy(
+                                snapshot = nextSnapshot,
+                                selectedTaskDetail = nextDetail,
+                            )
+                        }
+                        val feedback = TaskStatusActions.formatStatusFeedback(
+                            task = updatedTask ?: currentTask,
+                            nextStatus = nextStatus,
+                            isUndo = isUndo,
+                        )
+                        if (!isUndo &&
+                            nextStatus == TaskStatusActions.STATUS_DONE &&
+                            previousStatus != null &&
+                            previousStatus != TaskStatusActions.STATUS_DONE
+                        ) {
+                            showBanner(
+                                message = feedback,
+                                actionLabel = "元に戻す",
+                                undoTaskId = taskId,
+                                undoStatus = previousStatus,
+                            )
+                        } else {
+                            showBanner(feedback)
+                        }
+                        if (_uiState.value.selectedTaskId == taskId) {
+                            refreshTaskDetail(taskId)
+                        }
+                        if (_uiState.value.transportState != StreamTransportState.CONNECTED_SSE) {
+                            api.fetchSnapshot(cfg).onSuccess { snap ->
+                                applyIncomingSnapshot(snap, fromSse = false)
+                            }
+                        }
+                    }
+                    .onFailure { err ->
+                        showBanner(err.message ?: "ステータス更新に失敗しました")
+                    }
+            } finally {
+                _uiState.update { it.copy(updatingTaskIds = it.updatingTaskIds - taskId) }
+            }
         }
     }
 
     fun stopTask(taskId: String) {
-        val cfg = _uiState.value.config
-        if (!cfg.isConfigured || _uiState.value.taskActionInProgress) return
+        val state = _uiState.value
+        val cfg = state.config
+        if (!cfg.isConfigured || taskId in state.updatingTaskIds || taskId in state.landingTaskIds) {
+            return
+        }
         viewModelScope.launch {
-            _uiState.update { it.copy(taskActionInProgress = true) }
-            api.stopTask(cfg, taskId)
-                .onSuccess {
-                    _uiState.update { it.copy(bannerMessage = "ワーカーを停止しました") }
-                    refreshTaskDetail(taskId)
-                }
-                .onFailure { err ->
-                    _uiState.update { it.copy(bannerMessage = err.message ?: "停止に失敗しました") }
-                }
-            _uiState.update { it.copy(taskActionInProgress = false) }
+            _uiState.update { it.copy(updatingTaskIds = it.updatingTaskIds + taskId) }
+            try {
+                api.stopTask(cfg, taskId)
+                    .onSuccess { res ->
+                        _uiState.update { current ->
+                            current.copy(
+                                snapshot = TaskStatusActions.applyTaskUpdate(
+                                    snapshot = current.snapshot,
+                                    taskId = taskId,
+                                    updatedTask = res.task,
+                                    fallbackStatus = TaskStatusActions.REOPEN_TARGET_STATUS,
+                                ),
+                            )
+                        }
+                        showBanner("ワーカーを停止しました")
+                        if (_uiState.value.selectedTaskId == taskId) {
+                            refreshTaskDetail(taskId)
+                        }
+                    }
+                    .onFailure { err ->
+                        showBanner(err.message ?: "停止に失敗しました")
+                    }
+            } finally {
+                _uiState.update { it.copy(updatingTaskIds = it.updatingTaskIds - taskId) }
+            }
         }
     }
 
     fun landTask(taskId: String, createPr: Boolean = false) {
-        val cfg = _uiState.value.config
-        if (!cfg.isConfigured || _uiState.value.taskActionInProgress) return
+        val state = _uiState.value
+        val cfg = state.config
+        if (!cfg.isConfigured || taskId in state.updatingTaskIds || taskId in state.landingTaskIds) {
+            return
+        }
         viewModelScope.launch {
-            _uiState.update { it.copy(taskActionInProgress = true) }
-            api.landTask(cfg, taskId, createPr)
-                .onSuccess { res ->
-                    _uiState.update { it.copy(bannerMessage = res.message ?: "Land が完了しました") }
-                    refreshTaskDetail(taskId)
-                }
-                .onFailure { err ->
-                    _uiState.update { it.copy(bannerMessage = err.message ?: "Land に失敗しました") }
-                }
-            _uiState.update { it.copy(taskActionInProgress = false) }
+            _uiState.update { it.copy(landingTaskIds = it.landingTaskIds + taskId) }
+            try {
+                api.landTask(cfg, taskId, createPr)
+                    .onSuccess { res ->
+                        showBanner(res.message ?: "Land が完了しました")
+                        api.fetchSnapshot(cfg).onSuccess { snap ->
+                            applyIncomingSnapshot(snap, fromSse = false)
+                        }
+                        if (_uiState.value.selectedTaskId == taskId) {
+                            refreshTaskDetail(taskId)
+                        }
+                    }
+                    .onFailure { err ->
+                        showBanner(err.message ?: "Land に失敗しました")
+                    }
+            } finally {
+                _uiState.update { it.copy(landingTaskIds = it.landingTaskIds - taskId) }
+            }
         }
     }
 

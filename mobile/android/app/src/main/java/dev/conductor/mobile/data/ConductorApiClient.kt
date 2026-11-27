@@ -467,7 +467,8 @@ class ConductorApiClient(
     suspend fun getTaskDetail(config: ConnectionConfig, taskId: String): Result<TaskDetailResponse> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val req = authRequestBuilder(config, "/api/tasks/$taskId").get().build()
+                val encodedId = encodePathSegment(taskId)
+                val req = authRequestBuilder(config, "/api/tasks/$encodedId").get().build()
                 restClient.newCall(req).execute().use { res ->
                     val body = res.body?.string().orEmpty()
                     if (!res.isSuccessful) {
@@ -484,12 +485,12 @@ class ConductorApiClient(
         status: String,
     ): Result<ApiActionResponse> = postAction(
         config = config,
-        path = "/api/tasks/$taskId/status",
+        path = "/api/tasks/${encodePathSegment(taskId)}/status",
         payload = json.encodeToString(TaskStatusRequest(status = status)),
     )
 
     suspend fun stopTask(config: ConnectionConfig, taskId: String): Result<ApiActionResponse> =
-        postAction(config = config, path = "/api/tasks/$taskId/stop", payload = "{}")
+        postAction(config = config, path = "/api/tasks/${encodePathSegment(taskId)}/stop", payload = "{}")
 
     suspend fun landTask(
         config: ConnectionConfig,
@@ -497,10 +498,13 @@ class ConductorApiClient(
         createPr: Boolean = false,
     ): Result<ApiActionResponse> = postAction(
         config = config,
-        path = "/api/tasks/$taskId/land",
+        path = "/api/tasks/${encodePathSegment(taskId)}/land",
         payload = json.encodeToString(TaskLandRequest(createPr = createPr)),
         client = landClient,
     )
+
+    private fun encodePathSegment(raw: String): String =
+        URLEncoder.encode(raw.trim(), "UTF-8").replace("+", "%20")
 
     private suspend fun postAction(
         config: ConnectionConfig,
