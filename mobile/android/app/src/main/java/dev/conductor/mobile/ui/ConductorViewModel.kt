@@ -28,6 +28,7 @@ import dev.conductor.mobile.model.ConnectionConfig
 import dev.conductor.mobile.model.CurrentBuildInfo
 import dev.conductor.mobile.model.ExplicitMentionTarget
 import dev.conductor.mobile.model.GITHUB_LATEST_RELEASE_PAGE_URL
+import dev.conductor.mobile.model.MentionAutocomplete
 import dev.conductor.mobile.model.PendingImageAttachment
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.TaskDetailResponse
@@ -476,20 +477,18 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun addMention(target: ExplicitMentionTarget) {
         _uiState.update { state ->
-            if (state.selectedMentions.any { it.uniqueKey() == target.uniqueKey() }) {
-                state
-            } else {
-                state.copy(selectedMentions = state.selectedMentions + target)
-            }
+            val updated = MentionAutocomplete.addExplicitMentionTarget(state.selectedMentions, target)
+            if (updated === state.selectedMentions) state else state.copy(selectedMentions = updated)
         }
     }
 
     fun removeMention(target: ExplicitMentionTarget) {
         _uiState.update { state ->
             state.copy(
-                selectedMentions = state.selectedMentions.filterNot {
-                    it.uniqueKey() == target.uniqueKey()
-                },
+                selectedMentions = MentionAutocomplete.removeExplicitMentionTarget(
+                    state.selectedMentions,
+                    target,
+                ),
             )
         }
     }
