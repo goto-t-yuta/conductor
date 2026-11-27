@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
@@ -111,9 +112,11 @@ fun TasksScreen(
     onCloseTask: () -> Unit,
     onDismissTaskDetailError: () -> Unit,
     onMarkDone: (String) -> Unit,
+    onForceMarkDone: (String) -> Unit,
     onReopen: (String) -> Unit,
     onStopTask: (String) -> Unit,
     onLandTask: (String) -> Unit,
+    onSyncLandStatus: (String) -> Unit,
     onShowFeedback: (String) -> Unit,
     onMentionTaskInChat: (ExplicitMentionTarget) -> Unit,
 ) {
@@ -499,9 +502,11 @@ fun TasksScreen(
             onDismiss = onCloseTask,
             onDismissActionError = onDismissTaskDetailError,
             onMarkDone = { onMarkDone(activeSheetTask.id) },
+            onForceMarkDone = { onForceMarkDone(activeSheetTask.id) },
             onReopen = { onReopen(activeSheetTask.id) },
             onStopTask = { onStopTask(activeSheetTask.id) },
             onLandTask = { onLandTask(activeSheetTask.id) },
+            onSyncLandStatus = { onSyncLandStatus(activeSheetTask.id) },
             onMentionInChat = {
                 onMentionTaskInChat(
                     ExplicitMentionTarget(
@@ -1126,9 +1131,11 @@ private fun TaskDetailBottomSheet(
     onDismiss: () -> Unit,
     onDismissActionError: () -> Unit,
     onMarkDone: () -> Unit,
+    onForceMarkDone: () -> Unit,
     onReopen: () -> Unit,
     onStopTask: () -> Unit,
     onLandTask: () -> Unit,
+    onSyncLandStatus: () -> Unit,
     onMentionInChat: () -> Unit,
 ) {
     val colors = ConductorTheme.colors
@@ -1219,7 +1226,7 @@ private fun TaskDetailBottomSheet(
                     }
                 }
 
-                if (task.status != "running" && task.hasWorktree && task.landStatus != "landed") {
+                if (TaskStatusActions.canQuickLand(task)) {
                     Button(
                         onClick = onLandTask,
                         enabled = !actionInProgress,
@@ -1232,6 +1239,24 @@ private fun TaskDetailBottomSheet(
                         Icon(Icons.AutoMirrored.Filled.CallMerge, contentDescription = null, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(5.dp))
                         Text("Land", fontSize = 12.5.sp)
+                    }
+                }
+
+                if (TaskStatusActions.canSyncLandStatus(task)) {
+                    OutlinedButton(
+                        onClick = onSyncLandStatus,
+                        enabled = !actionInProgress,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, colors.indigoBorder),
+                    ) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = null,
+                            tint = colors.indigoText,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text("状態再確認", fontSize = 12.5.sp, color = colors.indigoText)
                     }
                 }
 
@@ -1317,13 +1342,44 @@ private fun TaskDetailBottomSheet(
                     border = BorderStroke(1.dp, colors.amberBorder),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(
-                        text = sheetDoneBlockedReason,
-                        fontSize = 11.5.sp,
-                        lineHeight = 16.sp,
-                        color = colors.amberText,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-                    )
+                    Column(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = sheetDoneBlockedReason,
+                            fontSize = 11.5.sp,
+                            lineHeight = 16.sp,
+                            color = colors.amberText,
+                        )
+                        if (TaskStatusActions.canForceMarkDone(task)) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                OutlinedButton(
+                                    onClick = onForceMarkDone,
+                                    enabled = !actionInProgress,
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(1.dp, colors.amberBorder),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = colors.amberText,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "強制完了",
+                                        fontSize = 11.5.sp,
+                                        color = colors.amberText,
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

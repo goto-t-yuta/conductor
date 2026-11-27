@@ -290,6 +290,13 @@ export const UI_STRINGS = {
     "inspector.landing": "取り込み中...",
     "inspector.pushPrGhTitle": "ブランチを Push して gh CLI で PR を作成",
     "inspector.pushPrNoGhTitle": "ブランチを Push（gh CLI 未検出の場合は Push のみ実行）",
+    "inspector.recheckLandBtn": "状態を再確認",
+    "inspector.recheckLandTitle":
+      "親ブランチへのマージ済み・差分なし状態を再確認して同期します",
+    "inspector.recheckingLand": "確認中...",
+    "inspector.forceDoneBtn": "強制完了",
+    "inspector.forceDoneTitle":
+      "マージ済み・差分なしなら自動で Land 済みにし、未マージの変更が残っていても Worktree を保持したまま完了にします",
     "inspector.deleteWorktree": "Worktree を削除",
     "inspector.summary": "概要",
     "inspector.latestOutput": "ワーカー最新出力",
@@ -997,6 +1004,13 @@ export const UI_STRINGS = {
     "inspector.landing": "Landing...",
     "inspector.pushPrGhTitle": "Push branch and create PR with gh CLI",
     "inspector.pushPrNoGhTitle": "Push branch (push only if gh CLI is not available)",
+    "inspector.recheckLandBtn": "Re-check Land",
+    "inspector.recheckLandTitle":
+      "Re-check whether this worktree is already merged into the base/parent branch or has no diff",
+    "inspector.recheckingLand": "Checking...",
+    "inspector.forceDoneBtn": "Force Done",
+    "inspector.forceDoneTitle":
+      "Auto-marks as landed if already merged or empty; otherwise marks done while keeping the worktree intact",
     "inspector.deleteWorktree": "Remove Worktree",
     "inspector.summary": "Summary",
     "inspector.latestOutput": "Latest Worker Output",

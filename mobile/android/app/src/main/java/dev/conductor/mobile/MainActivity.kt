@@ -449,9 +449,11 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                         onCloseTask = viewModel::closeTaskDetail,
                         onDismissTaskDetailError = viewModel::clearTaskDetailError,
                         onMarkDone = { id -> viewModel.updateTaskStatus(id, "done") },
+                        onForceMarkDone = { id -> viewModel.updateTaskStatus(id, "done", force = true) },
                         onReopen = { id -> viewModel.updateTaskStatus(id, "needs_review") },
                         onStopTask = viewModel::stopTask,
                         onLandTask = { id -> viewModel.landTask(id, createPr = false) },
+                        onSyncLandStatus = viewModel::syncTaskLandStatus,
                         onShowFeedback = viewModel::showMessage,
                         onMentionTaskInChat = { target ->
                             viewModel.addMention(target)

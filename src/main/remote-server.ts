@@ -31,6 +31,8 @@ import type {
   LandTaskResult,
   RemoteAccessStatus,
   SendMessagePayload,
+  SyncTaskLandStatusResult,
+  TaskStatusUpdateOptions,
   TaskStatusUpdateResult,
   TaskWorktreeStatus,
 } from "../shared/types.js";
@@ -78,9 +80,14 @@ export interface RemoteBridgeController {
     label?: string;
   }): { imagePath: string; imageDataUrl: string };
   getAttachmentImage?(attachmentId: string): { buffer: Buffer; mimeType: string } | null;
-  updateTaskStatus(taskId: string, status: AgentTaskStatus): TaskStatusUpdateResult;
+  updateTaskStatus(
+    taskId: string,
+    status: AgentTaskStatus,
+    options?: TaskStatusUpdateOptions,
+  ): TaskStatusUpdateResult;
   stopTaskWorker(taskId: string): Promise<void>;
   landTask(taskId: string, options?: { createPr?: boolean }): Promise<LandTaskResult>;
+  syncTaskLandStatus?(taskId: string): SyncTaskLandStatusResult;
   getTaskGitStatus(taskId: string): string | null;
   getTaskWorktreeStatus(taskId: string): TaskWorktreeStatus | null;
 }
@@ -1334,8 +1341,9 @@ export class RemoteBridgeServer {
       return;
     }
 
-    // /api/tasks/:id and /api/tasks/:id/(status|stop|land)
-    const taskActionMatch = /^\/api\/tasks\/([^/]+)(?:\/(status|stop|land))?$/.exec(pathname);
+    // /api/tasks/:id and /api/tasks/:id/(status|stop|land|sync-land)
+    const taskActionMatch =
+      /^\/api\/tasks\/([^/]+)(?:\/(status|stop|land|sync-land))?$/.exec(pathname);
     if (taskActionMatch) {
       const rawTaskId = decodeURIComponent(taskActionMatch[1]);
       const action = taskActionMatch[2] ?? null;
@@ -1371,6 +1379,7 @@ export class RemoteBridgeServer {
           return;
         }
         const status = typeof parsed.data.status === "string" ? parsed.data.status.trim() : "";
+        const force = parsed.data.force === true;
         if (!VALID_TASK_STATUSES.has(status as AgentTaskStatus)) {
           this.sendJson(res, 400, {
             ok: false,
@@ -1378,7 +1387,11 @@ export class RemoteBridgeServer {
           });
           return;
         }
-        const result = this.controller.updateTaskStatus(task.id, status as AgentTaskStatus);
+        const result = this.controller.updateTaskStatus(
+          task.id,
+          status as AgentTaskStatus,
+          force ? { force: true } : undefined,
+        );
         if (!result.ok) {
           this.sendJson(res, 409, { ok: false, error: result.error ?? "Status update blocked" });
           return;
@@ -1406,6 +1419,24 @@ export class RemoteBridgeServer {
         const createPr = typeof parsed.data.createPr === "boolean" ? parsed.data.createPr : false;
         const result = await this.controller.landTask(task.id, { createPr });
         this.sendJson(res, result.ok ? 200 : 409, result);
+        return;
+      }
+
+      if (method === "POST" && action === "sync-land") {
+        const syncResult = this.controller.syncTaskLandStatus
+          ? this.controller.syncTaskLandStatus(task.id)
+          : {
+              ok: false,
+              updated: false,
+              reason: "error" as const,
+              message: "Land status sync is not supported",
+            };
+        const updatedTask =
+          this.controller.getSnapshot().tasks.find((t) => t.id === task.id) ?? task;
+        this.sendJson(res, syncResult.ok ? 200 : 409, {
+          ...syncResult,
+          task: updatedTask,
+        });
         return;
       }
 
@@ -2501,6 +2532,8 @@ export function renderMobileFallbackHtml(): string {
       const isRunning = t.status === "running";
       const isDone = t.status === "done";
       const hasWorktree = Boolean(t.worktreePath || t.worktreeBranch);
+      const isUnlanded = !(t.landStatus === "landed" || t.landStatus === "pushed" || t.landStatus === "pr_created") &&
+        (hasWorktree || t.landStatus === "unlanded" || t.landStatus === "landing" || t.landStatus === "conflict" || t.landStatus === "error");
       body.innerHTML =
         '<div class="row"><strong>T' + esc(t.taskNumber) + " · " + esc(t.title) + '</strong><button class="btn" onclick="closeTaskSheet()">閉じる</button></div>' +
         '<div class="meta"><span class="chip">' + esc(t.status) + "</span><span>" + esc(t.projectName || "General") + "</span>" +
@@ -2508,18 +2541,34 @@ export function renderMobileFallbackHtml(): string {
         (t.summary ? ('<div style="font-size:13px;">' + esc(t.summary) + "</div>") : "") +
         '<div class="row">' +
           (isRunning ? '<button class="btn danger" onclick="taskStop(\\'' + esc(t.id) + '\\')">ワーカー停止</button>' : "") +
-          (!isRunning && hasWorktree ? '<button class="btn primary" onclick="taskLand(\\'' + esc(t.id) + '\\')">Land</button>' : "") +
-          (!isDone ? '<button class="btn ok" onclick="taskStatus(\\'' + esc(t.id) + '\\', \\'done\\')">Done</button>'
-                   : '<button class="btn" onclick="taskStatus(\\'' + esc(t.id) + '\\', \\'needs_review\\')">Reopen</button>') +
+          (!isRunning && (hasWorktree || isUnlanded) ? '<button class="btn primary" onclick="taskLand(\\'' + esc(t.id) + '\\')">Land</button>' : "") +
+          (!isRunning && isUnlanded ? '<button class="btn" onclick="taskSyncLand(\\'' + esc(t.id) + '\\')">状態再確認</button>' : "") +
+          (!isDone ? (!isRunning && isUnlanded
+            ? '<button class="btn ok" onclick="taskStatus(\\'' + esc(t.id) + '\\', \\'done\\', true)">強制完了</button>'
+            : '<button class="btn ok" onclick="taskStatus(\\'' + esc(t.id) + '\\', \\'done\\', false)">Done</button>')
+                   : '<button class="btn" onclick="taskStatus(\\'' + esc(t.id) + '\\', \\'needs_review\\', false)">Reopen</button>') +
         "</div>" +
         (t.latestOutput ? ('<div style="font-size:12px;color:var(--muted);">最新出力</div><pre>' + esc(t.latestOutput) + "</pre>") : "") +
         (detail && detail.gitStatus ? ('<div style="font-size:12px;color:var(--muted);">Git Status</div><pre>' + esc(detail.gitStatus) + "</pre>") : "");
     }
 
-    async function taskStatus(id, status) {
+    async function taskStatus(id, status, force) {
       try {
-        await apiFetch("/api/tasks/" + encodeURIComponent(id) + "/status", { method: "POST", body: JSON.stringify({ status }) });
+        await apiFetch("/api/tasks/" + encodeURIComponent(id) + "/status", { method: "POST", body: JSON.stringify({ status, force: Boolean(force) }) });
         showToast("ステータスを更新しました");
+      } catch (err) {
+        showToast(err.message);
+      }
+    }
+
+    async function taskSyncLand(id) {
+      try {
+        const res = await apiFetch("/api/tasks/" + encodeURIComponent(id) + "/sync-land", { method: "POST", body: JSON.stringify({}) });
+        showToast(res.message || "Land 状態を確認しました");
+        if (openTaskId === id) {
+          const detail = await apiFetch("/api/tasks/" + encodeURIComponent(id));
+          renderTaskSheet(id, detail);
+        }
       } catch (err) {
         showToast(err.message);
       }

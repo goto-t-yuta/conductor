@@ -29,6 +29,7 @@ import type {
   IntegrationMode,
   LandTaskResult,
   Project,
+  SyncTaskLandStatusResult,
   TaskLandStatus,
   TaskStatusUpdateResult,
   TaskWorktreeStatus,
@@ -256,6 +257,8 @@ export interface TaskInspectorModalProps {
   onMentionInChat: () => void;
   onStopWorker: () => void;
   onLandTask?: (options?: { createPr?: boolean }) => Promise<LandTaskResult | void> | void;
+  onSyncLandStatus?: () => Promise<SyncTaskLandStatusResult | void> | void;
+  onForceMarkDone?: () => TaskInspectorStatusUpdateResult;
   onResolveConflictWithAI?: () => Promise<{ ok: boolean; error?: string } | void> | void;
   onCleanupWorktree?: () => Promise<void> | void;
   imageCache?: MarkdownImageCache;
@@ -277,6 +280,8 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
   onMentionInChat,
   onStopWorker,
   onLandTask,
+  onSyncLandStatus,
+  onForceMarkDone,
   onResolveConflictWithAI,
   onCleanupWorktree,
   imageCache,
@@ -285,6 +290,8 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
   const [gitStatus, setGitStatus] = useState<string | null>(null);
   const [worktreeStatus, setWorktreeStatus] = useState<TaskWorktreeStatus | null>(null);
   const [isRefreshingGit, setIsRefreshingGit] = useState(false);
+  const [isSyncingLand, setIsSyncingLand] = useState(false);
+  const [syncLandFeedback, setSyncLandFeedback] = useState<string | null>(null);
   const [isStartingConflictResolve, setIsStartingConflictResolve] = useState(false);
   const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
   const [statusUpdateError, setStatusUpdateError] = useState<string | null>(null);
@@ -300,7 +307,8 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
 
   useEffect(() => {
     setStatusUpdateError(null);
-  }, [task.id, task.status]);
+    setSyncLandFeedback(null);
+  }, [task.id, task.status, task.landStatus]);
 
   const handleStatusUpdate = useCallback(
     async (nextStatus: AgentTaskStatus) => {
@@ -332,6 +340,33 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
     [locale, onClose, onUpdateStatus],
   );
 
+  const handleForceMarkDone = useCallback(async () => {
+    if (!onForceMarkDone || isUpdatingStatusRef.current) return;
+    isUpdatingStatusRef.current = true;
+    setIsUpdatingStatus(true);
+    setStatusUpdateError(null);
+    try {
+      const outcome = await executeTaskInspectorStatusUpdate({
+        nextStatus: "done",
+        onUpdateStatus: () => onForceMarkDone(),
+        onClose: () => {
+          if (mountedRef.current) {
+            onClose();
+          }
+        },
+        fallbackErrorMessage: t(locale, "inspector.statusUpdateError"),
+      });
+      if (mountedRef.current && !outcome.ok) {
+        setStatusUpdateError(outcome.error);
+      }
+    } finally {
+      isUpdatingStatusRef.current = false;
+      if (mountedRef.current) {
+        setIsUpdatingStatus(false);
+      }
+    }
+  }, [locale, onClose, onForceMarkDone]);
+
   const partitionedActivities = useMemo(
     () => partitionTaskActivities(task.activities),
     [task.activities],
@@ -352,14 +387,17 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
   const isLanding = task.landStatus === "landing";
   const needsLand = requiresLandBeforeDone(task);
   const hasWorktreeInfo = Boolean(
-    task.worktreeBranch || task.worktreePath || task.landedBranch || task.prUrl,
+    task.worktreeBranch || task.worktreePath || task.landedBranch || task.prUrl || needsLand,
   );
-  const hasActiveWorktree = Boolean(task.worktreePath && task.worktreeBranch);
+  const hasActiveWorktree = Boolean(task.worktreePath?.trim() || task.worktreeBranch?.trim());
   const canLand =
     Boolean(onLandTask) &&
-    hasActiveWorktree &&
+    (hasActiveWorktree || needsLand) &&
     task.status !== "running" &&
     task.landStatus !== "landed";
+  const canRecheckLand = Boolean(onSyncLandStatus) && needsLand && task.status !== "running";
+  const canForceDone =
+    Boolean(onForceMarkDone) && needsLand && task.status !== "running" && task.status !== "done";
   const canResolveConflictWithAI =
     Boolean(onResolveConflictWithAI) &&
     task.landStatus === "conflict" &&
@@ -380,6 +418,23 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
       setIsRefreshingGit(false);
     }
   }, [task.id]);
+
+  const handleRecheckLand = useCallback(async () => {
+    if (!onSyncLandStatus || isSyncingLand) return;
+    setIsSyncingLand(true);
+    setSyncLandFeedback(null);
+    try {
+      const res = await onSyncLandStatus();
+      if (mountedRef.current && res && typeof res === "object" && "message" in res && res.message) {
+        setSyncLandFeedback(res.message);
+      }
+      await refreshGitInfo();
+    } finally {
+      if (mountedRef.current) {
+        setIsSyncingLand(false);
+      }
+    }
+  }, [isSyncingLand, onSyncLandStatus, refreshGitInfo]);
 
   useEffect(() => {
     void refreshGitInfo();
@@ -604,6 +659,16 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                 </div>
               )}
 
+              {syncLandFeedback && (
+                <div
+                  data-testid="inspector-sync-land-feedback"
+                  className="rounded-lg px-2.5 py-2 bg-indigo-500/10 border border-indigo-500/20 text-[11.5px] text-indigo-700 dark:text-indigo-300 flex items-start gap-1.5"
+                >
+                  <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>{syncLandFeedback}</span>
+                </div>
+              )}
+
               {worktreeStatus?.diffSummary && (
                 <pre className="p-2.5 rounded-lg bg-zinc-100 dark:bg-zinc-950/70 text-[11px] font-mono text-zinc-600 dark:text-zinc-300 overflow-x-auto max-h-36">
                   {worktreeStatus.diffSummary}
@@ -612,6 +677,8 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
 
               {/* Action Buttons */}
               {(canLand ||
+                canRecheckLand ||
+                canForceDone ||
                 canResolveConflictWithAI ||
                 (hasActiveWorktree && onCleanupWorktree && task.status !== "running")) && (
                 <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -700,6 +767,38 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                         <span>Push & Create PR</span>
                       </button>
                     </>
+                  )}
+
+                  {canRecheckLand && (
+                    <button
+                      type="button"
+                      disabled={isLanding || isSyncingLand}
+                      data-testid="inspector-recheck-land-btn"
+                      onClick={() => void handleRecheckLand()}
+                      title={t(locale, "inspector.recheckLandTitle")}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium bg-indigo-500/12 text-indigo-700 dark:text-indigo-300 border border-indigo-500/25 hover:bg-indigo-500/20 disabled:opacity-60 transition-colors cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${isSyncingLand ? "animate-spin" : ""}`} />
+                      <span>
+                        {isSyncingLand
+                          ? t(locale, "inspector.recheckingLand")
+                          : t(locale, "inspector.recheckLandBtn")}
+                      </span>
+                    </button>
+                  )}
+
+                  {canForceDone && (
+                    <button
+                      type="button"
+                      disabled={isLanding || isUpdatingStatus}
+                      data-testid="inspector-force-done-btn"
+                      onClick={() => void handleForceMarkDone()}
+                      title={t(locale, "inspector.forceDoneTitle")}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11.5px] font-medium bg-amber-500/12 text-amber-800 dark:text-amber-300 border border-amber-500/30 hover:bg-amber-500/22 disabled:opacity-60 transition-colors cursor-pointer"
+                    >
+                      <Check className="w-3 h-3" />
+                      <span>{t(locale, "inspector.forceDoneBtn")}</span>
+                    </button>
                   )}
 
                   {hasActiveWorktree && onCleanupWorktree && task.status !== "running" && (

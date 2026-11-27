@@ -83,6 +83,27 @@ class TaskStatusActionsTest {
 
         val landed = unlanded.copy(landStatus = "landed")
         assertFalse(TaskStatusActions.canQuickLand(landed))
+        assertFalse(TaskStatusActions.canSyncLandStatus(landed))
+        assertFalse(TaskStatusActions.canForceMarkDone(landed))
+
+        // Unlanded / error tasks expose re-check Land & force Done recovery actions
+        assertTrue(TaskStatusActions.canSyncLandStatus(unlanded))
+        assertTrue(TaskStatusActions.canForceMarkDone(unlanded))
+
+        val stuckErrorWithoutPath = makeTask(
+            status = "needs_review",
+            worktreePath = null,
+            worktreeBranch = null,
+            landStatus = "error",
+        )
+        assertTrue(TaskStatusActions.canQuickLand(stuckErrorWithoutPath))
+        assertTrue(TaskStatusActions.canSyncLandStatus(stuckErrorWithoutPath))
+        assertTrue(TaskStatusActions.canForceMarkDone(stuckErrorWithoutPath))
+
+        // Running tasks never allow force Done or sync Land
+        val runningUnlanded = unlanded.copy(status = "running")
+        assertFalse(TaskStatusActions.canSyncLandStatus(runningUnlanded))
+        assertFalse(TaskStatusActions.canForceMarkDone(runningUnlanded))
     }
 
     @Test

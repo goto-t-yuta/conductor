@@ -748,7 +748,12 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun updateTaskStatus(taskId: String, nextStatus: String, isUndo: Boolean = false) {
+    fun updateTaskStatus(
+        taskId: String,
+        nextStatus: String,
+        isUndo: Boolean = false,
+        force: Boolean = false,
+    ) {
         val state = _uiState.value
         val cfg = state.config
         if (!cfg.isConfigured || taskId in state.updatingTaskIds || taskId in state.landingTaskIds) {
@@ -757,7 +762,16 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         val currentTask = state.snapshot?.tasks?.find { it.id == taskId }
             ?: state.selectedTaskDetail?.task?.takeIf { it.id == taskId }
         if (nextStatus == TaskStatusActions.STATUS_DONE && currentTask != null) {
-            TaskStatusActions.getMarkDoneBlockedReason(currentTask)?.let { blockedReason ->
+            val blockedReason = if (force) {
+                if (currentTask.status == TaskStatusActions.STATUS_RUNNING) {
+                    TaskStatusActions.RUNNING_DONE_BLOCKED_REASON
+                } else {
+                    null
+                }
+            } else {
+                TaskStatusActions.getMarkDoneBlockedReason(currentTask)
+            }
+            if (blockedReason != null) {
                 _uiState.update { current ->
                     if (current.selectedTaskId == taskId) {
                         current.copy(taskDetailError = blockedReason)
@@ -779,7 +793,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             try {
-                api.updateTaskStatus(cfg, taskId, nextStatus)
+                api.updateTaskStatus(cfg, taskId, nextStatus, force = force)
                     .onSuccess { res ->
                         if (!res.ok) {
                             val errorMessage = res.error ?: res.message ?: "ステータス更新に失敗しました"
@@ -920,6 +934,51 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                     .onFailure { err ->
                         showBanner(err.message ?: "Land に失敗しました")
+                    }
+            } finally {
+                _uiState.update { it.copy(landingTaskIds = it.landingTaskIds - taskId) }
+            }
+        }
+    }
+
+    fun syncTaskLandStatus(taskId: String) {
+        val state = _uiState.value
+        val cfg = state.config
+        if (!cfg.isConfigured || taskId in state.updatingTaskIds || taskId in state.landingTaskIds) {
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(landingTaskIds = it.landingTaskIds + taskId) }
+            try {
+                api.syncTaskLandStatus(cfg, taskId)
+                    .onSuccess { res ->
+                        res.task?.let { updatedTask ->
+                            _uiState.update { current ->
+                                current.copy(
+                                    snapshot = TaskStatusActions.applyTaskUpdate(
+                                        snapshot = current.snapshot,
+                                        taskId = taskId,
+                                        updatedTask = updatedTask,
+                                    ),
+                                    selectedTaskDetail = if (current.selectedTaskId == taskId && current.selectedTaskDetail != null) {
+                                        current.selectedTaskDetail.copy(task = updatedTask)
+                                    } else {
+                                        current.selectedTaskDetail
+                                    },
+                                    taskDetailError = if (res.updated && current.selectedTaskId == taskId) null else current.taskDetailError,
+                                )
+                            }
+                        }
+                        showBanner(res.message ?: "Land 状態を再確認しました")
+                        api.fetchSnapshot(cfg).onSuccess { snap ->
+                            applyIncomingSnapshot(snap, fromSse = false)
+                        }
+                        if (_uiState.value.selectedTaskId == taskId) {
+                            refreshTaskDetail(taskId)
+                        }
+                    }
+                    .onFailure { err ->
+                        showBanner(err.message ?: "Land 状態の再確認に失敗しました")
                     }
             } finally {
                 _uiState.update { it.copy(landingTaskIds = it.landingTaskIds - taskId) }

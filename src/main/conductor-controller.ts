@@ -23,6 +23,8 @@ import type {
   ProviderStatus,
   RemoteAccessStatus,
   SendMessagePayload,
+  SyncTaskLandStatusResult,
+  TaskStatusUpdateOptions,
   TaskStatusUpdateResult,
   TaskWorktreeStatus,
   TokenUsage,
@@ -75,6 +77,7 @@ import {
 } from "../shared/mentions.js";
 import {
   RUNNING_TASK_DONE_BLOCKED_REASON,
+  requiresLandBeforeDone,
   validateManualTaskStatusTransition,
 } from "../shared/task-status.js";
 import type { BrowserManager } from "./browser-manager.js";
@@ -105,12 +108,14 @@ import {
 } from "./codex-client.js";
 import {
   createTaskWorktree,
+  evaluateWorktreeLandState,
   getGitHeadCommit,
   inspectTaskWorktree,
   isValidIntegrationMode,
   landTaskWorktree,
   removeTaskWorktree,
   resolveEffectiveIntegrationMode,
+  type WorktreeLandEvaluation,
 } from "./git-worktree.js";
 import {
   LocalMCPServer,
@@ -905,6 +910,7 @@ export class ConductorController {
     this.connectionStatus = "ローカルMCP & エージェント接続中...";
     this.lastErrorBanner = null;
     this.discoverLocalWorkspaceProjects();
+    this.reconcileAllUnlandedTasks({ allowNoChanges: false });
     this.broadcastSnapshot();
 
     try {
@@ -1212,6 +1218,7 @@ export class ConductorController {
 
   public async rescanAllProjects(): Promise<void> {
     this.discoverLocalWorkspaceProjects();
+    this.reconcileAllUnlandedTasks({ allowNoChanges: false });
     this.broadcastSnapshot();
     if (this.isConnected) {
       await this.discoverCodexHistoryProjects();
@@ -4055,18 +4062,263 @@ export class ConductorController {
     }
   }
 
-  public updateTaskStatus(taskId: string, status: AgentTaskStatus): TaskStatusUpdateResult {
+  private reconcileTaskLandStatusInternal(
+    taskId: string,
+    options?: {
+      allowNoChanges?: boolean;
+      allowMissingWorktree?: boolean;
+      persistAndBroadcast?: boolean;
+    },
+  ): {
+    updated: boolean;
+    alreadyLanded: boolean;
+    eval: WorktreeLandEvaluation | null;
+    message: string;
+  } {
+    const task = this.tasks.find((t) => t.id === taskId);
+    if (!task) {
+      return {
+        updated: false,
+        alreadyLanded: false,
+        eval: null,
+        message: "タスクが見つかりませんでした。",
+      };
+    }
+    if (task.status === "running" || this.hasActiveWorkerForTask(task)) {
+      return {
+        updated: false,
+        alreadyLanded: false,
+        eval: null,
+        message: "ワーカーが実行中のため Land 状態を再確認できません。",
+      };
+    }
+    if (!requiresLandBeforeDone(task)) {
+      return {
+        updated: false,
+        alreadyLanded: true,
+        eval: null,
+        message: "すでに Land 済みまたは Worktree がありません。",
+      };
+    }
+    if (!task.projectPath) {
+      return {
+        updated: false,
+        alreadyLanded: false,
+        eval: null,
+        message: "プロジェクトパスが未設定のため Git 状態を確認できません。",
+      };
+    }
+
+    const landEval = evaluateWorktreeLandState({
+      parentPath: task.projectPath,
+      worktreePath: task.worktreePath,
+      worktreeBranch: task.worktreeBranch,
+      baseBranch: task.baseBranch,
+      baseCommit: task.baseCommit,
+    });
+    if (!landEval.repoRoot) {
+      return {
+        updated: false,
+        alreadyLanded: false,
+        eval: landEval,
+        message: "親ディレクトリが Git リポジトリではないため確認できませんでした。",
+      };
+    }
+
+    const allowNoChanges = Boolean(options?.allowNoChanges);
+    const allowMissingWorktree = options?.allowMissingWorktree !== false;
+    const shouldMarkLanded =
+      landEval.alreadyMerged ||
+      (allowNoChanges && landEval.noChanges) ||
+      (allowMissingWorktree && landEval.worktreeMissingAndBranchGone);
+
+    if (!shouldMarkLanded) {
+      const reasonMsg = landEval.inProgressOperation
+        ? `Worktree が ${landEval.inProgressOperation} の途中状態です。`
+        : landEval.worktreeDirty
+          ? "Worktree に未コミットの変更が残っています。Land を実行してください。"
+          : !landEval.worktreeExists && landEval.branchExists
+            ? `Worktree ディレクトリは存在しませんが、ブランチ ${task.worktreeBranch ?? ""} に未マージのコミットが残っています。`
+            : "まだ親ブランチにマージされていない変更があります。Land を実行してください。";
+      return {
+        updated: false,
+        alreadyLanded: false,
+        eval: landEval,
+        message: reasonMsg,
+      };
+    }
+
+    removeTaskWorktree({
+      parentPath: landEval.repoRoot,
+      worktreePath: task.worktreePath,
+      worktreeBranch: task.worktreeBranch,
+      deleteBranch: landEval.branchExists,
+    });
+
+    const targetBranch = landEval.targetBranch ?? task.landedBranch ?? task.baseBranch ?? null;
+    const commitHash = landEval.commitHash ?? task.landedCommit ?? null;
+    const now = new Date().toISOString();
+    const activityTitle =
+      landEval.alreadyMerged
+        ? `Auto-synced as landed (${targetBranch ?? "merged"})`
+        : landEval.noChanges
+          ? "Auto-synced as landed (no changes)"
+          : "Auto-synced as landed (worktree removed)";
+    const message = landEval.alreadyMerged
+      ? targetBranch
+        ? `${task.worktreeBranch ?? "Worktree"} は既に ${targetBranch} にマージ済みのため Land 済みに更新し、Worktree をクリーンアップしました。`
+        : "既に親ブランチへマージ済みのため Land 済みに更新し、Worktree をクリーンアップしました。"
+      : landEval.noChanges
+        ? "Worktree に差分がないため Land 済みに更新し、Worktree をクリーンアップしました。"
+        : "Worktree と一時ブランチは既に存在しないため Land 済みに同期しました。";
+
+    this.updateTask(taskId, (t) => {
+      t.landStatus = "landed";
+      t.landedBranch = targetBranch;
+      t.landedCommit = commitHash;
+      t.worktreePath = null;
+      t.worktreeBranch = null;
+      t.landError = null;
+      t.conflictFiles = undefined;
+      t.conflictParentHead = null;
+      t.conflictTargetBranch = null;
+      t.autoResolveConflictAttempts = undefined;
+      t.currentStep = landEval.alreadyMerged
+        ? targetBranch
+          ? `Landed → ${targetBranch}`
+          : "Landed"
+        : "変更なし (Worktree 削除済み)";
+      t.activities.push({
+        id: crypto.randomUUID(),
+        kind: "system",
+        title: activityTitle,
+        detail: message,
+        timestamp: now,
+      });
+      t.updatedAt = now;
+    });
+
+    if (task.projectPath) {
+      const refreshedBranch = getGitBranch(task.projectPath);
+      this.projects = this.projects.map((p) =>
+        p.path === task.projectPath || (task.projectId && p.id === task.projectId)
+          ? { ...p, gitBranch: refreshedBranch }
+          : p,
+      );
+    }
+
+    if (options?.persistAndBroadcast) {
+      this.persist();
+      this.broadcastSnapshot();
+    }
+
+    return {
+      updated: true,
+      alreadyLanded: true,
+      eval: landEval,
+      message,
+    };
+  }
+
+  public syncTaskLandStatus(taskId: string): SyncTaskLandStatusResult {
+    const task = this.tasks.find((t) => t.id === taskId);
+    if (!task) {
+      return {
+        ok: false,
+        updated: false,
+        reason: "error",
+        message: "タスクが見つかりませんでした。",
+      };
+    }
+    if (task.status === "running" || this.hasActiveWorkerForTask(task)) {
+      return {
+        ok: false,
+        updated: false,
+        landStatus: task.landStatus,
+        reason: "error",
+        message: "ワーカーが実行中のため Land 状態を再確認できません。",
+      };
+    }
+    const outcome = this.reconcileTaskLandStatusInternal(taskId, {
+      allowNoChanges: true,
+      allowMissingWorktree: true,
+      persistAndBroadcast: true,
+    });
+    const latest = this.tasks.find((t) => t.id === taskId) ?? task;
+    return {
+      ok: true,
+      updated: outcome.updated,
+      landStatus: latest.landStatus,
+      reason: outcome.updated
+        ? (outcome.eval?.reason ?? "no_changes")
+        : outcome.alreadyLanded
+          ? "already_landed"
+          : "unlanded",
+      message: outcome.message,
+    };
+  }
+
+  public reconcileAllUnlandedTasks(options?: { allowNoChanges?: boolean }): number {
+    let updatedCount = 0;
+    for (const task of [...this.tasks]) {
+      if (
+        task.status === "running" ||
+        task.status === "queued" ||
+        this.hasActiveWorkerForTask(task) ||
+        !requiresLandBeforeDone(task)
+      ) {
+        continue;
+      }
+      const outcome = this.reconcileTaskLandStatusInternal(task.id, {
+        allowNoChanges: Boolean(options?.allowNoChanges),
+        allowMissingWorktree: true,
+        persistAndBroadcast: false,
+      });
+      if (outcome.updated) {
+        updatedCount += 1;
+      }
+    }
+    if (updatedCount > 0) {
+      this.persist();
+      this.broadcastSnapshot();
+    }
+    return updatedCount;
+  }
+
+  public updateTaskStatus(
+    taskId: string,
+    status: AgentTaskStatus,
+    options?: TaskStatusUpdateOptions,
+  ): TaskStatusUpdateResult {
     const task = this.tasks.find((t) => t.id === taskId);
     if (!task) {
       return { ok: false, error: "Task not found" };
     }
+    const hasActiveWorker = this.hasActiveWorkerForTask(task);
+    const force = Boolean(options?.force);
+
+    if (
+      status === "done" &&
+      task.status !== "running" &&
+      !hasActiveWorker &&
+      requiresLandBeforeDone(task)
+    ) {
+      this.reconcileTaskLandStatusInternal(taskId, {
+        allowNoChanges: force,
+        allowMissingWorktree: true,
+        persistAndBroadcast: false,
+      });
+    }
+
+    const latestTask = this.tasks.find((t) => t.id === taskId) ?? task;
     const validation = validateManualTaskStatusTransition({
-      currentStatus: task.status,
+      currentStatus: latestTask.status,
       nextStatus: status,
-      hasActiveWorker: this.hasActiveWorkerForTask(task),
-      worktreePath: task.worktreePath,
-      worktreeBranch: task.worktreeBranch,
-      landStatus: task.landStatus,
+      hasActiveWorker,
+      worktreePath: latestTask.worktreePath,
+      worktreeBranch: latestTask.worktreeBranch,
+      landStatus: latestTask.landStatus,
+      force,
     });
     if (!validation.ok) {
       return {
@@ -4075,11 +4327,25 @@ export class ConductorController {
       };
     }
 
+    const forcedWithUnlanded =
+      force && status === "done" && requiresLandBeforeDone(latestTask);
+    const now = new Date().toISOString();
+
     this.pendingAutoResumeTaskIds = this.pendingAutoResumeTaskIds.filter((id) => id !== taskId);
     this.updateTask(taskId, (t) => {
       t.status = status;
       t.autoResumeOnStartup = false;
-      t.updatedAt = new Date().toISOString();
+      if (forcedWithUnlanded) {
+        t.activities.push({
+          id: crypto.randomUUID(),
+          kind: "system",
+          title: "Forced Done (unlanded worktree preserved)",
+          detail:
+            "未Landの Worktree を保持したまま手動で完了にしました。",
+          timestamp: now,
+        });
+      }
+      t.updatedAt = now;
     });
     this.persist();
     this.broadcastSnapshot();
@@ -4305,12 +4571,12 @@ export class ConductorController {
       initialTask.projectPath,
     );
 
-    if (!initialTask.projectPath || !initialTask.worktreePath || !initialTask.worktreeBranch) {
+    if (!initialTask.projectPath) {
       return {
         ok: false,
         mode,
         action: "error",
-        message: "このタスクには独立した Git Worktree がありません。",
+        message: "このタスクにはプロジェクトパスが設定されていません。",
       };
     }
 
@@ -4323,10 +4589,42 @@ export class ConductorController {
       };
     }
 
+    if (!initialTask.worktreePath && !initialTask.worktreeBranch) {
+      if (requiresLandBeforeDone(initialTask)) {
+        const reconciled = this.reconcileTaskLandStatusInternal(taskId, {
+          allowNoChanges: true,
+          allowMissingWorktree: true,
+          persistAndBroadcast: false,
+        });
+        if (reconciled.updated) {
+          this.updateTask(taskId, (t) => {
+            t.status = "done";
+            t.updatedAt = new Date().toISOString();
+          });
+          this.persist();
+          this.broadcastSnapshot();
+          return {
+            ok: true,
+            mode,
+            action: "noop",
+            targetBranch: reconciled.eval?.targetBranch ?? null,
+            commitHash: reconciled.eval?.commitHash ?? null,
+            message: reconciled.message,
+          };
+        }
+      }
+      return {
+        ok: false,
+        mode,
+        action: "error",
+        message: "このタスクには独立した Git Worktree がありません。",
+      };
+    }
+
     const repoKey = initialTask.projectPath;
     return this.withRepoLandLock(repoKey, async () => {
       const task = this.tasks.find((t) => t.id === taskId);
-      if (!task || !task.projectPath || !task.worktreePath || !task.worktreeBranch) {
+      if (!task || !task.projectPath || (!task.worktreePath && !task.worktreeBranch)) {
         return {
           ok: false,
           mode,
@@ -4350,8 +4648,8 @@ export class ConductorController {
 
       const result = landTaskWorktree({
         parentPath: task.projectPath,
-        worktreePath: task.worktreePath,
-        worktreeBranch: task.worktreeBranch,
+        worktreePath: task.worktreePath ?? "",
+        worktreeBranch: task.worktreeBranch ?? "",
         baseBranch: task.baseBranch,
         baseCommit: task.baseCommit,
         taskTitle: task.title,
@@ -4378,23 +4676,18 @@ export class ConductorController {
           t.status = "done";
           t.currentStep = result.targetBranch ? `Landed → ${result.targetBranch}` : "Landed";
         } else if (result.action === "noop") {
-          if (effectiveMode === "per-task-pr") {
-            t.landStatus = "unlanded";
-            t.landError = result.message;
-          } else {
-            t.landStatus = "landed";
-            t.landedBranch = result.targetBranch ?? null;
-            t.landedCommit = result.commitHash ?? null;
-            t.worktreePath = null;
-            t.worktreeBranch = null;
-            t.landError = null;
-            t.conflictFiles = undefined;
-            t.conflictParentHead = null;
-            t.conflictTargetBranch = null;
-            t.autoResolveConflictAttempts = undefined;
-            t.status = "done";
-            t.currentStep = "変更なし (Worktree 削除済み)";
-          }
+          t.landStatus = "landed";
+          t.landedBranch = result.targetBranch ?? null;
+          t.landedCommit = result.commitHash ?? null;
+          t.worktreePath = null;
+          t.worktreeBranch = null;
+          t.landError = null;
+          t.conflictFiles = undefined;
+          t.conflictParentHead = null;
+          t.conflictTargetBranch = null;
+          t.autoResolveConflictAttempts = undefined;
+          t.status = "done";
+          t.currentStep = "変更なし (Worktree 削除済み)";
         } else if (result.action === "pushed") {
           t.landStatus = "pushed";
           t.landedBranch = result.targetBranch ?? t.worktreeBranch ?? null;
@@ -4490,13 +4783,10 @@ export class ConductorController {
   }
 
   private isTaskEligibleForAutoLand(task: AgentTask): boolean {
-    if (!task.projectPath || !task.worktreePath || !task.worktreeBranch) {
+    if (!task.projectPath || (!task.worktreePath && !task.worktreeBranch)) {
       return false;
     }
     if (task.landStatus === "landed") {
-      return false;
-    }
-    if (!fs.existsSync(task.worktreePath)) {
       return false;
     }
     const effectiveMode = this.getEffectiveIntegrationModeForProject(
@@ -4789,9 +5079,7 @@ export class ConductorController {
         !task ||
         task.status !== "running" ||
         !task.projectPath ||
-        !task.worktreePath ||
-        !task.worktreeBranch ||
-        !fs.existsSync(task.worktreePath)
+        (!task.worktreePath && !task.worktreeBranch)
       ) {
         return null;
       }
@@ -4813,8 +5101,8 @@ export class ConductorController {
 
       const result = landTaskWorktree({
         parentPath: task.projectPath,
-        worktreePath: task.worktreePath,
-        worktreeBranch: task.worktreeBranch,
+        worktreePath: task.worktreePath ?? "",
+        worktreeBranch: task.worktreeBranch ?? "",
         baseBranch: task.baseBranch,
         baseCommit: task.baseCommit,
         taskTitle: task.title,
@@ -5255,6 +5543,13 @@ export class ConductorController {
           updatedTask = tTask;
         });
 
+        this.reconcileTaskLandStatusInternal(taskId, {
+          allowNoChanges: true,
+          allowMissingWorktree: true,
+          persistAndBroadcast: false,
+        });
+        updatedTask = this.tasks.find((tTask) => tTask.id === taskId) ?? updatedTask;
+
         if (updatedTask) {
           const excerpt = buildTaskCompletionExcerpt(updatedTask.latestOutput);
           this.appendTaskEventMessage(
@@ -5428,13 +5723,29 @@ export class ConductorController {
             ? (args.status as AgentTaskStatus)
             : null;
         if (requestedStatus) {
+          const hasActiveWorker = this.hasActiveWorkerForTask(targetTask);
+          const force = args.force === true;
+          if (
+            requestedStatus === "done" &&
+            targetTask.status !== "running" &&
+            !hasActiveWorker &&
+            requiresLandBeforeDone(targetTask)
+          ) {
+            this.reconcileTaskLandStatusInternal(taskId, {
+              allowNoChanges: force,
+              allowMissingWorktree: true,
+              persistAndBroadcast: false,
+            });
+          }
+          const latestTarget = this.tasks.find((t) => t.id === taskId) ?? targetTask;
           const validation = validateManualTaskStatusTransition({
-            currentStatus: targetTask.status,
+            currentStatus: latestTarget.status,
             nextStatus: requestedStatus,
-            hasActiveWorker: this.hasActiveWorkerForTask(targetTask),
-            worktreePath: targetTask.worktreePath,
-            worktreeBranch: targetTask.worktreeBranch,
-            landStatus: targetTask.landStatus,
+            hasActiveWorker,
+            worktreePath: latestTarget.worktreePath,
+            worktreeBranch: latestTarget.worktreeBranch,
+            landStatus: latestTarget.landStatus,
+            force,
           });
           if (!validation.ok) {
             return {
@@ -6917,6 +7228,13 @@ export class ConductorController {
           tTask.updatedAt = new Date().toISOString();
           finishedTask = tTask;
         });
+
+        this.reconcileTaskLandStatusInternal(args.taskId, {
+          allowNoChanges: true,
+          allowMissingWorktree: true,
+          persistAndBroadcast: false,
+        });
+        finishedTask = this.tasks.find((tTask) => tTask.id === args.taskId) ?? finishedTask;
 
         if (finishedTask) {
           const excerpt = buildTaskCompletionExcerpt(

@@ -308,6 +308,10 @@ export function conductorMCPTools(): MCPToolDefinition[] {
           title: s("Updated title (written in Conductor's configured output language)"),
           summary: s("Updated summary (written in Conductor's configured output language)"),
           status: s("queued | running | needs_review | done | failed"),
+          force: {
+            type: "boolean",
+            description: "Optional: bypass unlanded worktree guard when marking done (running tasks remain blocked)",
+          },
           current_step: s("Updated progress label (written in Conductor's configured output language)"),
           preview_url: s("Preview URL"),
         },

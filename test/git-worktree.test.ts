@@ -7,6 +7,7 @@ import type { BrowserManager } from "../src/main/browser-manager.js";
 import { ConductorController } from "../src/main/conductor-controller.js";
 import {
   createTaskWorktree,
+  evaluateWorktreeLandState,
   inspectTaskWorktree,
   landTaskWorktree,
   removeTaskWorktree,
@@ -491,5 +492,204 @@ describe("Git Worktree Parallel Execution & Incremental Landing", () => {
     await ctrl2.deleteTask(task.id);
     expect(fs.existsSync(provisioned.worktreePath!)).toBe(false);
     expect(git(repo, ["branch", "--list", provisioned.worktreeBranch!])).toBe("");
+  });
+
+  it("auto-detects worktree branch already merged into parent/base branch (even when parent is dirty) and cleans up safely", () => {
+    const repo = initGitRepo();
+    const worktreesDir = makeTempDir("conductor-wt-merged-");
+
+    // Case 1: Merged into parent's current branch via --no-ff merge commit, AND parent repo has dirty WIP files
+    const wt1 = createTaskWorktree({
+      projectPath: repo,
+      worktreesBaseDir: worktreesDir,
+      taskId: "merged01",
+      taskNumber: 1,
+    });
+    expect(wt1.created).toBe(true);
+    fs.writeFileSync(path.join(wt1.worktreePath!, "merged-feature.ts"), "export const v = 1;\n", "utf8");
+    git(wt1.worktreePath!, ["add", "merged-feature.ts"]);
+    git(wt1.worktreePath!, ["commit", "-m", "Implement merged feature"]);
+
+    // Manually merge worktreeBranch into main, then leave unrelated dirty file in parent repo
+    git(repo, ["merge", "--no-ff", wt1.worktreeBranch!, "-m", "Merge task branch into main"]);
+    fs.writeFileSync(path.join(repo, "unrelated-wip.txt"), "wip\n", "utf8");
+
+    const eval1 = evaluateWorktreeLandState({
+      parentPath: repo,
+      worktreePath: wt1.worktreePath,
+      worktreeBranch: wt1.worktreeBranch,
+      baseBranch: wt1.baseBranch,
+      baseCommit: wt1.baseCommit,
+    });
+    expect(eval1.alreadyMerged).toBe(true);
+    expect(eval1.reason).toBe("merged_into_parent");
+
+    const land1 = landTaskWorktree({
+      parentPath: repo,
+      worktreePath: wt1.worktreePath!,
+      worktreeBranch: wt1.worktreeBranch!,
+      baseBranch: wt1.baseBranch,
+      baseCommit: wt1.baseCommit,
+      taskTitle: "Merged Feature",
+      taskNumber: 1,
+      taskId: "merged01",
+      mode: "feature-branch",
+    });
+    expect(land1.ok).toBe(true);
+    expect(land1.action).toBe("landed");
+    expect(land1.targetBranch).toBe("main");
+    expect(fs.existsSync(wt1.worktreePath!)).toBe(false);
+    expect(git(repo, ["branch", "--list", wt1.worktreeBranch!])).toBe("");
+    // Parent repo dirty file stays untouched
+    expect(fs.readFileSync(path.join(repo, "unrelated-wip.txt"), "utf8")).toBe("wip\n");
+    fs.rmSync(path.join(repo, "unrelated-wip.txt"));
+
+    // Case 2: Merged into baseBranch (main) while parent repo switched to another branch
+    const wt2 = createTaskWorktree({
+      projectPath: repo,
+      worktreesBaseDir: worktreesDir,
+      taskId: "merged02",
+      taskNumber: 2,
+    });
+    fs.writeFileSync(path.join(wt2.worktreePath!, "base-merged.ts"), "export const b = 2;\n", "utf8");
+    git(wt2.worktreePath!, ["add", "base-merged.ts"]);
+    git(wt2.worktreePath!, ["commit", "-m", "Implement base-merged feature"]);
+    git(repo, ["merge", "--ff-only", wt2.worktreeBranch!]);
+    git(repo, ["checkout", "-b", "other-branch"]);
+    fs.writeFileSync(path.join(repo, "other.txt"), "other\n", "utf8");
+    git(repo, ["add", "other.txt"]);
+    git(repo, ["commit", "-m", "Other branch commit"]);
+
+    const eval2 = evaluateWorktreeLandState({
+      parentPath: repo,
+      worktreePath: wt2.worktreePath,
+      worktreeBranch: wt2.worktreeBranch,
+      baseBranch: wt2.baseBranch,
+      baseCommit: wt2.baseCommit,
+    });
+    expect(eval2.alreadyMerged).toBe(true);
+    expect(eval2.targetBranch).toBe("other-branch");
+
+    // Also verify when other-branch does NOT contain wt2 (diverged from main before merge)
+    git(repo, ["checkout", "-b", "diverged-branch", "HEAD~2"]);
+    const eval2Diverged = evaluateWorktreeLandState({
+      parentPath: repo,
+      worktreePath: wt2.worktreePath,
+      worktreeBranch: wt2.worktreeBranch,
+      baseBranch: "main",
+      baseCommit: wt2.baseCommit,
+    });
+    expect(eval2Diverged.alreadyMerged).toBe(true);
+    expect(eval2Diverged.reason).toBe("merged_into_base");
+    expect(eval2Diverged.targetBranch).toBe("main");
+
+    // Land in per-task-pr mode also recognizes already-merged and cleans up!
+    const land2 = landTaskWorktree({
+      parentPath: repo,
+      worktreePath: wt2.worktreePath!,
+      worktreeBranch: wt2.worktreeBranch!,
+      baseBranch: "main",
+      baseCommit: wt2.baseCommit,
+      taskTitle: "Base Merged Feature",
+      taskNumber: 2,
+      taskId: "merged02",
+      mode: "per-task-pr",
+    });
+    expect(land2.ok).toBe(true);
+    expect(land2.action).toBe("landed");
+    expect(land2.targetBranch).toBe("main");
+    expect(fs.existsSync(wt2.worktreePath!)).toBe(false);
+    expect(git(repo, ["branch", "--list", wt2.worktreeBranch!])).toBe("");
+  });
+
+  it("handles no-diff worktree (worker edited parent repo directly, leaving parent dirty) and missing-dir cases safely", () => {
+    const repo = initGitRepo();
+    const worktreesDir = makeTempDir("conductor-wt-nodiff-");
+
+    // Case 1: Worker edited parent repo directly -> parent is dirty, worktree has 0 commits & 0 uncommitted changes
+    const wtNoDiff = createTaskWorktree({
+      projectPath: repo,
+      worktreesBaseDir: worktreesDir,
+      taskId: "nodiff01",
+      taskNumber: 1,
+    });
+    fs.writeFileSync(path.join(repo, "direct-parent-edit.txt"), "edited parent directly\n", "utf8");
+
+    const landNoDiff = landTaskWorktree({
+      parentPath: repo,
+      worktreePath: wtNoDiff.worktreePath!,
+      worktreeBranch: wtNoDiff.worktreeBranch!,
+      baseBranch: wtNoDiff.baseBranch,
+      baseCommit: wtNoDiff.baseCommit,
+      taskTitle: "Direct Parent Edit Task",
+      taskNumber: 1,
+      taskId: "nodiff01",
+      mode: "feature-branch",
+    });
+    expect(landNoDiff.ok).toBe(true);
+    expect(landNoDiff.action).toBe("noop");
+    expect(fs.existsSync(wtNoDiff.worktreePath!)).toBe(false);
+    expect(git(repo, ["branch", "--list", wtNoDiff.worktreeBranch!])).toBe("");
+    // Parent's direct edit is completely preserved
+    expect(fs.readFileSync(path.join(repo, "direct-parent-edit.txt"), "utf8")).toBe(
+      "edited parent directly\n",
+    );
+    fs.rmSync(path.join(repo, "direct-parent-edit.txt"));
+
+    // Case 2: Worktree dir deleted externally AFTER branch was merged -> succeeds & cleans up branch
+    const wtDeletedMerged = createTaskWorktree({
+      projectPath: repo,
+      worktreesBaseDir: worktreesDir,
+      taskId: "delmerg1",
+      taskNumber: 2,
+    });
+    fs.writeFileSync(path.join(wtDeletedMerged.worktreePath!, "gone-wt.txt"), "merged\n", "utf8");
+    git(wtDeletedMerged.worktreePath!, ["add", "gone-wt.txt"]);
+    git(wtDeletedMerged.worktreePath!, ["commit", "-m", "Commit before external wt removal"]);
+    git(repo, ["merge", "--ff-only", wtDeletedMerged.worktreeBranch!]);
+    git(repo, ["worktree", "remove", "--force", wtDeletedMerged.worktreePath!]);
+
+    const landDeletedMerged = landTaskWorktree({
+      parentPath: repo,
+      worktreePath: wtDeletedMerged.worktreePath!,
+      worktreeBranch: wtDeletedMerged.worktreeBranch!,
+      baseBranch: wtDeletedMerged.baseBranch,
+      baseCommit: wtDeletedMerged.baseCommit,
+      taskTitle: "Externally removed merged WT",
+      taskNumber: 2,
+      taskId: "delmerg1",
+      mode: "feature-branch",
+    });
+    expect(landDeletedMerged.ok).toBe(true);
+    expect(landDeletedMerged.action).toBe("landed");
+    expect(git(repo, ["branch", "--list", wtDeletedMerged.worktreeBranch!])).toBe("");
+
+    // Case 3: Worktree dir deleted externally while branch STILL has unmerged commits -> must NOT falsely mark landed
+    const wtDeletedUnmerged = createTaskWorktree({
+      projectPath: repo,
+      worktreesBaseDir: worktreesDir,
+      taskId: "delunm01",
+      taskNumber: 3,
+    });
+    fs.writeFileSync(path.join(wtDeletedUnmerged.worktreePath!, "unmerged.txt"), "keep\n", "utf8");
+    git(wtDeletedUnmerged.worktreePath!, ["add", "unmerged.txt"]);
+    git(wtDeletedUnmerged.worktreePath!, ["commit", "-m", "Unmerged commit"]);
+    git(repo, ["worktree", "remove", "--force", wtDeletedUnmerged.worktreePath!]);
+
+    const landDeletedUnmerged = landTaskWorktree({
+      parentPath: repo,
+      worktreePath: wtDeletedUnmerged.worktreePath!,
+      worktreeBranch: wtDeletedUnmerged.worktreeBranch!,
+      baseBranch: wtDeletedUnmerged.baseBranch,
+      baseCommit: wtDeletedUnmerged.baseCommit,
+      taskTitle: "Externally removed unmerged WT",
+      taskNumber: 3,
+      taskId: "delunm01",
+      mode: "feature-branch",
+    });
+    expect(landDeletedUnmerged.ok).toBe(false);
+    expect(landDeletedUnmerged.action).toBe("error");
+    expect(git(repo, ["branch", "--list", wtDeletedUnmerged.worktreeBranch!])).not.toBe("");
+    git(repo, ["branch", "-D", wtDeletedUnmerged.worktreeBranch!]);
   });
 });

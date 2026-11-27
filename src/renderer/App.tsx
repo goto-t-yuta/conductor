@@ -2071,7 +2071,8 @@ export const App: React.FC = () => {
   );
 
   const handleUpdateTaskStatus = useCallback(
-    (taskId: string, status: AgentTaskStatus) => window.conductor.updateTaskStatus(taskId, status),
+    (taskId: string, status: AgentTaskStatus, options?: { force?: boolean }) =>
+      window.conductor.updateTaskStatus(taskId, status, options),
     [],
   );
 
@@ -2608,6 +2609,8 @@ export const App: React.FC = () => {
           onMentionInChat={() => handleMentionTask(selectedTask)}
           onStopWorker={() => void window.conductor.stopTaskWorker(selectedTask.id)}
           onLandTask={(opts) => window.conductor.landTask(selectedTask.id, opts)}
+          onSyncLandStatus={() => window.conductor.syncTaskLandStatus(selectedTask.id)}
+          onForceMarkDone={() => handleUpdateTaskStatus(selectedTask.id, "done", { force: true })}
           onResolveConflictWithAI={() => window.conductor.resolveTaskConflictWithAI(selectedTask.id)}
           onCleanupWorktree={async () => {
             await window.conductor.cleanupTaskWorktree(selectedTask.id);

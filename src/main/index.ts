@@ -9,6 +9,7 @@ import type {
   IntegrationMode,
   PreferredLanguage,
   SendMessagePayload,
+  TaskStatusUpdateOptions,
   TerminalCreateOptions,
   UsageBudgetSettings,
   VoiceMicPermissionResult,
@@ -418,8 +419,13 @@ function registerIpcHandlers(): void {
     }
   });
 
-  ipcMain.handle("conductor:updateTaskStatus", (_e, taskId: string, status: AgentTaskStatus) =>
-    controller?.updateTaskStatus(taskId, status) ?? { ok: false, error: "Controller not initialized" },
+  ipcMain.handle(
+    "conductor:updateTaskStatus",
+    (_e, taskId: string, status: AgentTaskStatus, options?: TaskStatusUpdateOptions) =>
+      controller?.updateTaskStatus(taskId, status, options) ?? {
+        ok: false,
+        error: "Controller not initialized",
+      },
   );
   ipcMain.handle("conductor:stopTaskWorker", (_e, taskId: string) => controller?.stopTaskWorker(taskId));
   ipcMain.handle("conductor:deleteTask", (_e, taskId: string) => controller?.deleteTask(taskId));
@@ -436,6 +442,14 @@ function registerIpcHandlers(): void {
         action: "error",
         message: "Controller not initialized",
       },
+  );
+  ipcMain.handle("conductor:syncTaskLandStatus", (_e, taskId: string) =>
+    controller?.syncTaskLandStatus(taskId) ?? {
+      ok: false,
+      updated: false,
+      reason: "error",
+      message: "Controller not initialized",
+    },
   );
   ipcMain.handle("conductor:resolveTaskConflictWithAI", (_e, taskId: string) =>
     controller?.resolveTaskConflictWithAI(taskId) ?? {

@@ -172,7 +172,7 @@ function createMockBridgeController(initialTasks: AgentTask[] = []) {
     startFreshChat: async () => {
       calls.startFreshChat += 1;
     },
-    updateTaskStatus: (taskId: string, status: AgentTaskStatus) => {
+    updateTaskStatus: (taskId: string, status: AgentTaskStatus, options?: { force?: boolean }) => {
       const task = tasks.find((t) => t.id === taskId);
       if (!task) return { ok: false, error: "Task not found" };
       const check = validateManualTaskStatusTransition({
@@ -182,6 +182,7 @@ function createMockBridgeController(initialTasks: AgentTask[] = []) {
         worktreePath: task.worktreePath,
         worktreeBranch: task.worktreeBranch,
         landStatus: task.landStatus,
+        force: options?.force,
       });
       if (!check.ok) {
         return { ok: false, error: check.error };
@@ -201,6 +202,22 @@ function createMockBridgeController(initialTasks: AgentTask[] = []) {
         );
       }
       return nextLandResult;
+    },
+    syncTaskLandStatus: (taskId: string) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) {
+        return { ok: false, updated: false, reason: "error", message: "Task not found" };
+      }
+      tasks = tasks.map((t) =>
+        t.id === taskId ? { ...t, landStatus: "landed", worktreePath: null, worktreeBranch: null } : t,
+      );
+      return {
+        ok: true,
+        updated: true,
+        landStatus: "landed",
+        reason: "merged_into_parent",
+        message: "既にマージ済みのため Land 済みに更新しました。",
+      };
     },
     getTaskGitStatus: (taskId: string) => (tasks.some((t) => t.id === taskId) ? "M src/app.ts" : null),
     getTaskWorktreeStatus: (taskId: string): TaskWorktreeStatus | null =>
@@ -750,6 +767,35 @@ describe("RemoteBridgeServer HTTP & SSE API", () => {
       body: JSON.stringify({ status: "done" }),
     });
     expect(unlandedDone.status).toBe(409);
+
+    // Force Done bypasses unlanded worktree guard (200), then reopen for sync-land & land tests
+    const forcedDone = await fetch(`${baseUrl}/api/tasks/t-wt/status`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ status: "done", force: true }),
+    });
+    expect(forcedDone.status).toBe(200);
+    await fetch(`${baseUrl}/api/tasks/t-wt/status`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ status: "needs_review" }),
+    });
+
+    // POST /api/tasks/:id/sync-land reconciles landStatus and returns updated task
+    const syncRes = await fetch(`${baseUrl}/api/tasks/t-wt/sync-land`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({}),
+    });
+    expect(syncRes.status).toBe(200);
+    const syncBody = (await syncRes.json()) as {
+      ok: boolean;
+      updated: boolean;
+      task: AgentTask;
+    };
+    expect(syncBody.ok).toBe(true);
+    expect(syncBody.updated).toBe(true);
+    expect(syncBody.task.landStatus).toBe("landed");
 
     // Land task -> 200 -> then Done succeeds
     const landRes = await fetch(`${baseUrl}/api/tasks/t-wt/land`, {

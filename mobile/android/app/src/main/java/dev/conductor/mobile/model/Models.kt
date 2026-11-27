@@ -94,9 +94,11 @@ data class TaskDetailResponse(
 @Serializable
 data class ApiActionResponse(
     val ok: Boolean = false,
+    val updated: Boolean = false,
     val message: String? = null,
     val error: String? = null,
     val action: String? = null,
+    val reason: String? = null,
     val prUrl: String? = null,
     val task: AgentTask? = null,
     val snapshot: AppSnapshot? = null,
@@ -252,6 +254,7 @@ data class ChatStopRequest(
 @Serializable
 data class TaskStatusRequest(
     val status: String,
+    val force: Boolean = false,
 )
 
 @Serializable

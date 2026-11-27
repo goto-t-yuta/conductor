@@ -67,7 +67,17 @@ object TaskStatusActions {
     }
 
     fun canQuickLand(task: AgentTask): Boolean =
-        task.hasWorktree && task.status != STATUS_RUNNING && task.landStatus != "landed"
+        (task.hasWorktree || task.isUnlandedWorktree) &&
+            task.status != STATUS_RUNNING &&
+            task.landStatus != "landed"
+
+    fun canSyncLandStatus(task: AgentTask): Boolean =
+        task.isUnlandedWorktree && task.status != STATUS_RUNNING
+
+    fun canForceMarkDone(task: AgentTask): Boolean =
+        task.status != STATUS_RUNNING &&
+            task.status != STATUS_DONE &&
+            task.isUnlandedWorktree
 
     fun applyTaskUpdate(
         snapshot: AppSnapshot?,

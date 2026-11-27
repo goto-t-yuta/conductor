@@ -483,10 +483,11 @@ class ConductorApiClient(
         config: ConnectionConfig,
         taskId: String,
         status: String,
+        force: Boolean = false,
     ): Result<ApiActionResponse> = postAction(
         config = config,
         path = "/api/tasks/${encodePathSegment(taskId)}/status",
-        payload = json.encodeToString(TaskStatusRequest(status = status)),
+        payload = json.encodeToString(TaskStatusRequest(status = status, force = force)),
     )
 
     suspend fun stopTask(config: ConnectionConfig, taskId: String): Result<ApiActionResponse> =
@@ -501,6 +502,15 @@ class ConductorApiClient(
         path = "/api/tasks/${encodePathSegment(taskId)}/land",
         payload = json.encodeToString(TaskLandRequest(createPr = createPr)),
         client = landClient,
+    )
+
+    suspend fun syncTaskLandStatus(
+        config: ConnectionConfig,
+        taskId: String,
+    ): Result<ApiActionResponse> = postAction(
+        config = config,
+        path = "/api/tasks/${encodePathSegment(taskId)}/sync-land",
+        payload = "{}",
     )
 
     private fun encodePathSegment(raw: String): String =

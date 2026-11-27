@@ -422,6 +422,214 @@ function countCommitsAhead(dir: string, baseRef: string | null | undefined): num
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function resolveRefCommit(dir: string, ref: string): string | null {
+  const res = runGit(dir, ["rev-parse", "--verify", `${ref}^{commit}`]);
+  if (!res.ok) return null;
+  const sha = res.stdout.trim();
+  return sha || null;
+}
+
+function isCommitAncestor(dir: string, ancestorRef: string, descendantRef: string): boolean {
+  return runGit(dir, ["merge-base", "--is-ancestor", ancestorRef, descendantRef]).ok;
+}
+
+export type WorktreeLandReconcileReason =
+  | "merged_into_parent"
+  | "merged_into_base"
+  | "no_changes"
+  | "worktree_removed";
+
+export interface WorktreeLandEvaluation {
+  repoRoot: string | null;
+  worktreeExists: boolean;
+  branchExists: boolean;
+  worktreeDirty: boolean;
+  inProgressOperation: string | null;
+  alreadyMerged: boolean;
+  noChanges: boolean;
+  worktreeMissingAndBranchGone: boolean;
+  reason: WorktreeLandReconcileReason | null;
+  targetBranch: string | null;
+  commitHash: string | null;
+}
+
+/**
+ * Inspects a task worktree/branch in a read-only manner to determine whether
+ * its changes are already merged into `baseBranch` / the parent repo's current
+ * branch (`git merge-base --is-ancestor`), whether the worktree has no commit
+ * or uncommitted diff at all, or whether both worktree directory and branch
+ * are already gone from a valid Git repository.
+ */
+export function evaluateWorktreeLandState(options: {
+  parentPath: string | null | undefined;
+  worktreePath: string | null | undefined;
+  worktreeBranch: string | null | undefined;
+  baseBranch?: string | null;
+  baseCommit?: string | null;
+}): WorktreeLandEvaluation {
+  const emptyResult: WorktreeLandEvaluation = {
+    repoRoot: null,
+    worktreeExists: false,
+    branchExists: false,
+    worktreeDirty: false,
+    inProgressOperation: null,
+    alreadyMerged: false,
+    noChanges: false,
+    worktreeMissingAndBranchGone: false,
+    reason: null,
+    targetBranch: null,
+    commitHash: null,
+  };
+
+  if (!options.parentPath) {
+    return emptyResult;
+  }
+
+  const repoRoot = getRepoRoot(options.parentPath);
+  if (!repoRoot) {
+    return emptyResult;
+  }
+
+  const worktreeExists = Boolean(options.worktreePath && fs.existsSync(options.worktreePath));
+  const hasBranch = Boolean(options.worktreeBranch && branchExists(repoRoot, options.worktreeBranch));
+  const parentBranch = getCurrentBranch(repoRoot);
+  const parentHead = getHeadCommit(repoRoot);
+
+  let worktreeDirty = false;
+  let inProgressOperation: string | null = null;
+  let worktreeHead: string | null = null;
+
+  if (worktreeExists && options.worktreePath) {
+    inProgressOperation = isRepoInProgressOperation(options.worktreePath);
+    worktreeDirty = getPorcelainStatus(options.worktreePath).length > 0;
+    if (inProgressOperation || worktreeDirty) {
+      return {
+        repoRoot,
+        worktreeExists,
+        branchExists: hasBranch,
+        worktreeDirty,
+        inProgressOperation,
+        alreadyMerged: false,
+        noChanges: false,
+        worktreeMissingAndBranchGone: false,
+        reason: null,
+        targetBranch: parentBranch ?? options.baseBranch ?? null,
+        commitHash: parentHead,
+      };
+    }
+    worktreeHead =
+      getHeadCommit(options.worktreePath) ??
+      (hasBranch && options.worktreeBranch
+        ? resolveRefCommit(repoRoot, `refs/heads/${options.worktreeBranch}`)
+        : null);
+  } else if (hasBranch && options.worktreeBranch) {
+    worktreeHead = resolveRefCommit(repoRoot, `refs/heads/${options.worktreeBranch}`);
+  } else {
+    return {
+      repoRoot,
+      worktreeExists: false,
+      branchExists: false,
+      worktreeDirty: false,
+      inProgressOperation: null,
+      alreadyMerged: false,
+      noChanges: false,
+      worktreeMissingAndBranchGone: true,
+      reason: "worktree_removed",
+      targetBranch: parentBranch ?? options.baseBranch ?? null,
+      commitHash: parentHead,
+    };
+  }
+
+  if (!worktreeHead) {
+    return {
+      repoRoot,
+      worktreeExists,
+      branchExists: hasBranch,
+      worktreeDirty: false,
+      inProgressOperation: null,
+      alreadyMerged: false,
+      noChanges: false,
+      worktreeMissingAndBranchGone: false,
+      reason: null,
+      targetBranch: parentBranch ?? options.baseBranch ?? null,
+      commitHash: parentHead,
+    };
+  }
+
+  const baseCommitResolved = options.baseCommit
+    ? resolveRefCommit(repoRoot, options.baseCommit)
+    : null;
+  const isAtOrBehindBaseCommit = Boolean(
+    baseCommitResolved && isCommitAncestor(repoRoot, worktreeHead, baseCommitResolved),
+  );
+  const baseBranchHead =
+    options.baseBranch && branchExists(repoRoot, options.baseBranch)
+      ? resolveRefCommit(repoRoot, `refs/heads/${options.baseBranch}`)
+      : null;
+
+  if (isAtOrBehindBaseCommit) {
+    return {
+      repoRoot,
+      worktreeExists,
+      branchExists: hasBranch,
+      worktreeDirty: false,
+      inProgressOperation: null,
+      alreadyMerged: false,
+      noChanges: true,
+      worktreeMissingAndBranchGone: false,
+      reason: "no_changes",
+      targetBranch: parentBranch ?? options.baseBranch ?? null,
+      commitHash: parentHead ?? baseBranchHead ?? baseCommitResolved,
+    };
+  }
+
+  if (parentHead && isCommitAncestor(repoRoot, worktreeHead, parentHead)) {
+    return {
+      repoRoot,
+      worktreeExists,
+      branchExists: hasBranch,
+      worktreeDirty: false,
+      inProgressOperation: null,
+      alreadyMerged: true,
+      noChanges: false,
+      worktreeMissingAndBranchGone: false,
+      reason: "merged_into_parent",
+      targetBranch: parentBranch ?? options.baseBranch ?? null,
+      commitHash: parentHead,
+    };
+  }
+
+  if (baseBranchHead && isCommitAncestor(repoRoot, worktreeHead, baseBranchHead)) {
+    return {
+      repoRoot,
+      worktreeExists,
+      branchExists: hasBranch,
+      worktreeDirty: false,
+      inProgressOperation: null,
+      alreadyMerged: true,
+      noChanges: false,
+      worktreeMissingAndBranchGone: false,
+      reason: "merged_into_base",
+      targetBranch: options.baseBranch ?? null,
+      commitHash: baseBranchHead,
+    };
+  }
+
+  return {
+    repoRoot,
+    worktreeExists,
+    branchExists: hasBranch,
+    worktreeDirty: false,
+    inProgressOperation: null,
+    alreadyMerged: false,
+    noChanges: false,
+    worktreeMissingAndBranchGone: false,
+    reason: null,
+    targetBranch: parentBranch ?? options.baseBranch ?? null,
+    commitHash: parentHead,
+  };
+}
+
 function getDefaultRemote(dir: string): string | null {
   const res = runGit(dir, ["remote"]);
   if (!res.ok || !res.stdout.trim()) return null;
@@ -561,50 +769,107 @@ export function landTaskWorktree(options: LandTaskWorktreeOptions): LandTaskResu
     };
   }
 
-  if (!fs.existsSync(worktreePath)) {
-    return {
-      ok: false,
-      mode,
-      action: "error",
-      message: `Worktree が見つかりません: ${worktreePath}`,
-    };
-  }
+  const worktreeExists = Boolean(worktreePath && fs.existsSync(worktreePath));
 
-  // Ensure worktree is not already stuck in a git operation
-  const wtOp = isRepoInProgressOperation(worktreePath);
-  if (wtOp) {
-    return {
-      ok: false,
-      mode,
-      action: "error",
-      message: `Worktree が ${wtOp} の途中状態です。先に解決または中断してください。`,
-    };
-  }
-
-  // 1. Cleanly stage & commit any uncommitted work inside the task worktree
-  const commitStep = commitWorktreeChangesIfDirty(worktreePath, taskTitle);
-  if (!commitStep.ok) {
-    return {
-      ok: false,
-      mode,
-      action: "error",
-      message: `Worktree の変更コミットに失敗しました: ${commitStep.error}`,
-    };
-  }
-
-  // 2. Per-Task PR mode: never touch parent repo; push branch & optionally open PR
-  if (mode === "per-task-pr") {
-    const aheadOfBase = baseCommit ? countCommitsAhead(worktreePath, baseCommit) : 1;
-    if (aheadOfBase === 0) {
+  // 1. If worktree exists, ensure it's not stuck mid-operation and stage/commit any uncommitted changes
+  if (worktreeExists) {
+    const wtOp = isRepoInProgressOperation(worktreePath);
+    if (wtOp) {
       return {
-        ok: true,
+        ok: false,
         mode,
-        action: "noop",
-        targetBranch: worktreeBranch,
-        commitHash: getHeadCommit(worktreePath),
-        message: "コミット差分がないため Push をスキップしました。",
+        action: "error",
+        message: `Worktree が ${wtOp} の途中状態です。先に解決または中断してください。`,
       };
     }
+
+    const commitStep = commitWorktreeChangesIfDirty(worktreePath, taskTitle);
+    if (!commitStep.ok) {
+      return {
+        ok: false,
+        mode,
+        action: "error",
+        message: `Worktree の変更コミットに失敗しました: ${commitStep.error}`,
+      };
+    }
+  }
+
+  // 2. Reconcile already-merged / no-diff / already-removed worktrees BEFORE touching
+  //    or gating on parent repo dirtiness or remote push.
+  const landEval = evaluateWorktreeLandState({
+    parentPath: repoRoot,
+    worktreePath,
+    worktreeBranch,
+    baseBranch,
+    baseCommit,
+  });
+
+  if (landEval.alreadyMerged) {
+    removeTaskWorktree({
+      parentPath: repoRoot,
+      worktreePath,
+      worktreeBranch,
+      deleteBranch: landEval.branchExists,
+    });
+    return {
+      ok: true,
+      mode,
+      action: "landed",
+      targetBranch: landEval.targetBranch,
+      commitHash: landEval.commitHash,
+      message: landEval.targetBranch
+        ? `${worktreeBranch} は既に ${landEval.targetBranch} にマージ済みのため Land 完了として Worktree をクリーンアップしました。`
+        : "既に親ブランチへマージ済みのため Land 完了として Worktree をクリーンアップしました。",
+    };
+  }
+
+  if (landEval.noChanges) {
+    removeTaskWorktree({
+      parentPath: repoRoot,
+      worktreePath,
+      worktreeBranch,
+      deleteBranch: landEval.branchExists,
+    });
+    return {
+      ok: true,
+      mode,
+      action: "noop",
+      targetBranch: landEval.targetBranch,
+      commitHash: landEval.commitHash,
+      message: "取り込む新しい変更がありませんでした。Worktree をクリーンアップしました。",
+    };
+  }
+
+  if (landEval.worktreeMissingAndBranchGone) {
+    removeTaskWorktree({
+      parentPath: repoRoot,
+      worktreePath,
+      worktreeBranch,
+      deleteBranch: false,
+    });
+    return {
+      ok: true,
+      mode,
+      action: "noop",
+      targetBranch: landEval.targetBranch,
+      commitHash: landEval.commitHash,
+      message: "Worktree と一時ブランチはすでに存在しないため、Land 済みとして状態を同期しました。",
+    };
+  }
+
+  if (!worktreeExists) {
+    return {
+      ok: false,
+      mode,
+      action: "error",
+      message: worktreeBranch
+        ? `Worktree が見つかりません（ブランチ ${worktreeBranch} に未マージのコミットが残っています）: ${worktreePath}`
+        : `Worktree が見つかりません: ${worktreePath}`,
+    };
+  }
+
+  // 3. Per-Task PR mode: never touch parent repo; push branch & optionally open PR
+  if (mode === "per-task-pr") {
 
     const remote = getDefaultRemote(worktreePath) ?? getDefaultRemote(repoRoot);
     if (!remote) {

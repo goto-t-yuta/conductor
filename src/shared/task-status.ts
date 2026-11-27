@@ -143,6 +143,7 @@ export function validateManualTaskStatusTransition(params: {
   worktreePath?: string | null;
   worktreeBranch?: string | null;
   landStatus?: TaskLandStatus;
+  force?: boolean;
 }): TaskStatusTransitionValidation {
   const {
     currentStatus,
@@ -151,19 +152,19 @@ export function validateManualTaskStatusTransition(params: {
     worktreePath,
     worktreeBranch,
     landStatus,
+    force = false,
   } = params;
   if (nextStatus === "done") {
-    const blockedReason = getMarkTaskDoneBlockedReason({
-      status: currentStatus,
-      hasActiveWorker,
-      worktreePath,
-      worktreeBranch,
-      landStatus,
-    });
-    if (blockedReason) {
+    if (currentStatus === "running" || hasActiveWorker) {
       return {
         ok: false,
-        error: blockedReason,
+        error: RUNNING_TASK_DONE_BLOCKED_REASON,
+      };
+    }
+    if (!force && requiresLandBeforeDone({ worktreePath, worktreeBranch, landStatus })) {
+      return {
+        ok: false,
+        error: UNLANDED_TASK_DONE_BLOCKED_REASON,
       };
     }
   }

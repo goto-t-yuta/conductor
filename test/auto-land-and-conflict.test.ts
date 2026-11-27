@@ -924,4 +924,89 @@ describe("Auto-Land on worker completion & AI conflict self-resolution", () => {
     expect(prompt).toContain("Output Language (REQUIRED)");
     expect(prompt).toContain("clear English");
   });
+
+  it("auto-marks task as landed when worktree has no diff (worker modified parent directly) or branch is already merged, even with dirty parent or autoLandOnComplete=false", async () => {
+    const repo = initGitRepo();
+    const storeDir = makeTempDir("conductor-store-reconcile-");
+    const store = new StateStore(storeDir);
+
+    const agyRuns: Array<{ callbacks: CliTurnCallbacks }> = [];
+    const setupCtrl = new ConductorController({
+      store,
+      browser: makeFakeBrowser(),
+      onSnapshot: () => {},
+    });
+    const project = setupCtrl.registerProject(repo, "reconcile-repo")!;
+
+    const taskParentDirect = makeTaskFixture(project, {
+      id: "task-parent-direct",
+      taskNumber: 1,
+      title: "Direct parent edit",
+      provider: "agy",
+      status: "queued",
+    });
+    const taskAlreadyMerged = makeTaskFixture(project, {
+      id: "task-already-merged",
+      taskNumber: 2,
+      title: "Already merged manual off",
+      provider: "agy",
+      status: "queued",
+    });
+    store.save({ ...store.load(), tasks: [taskParentDirect, taskAlreadyMerged] });
+
+    const ctrl = new ConductorController({
+      store,
+      browser: makeFakeBrowser(),
+      onSnapshot: () => {},
+      cliWorkerRunner: {
+        runAgyTurn: (_opts, callbacks): RunningCliTurn => {
+          agyRuns.push({ callbacks });
+          return { cancel: () => {} };
+        },
+      },
+    });
+
+    // Task 1: Worker writes directly to parent repo (leaving parent dirty!) while worktree stays untouched
+    const prov1 = ctrl.provisionWorktreeForTask(taskParentDirect.id, project);
+    expect(prov1.created).toBe(true);
+    fs.writeFileSync(path.join(repo, "parent-direct-file.txt"), "edited in parent\n", "utf8");
+
+    await ctrl.sendToTaskWorker(taskParentDirect.id, "Edit parent directly");
+    agyRuns[0]!.callbacks.onComplete?.({ ok: true, finalText: "Edited parent repo directly." });
+
+    await waitFor(
+      () => ctrl.getSnapshot().tasks.find((t) => t.id === taskParentDirect.id)?.landStatus === "landed",
+    );
+    const after1 = ctrl.getSnapshot().tasks.find((t) => t.id === taskParentDirect.id)!;
+    expect(after1.status).toBe("needs_review");
+    expect(after1.landStatus).toBe("landed");
+    expect(after1.worktreePath).toBeNull();
+    expect(after1.worktreeBranch).toBeNull();
+    expect(fs.existsSync(prov1.worktreePath!)).toBe(false);
+    // Done succeeds without getting stuck!
+    expect(ctrl.updateTaskStatus(taskParentDirect.id, "done")).toEqual({ ok: true });
+
+    // Clean parent file for Task 2 merge
+    fs.rmSync(path.join(repo, "parent-direct-file.txt"));
+
+    // Task 2: autoLandOnComplete = false, worker commits in worktree and merges into main before completing
+    ctrl.setAutoLandOnComplete(false);
+    const prov2 = ctrl.provisionWorktreeForTask(taskAlreadyMerged.id, project);
+    expect(prov2.created).toBe(true);
+    fs.writeFileSync(path.join(prov2.worktreePath!, "merged-in-turn.ts"), "export const x = 42;\n");
+    git(prov2.worktreePath!, ["add", "merged-in-turn.ts"]);
+    git(prov2.worktreePath!, ["commit", "-m", "Add merged-in-turn.ts"]);
+    git(repo, ["merge", "--ff-only", prov2.worktreeBranch!]);
+
+    await ctrl.sendToTaskWorker(taskAlreadyMerged.id, "Commit and merge");
+    agyRuns[1]!.callbacks.onComplete?.({ ok: true, finalText: "Merged to main." });
+
+    const after2 = ctrl.getSnapshot().tasks.find((t) => t.id === taskAlreadyMerged.id)!;
+    expect(after2.status).toBe("needs_review");
+    expect(after2.landStatus).toBe("landed");
+    expect(after2.worktreePath).toBeNull();
+    expect(after2.worktreeBranch).toBeNull();
+    expect(fs.existsSync(prov2.worktreePath!)).toBe(false);
+    expect(ctrl.updateTaskStatus(taskAlreadyMerged.id, "done")).toEqual({ ok: true });
+  });
 });

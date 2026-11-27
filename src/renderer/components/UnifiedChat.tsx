@@ -1866,12 +1866,14 @@ export const TaskEventCard: React.FC<TaskEventCardProps> = ({
       ? getLocalizedMarkTaskDoneBlockedReason(resolvedTask, locale)
       : null;
   const isQuickDoneBlocked = Boolean(doneBlockedReason);
-  const hasActiveWorktree = Boolean(resolvedTask?.worktreePath && resolvedTask?.worktreeBranch);
+  const hasActiveWorktree = Boolean(
+    resolvedTask?.worktreePath?.trim() || resolvedTask?.worktreeBranch?.trim(),
+  );
   const isLanding = resolvedTask?.landStatus === "landing";
   const canQuickLand = Boolean(
     resolvedTask &&
       onLandTask &&
-      hasActiveWorktree &&
+      (hasActiveWorktree || needsLand) &&
       !isRunning &&
       resolvedTask.landStatus !== "landed",
   );

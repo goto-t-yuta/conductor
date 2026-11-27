@@ -790,6 +790,62 @@ describe("Unlanded worktree Done guard across TaskSidebar, TaskInspectorModal, a
     expect(onUpdateStatus).toHaveBeenCalledWith("done");
   });
 
+  it("renders Re-check Land and Force Done recovery actions in TaskInspectorModal for unlanded/error tasks (even if worktreePath is missing)", () => {
+    const onSyncLandStatus = vi.fn();
+    const onForceMarkDone = vi.fn().mockReturnValue({ ok: true });
+    const stuckErrorTask = makeTask({
+      id: "wt-ui-stuck-error",
+      taskNumber: 35,
+      title: "Stuck error task",
+      status: "needs_review",
+      worktreePath: null,
+      worktreeBranch: null,
+      landStatus: "error",
+      landError: "親リポジトリに未コミットの変更があります",
+    });
+
+    const html = renderToStaticMarkup(
+      <TaskInspectorModal
+        task={stuckErrorTask}
+        project={SAMPLE_PROJECTS[0]}
+        projectColorHex="#3B82F6"
+        onClose={vi.fn()}
+        onUpdateStatus={vi.fn()}
+        onOpenPreviewUrl={vi.fn()}
+        onMentionInChat={vi.fn()}
+        onStopWorker={vi.fn()}
+        onLandTask={vi.fn()}
+        onSyncLandStatus={onSyncLandStatus}
+        onForceMarkDone={onForceMarkDone}
+      />,
+    );
+
+    expect(html).toContain('data-testid="worktree-panel"');
+    expect(html).toContain('data-testid="inspector-recheck-land-btn"');
+    expect(html).toContain('data-testid="inspector-force-done-btn"');
+    expect(html).toContain("状態を再確認");
+    expect(html).toContain("強制完了");
+
+    // Once landed, recovery buttons are hidden
+    const landedHtml = renderToStaticMarkup(
+      <TaskInspectorModal
+        task={{ ...unlandedTask, landStatus: "landed", worktreePath: null, worktreeBranch: null, landedBranch: "main" }}
+        project={SAMPLE_PROJECTS[0]}
+        projectColorHex="#3B82F6"
+        onClose={vi.fn()}
+        onUpdateStatus={vi.fn()}
+        onOpenPreviewUrl={vi.fn()}
+        onMentionInChat={vi.fn()}
+        onStopWorker={vi.fn()}
+        onLandTask={vi.fn()}
+        onSyncLandStatus={onSyncLandStatus}
+        onForceMarkDone={onForceMarkDone}
+      />,
+    );
+    expect(landedHtml).not.toContain('data-testid="inspector-recheck-land-btn"');
+    expect(landedHtml).not.toContain('data-testid="inspector-force-done-btn"');
+  });
+
   it("blocks Done and surfaces 未Land + Land button on UnifiedChat TaskEventCard for unlanded worktree tasks", () => {
     const onUpdateTaskStatus = vi.fn();
     const onLandTask = vi.fn();
