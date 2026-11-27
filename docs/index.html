@@ -466,84 +466,9 @@
             </div>
           </div>
 
-          <!-- Feature Row 3: Tailscale Mobile + Usage / i18n / Voice -->
-          <div class="feature-bento feature-bento-bottom">
-            <!-- Feature 4: Tailscale Remote Access & Android App -->
-            <article class="card card-mobile" id="mobile">
-              <div class="card-badge badge-violet">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
-                  <line x1="12" y1="18" x2="12.01" y2="18"></line>
-                </svg>
-                <span data-i18n="f4.badge">Tailscale + Android Companion</span>
-              </div>
-              <h3 class="card-title" data-i18n="f4.title">
-                Tailscale 経由リモートアクセス＆QR コードで即セットアップできる Android アプリ
-              </h3>
-              <p class="card-desc" data-i18n="f4.desc">
-                デスクを離れても手元からオーケストレーション。同じ Tailscale tailnet 上の Mac に安全に接続し、チャット送信やタスク監視・承認をリアルタイムで行えます。
-              </p>
-
-              <ul class="feature-list">
-                <li data-i18n="f4.bullet1"><strong>QR コードでワンタップ連携:</strong> デスクトップ設定画面の QR をスキャンするだけで URL と Bearer Token を自動保存（Google Play サービス不要）</li>
-                <li data-i18n="f4.bullet2"><strong>SSE リアルタイム同期 &amp; 操作:</strong> チャット応答・<code>@</code> メンション・Running / Needs Review 確認とワンタップ Stop / Land / Done</li>
-                <li data-i18n="f4.bullet3"><strong>モバイル Web UI フォールバック:</strong> アプリなしでも Android Chrome から <code>http://100.x.x.x:4789</code> を開くだけですぐ利用可能</li>
-              </ul>
-
-              <!-- Stylized QR -> Tailscale -> Android Visual -->
-              <div class="mobile-diagram" aria-hidden="true">
-                <div class="diagram-qr-box">
-                  <div class="qr-label">Desktop QR</div>
-                  <svg class="qr-svg" viewBox="0 0 64 64" width="56" height="56">
-                    <rect x="4" y="4" width="18" height="18" rx="2.5" fill="none" stroke="currentColor" stroke-width="3.5" />
-                    <rect x="9.5" y="9.5" width="7" height="7" rx="1" fill="currentColor" />
-                    <rect x="42" y="4" width="18" height="18" rx="2.5" fill="none" stroke="currentColor" stroke-width="3.5" />
-                    <rect x="47.5" y="9.5" width="7" height="7" rx="1" fill="currentColor" />
-                    <rect x="4" y="42" width="18" height="18" rx="2.5" fill="none" stroke="currentColor" stroke-width="3.5" />
-                    <rect x="9.5" y="47.5" width="7" height="7" rx="1" fill="currentColor" />
-                    <rect x="28" y="6" width="5" height="5" rx="1" fill="currentColor" />
-                    <rect x="28" y="16" width="5" height="5" rx="1" fill="currentColor" />
-                    <rect x="28" y="28" width="8" height="8" rx="1.5" fill="#6366f1" />
-                    <rect x="10" y="28" width="5" height="5" rx="1" fill="currentColor" />
-                    <rect x="19" y="28" width="5" height="5" rx="1" fill="currentColor" />
-                    <rect x="42" y="28" width="5" height="5" rx="1" fill="currentColor" />
-                    <rect x="52" y="28" width="8" height="5" rx="1" fill="currentColor" />
-                    <rect x="28" y="42" width="6" height="6" rx="1" fill="currentColor" />
-                    <rect x="40" y="42" width="6" height="6" rx="1" fill="currentColor" />
-                    <rect x="52" y="42" width="8" height="8" rx="1.5" fill="#38bdf8" />
-                    <rect x="28" y="53" width="12" height="5" rx="1" fill="currentColor" />
-                    <rect x="44" y="53" width="6" height="5" rx="1" fill="currentColor" />
-                  </svg>
-                  <span class="qr-uri">conductor://connect</span>
-                </div>
-
-                <div class="diagram-bridge">
-                  <span class="bridge-line"></span>
-                  <span class="bridge-tag">Tailscale</span>
-                  <span class="bridge-line"></span>
-                </div>
-
-                <div class="diagram-phone">
-                  <div class="phone-top">
-                    <span>Conductor Mobile</span>
-                    <span class="sse-dot">SSE Live</span>
-                  </div>
-                  <div class="phone-card">
-                    <div class="phone-card-head">
-                      <span class="mini-pill pill-indigo">T3</span>
-                      <span class="phone-task-name">Analytics UI</span>
-                    </div>
-                    <div class="phone-card-actions">
-                      <span class="phone-btn phone-btn-land">Land</span>
-                      <span class="phone-btn phone-btn-done">Done ✓</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </article>
-
-            <!-- Feature 5: Usage, i18n & Voice -->
-            <article class="card card-usage">
+          <!-- Feature Row 3: Usage, i18n & Voice (Balanced Full-Width Spotlight) -->
+          <div class="spotlight-card spotlight-usage">
+            <div class="spotlight-copy">
               <div class="card-badge badge-amber">
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M3 3v18h18"></path>
@@ -553,52 +478,363 @@
                 </svg>
                 <span data-i18n="f5.badge">Usage • i18n • Voice</span>
               </div>
-              <h3 class="card-title" data-i18n="f5.title">
+              <h3 class="spotlight-title" data-i18n="f5.title">
                 トークン使用量・推定利用料（Usage）＆日英 i18n・音声入出力
               </h3>
               <p class="card-desc" data-i18n="f5.desc">
                 マルチプロバイダー運用に欠かせないコスト可視化、自然な日本語／英語 UI と出力制御、さらにハンズフリーな音声入出力まで標準搭載しています。
               </p>
 
-              <ul class="feature-list">
+              <ul class="feature-list feature-list-compact">
                 <li data-i18n="f5.bullet1"><strong>トークン使用量・推定利用料（Usage）:</strong> プロバイダー・モデルごとの入力／出力トークンと推定コストを一覧で把握</li>
                 <li data-i18n="f5.bullet2"><strong>日英 i18n 完全対応:</strong> UI 表示と AI 出力言語を <code>auto</code> / <code>ja</code> / <code>en</code> で自在に切替</li>
                 <li data-i18n="f5.bullet3"><strong>音声入出力 &amp; ローカルセキュリティ:</strong> マイク音声入力・読み上げ対応。テレメトリゼロ、MCP は <code>127.0.0.1</code> 限定バインド</li>
               </ul>
+            </div>
 
-              <!-- Stylized Usage + Voice + i18n Mini Dashboard -->
-              <div class="usage-widget" aria-hidden="true">
-                <div class="usage-header">
-                  <span class="usage-label">Session Usage</span>
-                  <span class="usage-cost">$1.42 est.</span>
+            <!-- Stylized Usage + Voice + i18n Mini Dashboard -->
+            <div class="usage-widget usage-widget-wide" aria-hidden="true">
+              <div class="usage-header">
+                <span class="usage-label">Session Usage</span>
+                <span class="usage-cost">$1.42 est.</span>
+              </div>
+              <div class="usage-bars">
+                <div class="usage-bar-row">
+                  <span>Codex</span>
+                  <div class="bar-track"><div class="bar-fill fill-indigo" style="width: 68%"></div></div>
+                  <span class="bar-val">412k</span>
                 </div>
-                <div class="usage-bars">
-                  <div class="usage-bar-row">
-                    <span>Codex</span>
-                    <div class="bar-track"><div class="bar-fill fill-indigo" style="width: 68%"></div></div>
-                    <span class="bar-val">412k</span>
-                  </div>
-                  <div class="usage-bar-row">
-                    <span>AGY</span>
-                    <div class="bar-track"><div class="bar-fill fill-cyan" style="width: 48%"></div></div>
-                    <span class="bar-val">286k</span>
-                  </div>
-                  <div class="usage-bar-row">
-                    <span>Claude</span>
-                    <div class="bar-track"><div class="bar-fill fill-violet" style="width: 34%"></div></div>
-                    <span class="bar-val">194k</span>
-                  </div>
+                <div class="usage-bar-row">
+                  <span>AGY</span>
+                  <div class="bar-track"><div class="bar-fill fill-cyan" style="width: 48%"></div></div>
+                  <span class="bar-val">286k</span>
                 </div>
-                <div class="usage-footer">
-                  <span class="mini-tag">JA / EN i18n</span>
-                  <span class="mini-tag voice-tag">
-                    <span class="voice-eq"><span></span><span></span><span></span></span>
-                    Voice I/O
-                  </span>
-                  <span class="mini-tag">127.0.0.1 MCP</span>
+                <div class="usage-bar-row">
+                  <span>Claude</span>
+                  <div class="bar-track"><div class="bar-fill fill-violet" style="width: 34%"></div></div>
+                  <span class="bar-val">194k</span>
                 </div>
               </div>
-            </article>
+              <div class="usage-footer">
+                <span class="mini-tag">JA / EN i18n</span>
+                <span class="mini-tag voice-tag">
+                  <span class="voice-eq"><span></span><span></span><span></span></span>
+                  Voice I/O
+                </span>
+                <span class="mini-tag">127.0.0.1 MCP</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Android Companion Showcase Section -->
+      <section class="section mobile-section" id="mobile">
+        <div class="container">
+          <div class="section-header">
+            <span class="section-eyebrow section-eyebrow-violet" data-i18n="mobile.eyebrow">Android Companion</span>
+            <h2 class="section-title" data-i18n="mobile.title">
+              デスクを離れても、手元から並列開発を指揮する。
+            </h2>
+            <p class="section-subtitle" data-i18n="mobile.subtitle">
+              同じ Tailscale tailnet 上の Mac に安全接続。リアルタイムチャット・画像添付と閲覧・ワンタップタスク完了・PC リモートコンソール・単体 APK アップデートまで、ネイティブ Android アプリに凝縮しました。
+            </p>
+          </div>
+
+          <!-- Interactive Screen Switcher Tabs -->
+          <div class="showcase-tabs mobile-showcase-tabs" role="tablist" aria-label="Android companion screens">
+            <button
+              type="button"
+              class="showcase-tab mobile-tab is-active"
+              role="tab"
+              aria-selected="true"
+              data-mobile-shot="chat"
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+              <span data-i18n="mobile.tabChat">チャット &amp; 画像添付</span>
+            </button>
+            <button
+              type="button"
+              class="showcase-tab mobile-tab"
+              role="tab"
+              aria-selected="false"
+              data-mobile-shot="tasks"
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 11l3 3L22 4" />
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+              </svg>
+              <span data-i18n="mobile.tabTasks">タスク一覧 &amp; 完了</span>
+            </button>
+            <button
+              type="button"
+              class="showcase-tab mobile-tab"
+              role="tab"
+              aria-selected="false"
+              data-mobile-shot="terminal"
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="4 17 10 11 4 5" />
+                <line x1="12" y1="19" x2="20" y2="19" />
+              </svg>
+              <span data-i18n="mobile.tabTerminal">リモートコンソール</span>
+            </button>
+            <button
+              type="button"
+              class="showcase-tab mobile-tab"
+              role="tab"
+              aria-selected="false"
+              data-mobile-shot="settings"
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              <span data-i18n="mobile.tabSettings">Tailscale &amp; 単体更新</span>
+            </button>
+          </div>
+
+          <!-- Main Android Showcase Card -->
+          <div class="mobile-showcase-card">
+            <!-- Left: Interactive 3-Phone Stage -->
+            <div class="mobile-device-stage">
+              <div class="mobile-stage-glow" aria-hidden="true"></div>
+
+              <div class="phone-gallery">
+                <!-- Left Peek Phone -->
+                <button
+                  type="button"
+                  class="phone-peek phone-peek-left"
+                  id="mobile-peek-left"
+                  data-mobile-switch="settings"
+                  aria-label="Preview previous Android screen"
+                >
+                  <div class="phone-bezel phone-bezel-sm">
+                    <div class="phone-camera-dot" aria-hidden="true"></div>
+                    <img
+                      id="mobile-peek-left-img"
+                      src="./images/android-settings.png"
+                      alt="Android Settings preview"
+                      loading="eager"
+                    />
+                  </div>
+                </button>
+
+                <!-- Center Hero Phone -->
+                <div class="phone-hero-wrap">
+                  <div class="phone-bezel phone-bezel-hero">
+                    <div class="phone-side-btn phone-btn-vol" aria-hidden="true"></div>
+                    <div class="phone-side-btn phone-btn-pwr" aria-hidden="true"></div>
+                    <div class="phone-camera-dot" aria-hidden="true"></div>
+                    <button
+                      type="button"
+                      class="phone-screen-trigger"
+                      id="mobile-hero-trigger"
+                      aria-label="Zoom Android screenshot"
+                    >
+                      <img
+                        id="mobile-showcase-img"
+                        src="./images/android-chat.png"
+                        alt="Conductor Android Companion Chat screen with inline report image, image attachment, and @ mention chips"
+                        loading="eager"
+                      />
+                      <span class="zoom-badge phone-zoom-badge" data-i18n="common.clickZoom">クリックで拡大</span>
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Right Peek Phone -->
+                <button
+                  type="button"
+                  class="phone-peek phone-peek-right"
+                  id="mobile-peek-right"
+                  data-mobile-switch="tasks"
+                  aria-label="Preview next Android screen"
+                >
+                  <div class="phone-bezel phone-bezel-sm">
+                    <div class="phone-camera-dot" aria-hidden="true"></div>
+                    <img
+                      id="mobile-peek-right-img"
+                      src="./images/android-tasks.png"
+                      alt="Android Tasks preview"
+                      loading="eager"
+                    />
+                  </div>
+                </button>
+              </div>
+
+              <!-- Quick Thumbnail Dots & Active Caption -->
+              <div class="mobile-stage-footer">
+                <div class="mobile-screen-meta">
+                  <span class="mobile-screen-tag" id="mobile-screen-tag">Chat</span>
+                  <span class="mobile-screen-caption" id="mobile-screen-caption" data-i18n="mobile.captionChat">
+                    SSE ライブ同期チャット。報告内の成果スクショ確認、端末画像の添付送信、@ メンション補完に対応。
+                  </span>
+                  <button
+                    type="button"
+                    class="window-zoom-btn mobile-zoom-btn"
+                    id="mobile-zoom-btn"
+                    data-i18n-title="showcase.zoomHint"
+                    title="拡大表示"
+                    aria-label="Zoom Android screenshot"
+                  >
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right: Android Companion Capability Grid & Connection Flow -->
+            <div class="mobile-details-col">
+              <div class="mobile-details-head">
+                <div class="card-badge badge-violet">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+                    <line x1="12" y1="18" x2="12.01" y2="18"></line>
+                  </svg>
+                  <span data-i18n="mobile.badge">Kotlin + Jetpack Compose • Google Play 不要</span>
+                </div>
+                <h3 class="mobile-details-title" data-i18n="mobile.detailsTitle">
+                  スマホ1台で、指示・確認・ターミナル操作・更新まで完結
+                </h3>
+                <p class="card-desc mobile-details-desc" data-i18n="mobile.detailsDesc">
+                  デスクトップ版 Conductor と同じデザイン言語・ダーク／ライトテーマを採用。外出先やソファからでも、Mac 上の並列エージェントをリアルタイムに制御できます。
+                </p>
+              </div>
+
+              <div class="mobile-feature-grid">
+                <button type="button" class="mf-card" data-mobile-shot-card="chat">
+                  <div class="mf-icon mf-icon-indigo" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                    </svg>
+                  </div>
+                  <div class="mf-body">
+                    <h4 data-i18n="mobile.f1Title">SSE チャット &amp; @ メンション補完</h4>
+                    <p data-i18n="mobile.f1Desc">リアルタイム応答ストリームに加え、<code>@</code> 入力でプロジェクト・タスク候補を即座に補完。</p>
+                  </div>
+                </button>
+
+                <button type="button" class="mf-card" data-mobile-shot-card="chat">
+                  <div class="mf-icon mf-icon-cyan" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="3" width="18" height="18" rx="2" />
+                      <circle cx="8.5" cy="8.5" r="1.5" />
+                      <polyline points="21 15 16 10 5 21" />
+                    </svg>
+                  </div>
+                  <div class="mf-body">
+                    <h4 data-i18n="mobile.f2Title">画像添付 &amp; 報告内画像ビューア</h4>
+                    <p data-i18n="mobile.f2Desc">スマホから画像を添付して指示を送信。ワーカー完了報告に含まれる UI スクショもその場で拡大確認。</p>
+                  </div>
+                </button>
+
+                <button type="button" class="mf-card" data-mobile-shot-card="tasks">
+                  <div class="mf-icon mf-icon-emerald" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M9 11l3 3L22 4" />
+                      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                    </svg>
+                  </div>
+                  <div class="mf-body">
+                    <h4 data-i18n="mobile.f3Title">タスク確認 &amp; ワンタップ Land / Done</h4>
+                    <p data-i18n="mobile.f3Desc">実行中・確認待ちをプロジェクト別に整理。一覧から直接 Land / Done でき、詳細完了時は自動クローズ。</p>
+                  </div>
+                </button>
+
+                <button type="button" class="mf-card" data-mobile-shot-card="terminal">
+                  <div class="mf-icon mf-icon-amber" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="4 17 10 11 4 5" />
+                      <line x1="12" y1="19" x2="20" y2="19" />
+                    </svg>
+                  </div>
+                  <div class="mf-body">
+                    <h4 data-i18n="mobile.f4Title">PC リモートコンソール（PTY）</h4>
+                    <p data-i18n="mobile.f4Desc">プロジェクトごとの作業ディレクトリ切替・ANSI カラー出力・<code>Ctrl+C</code> / <code>Tab</code> 補助キーバーを搭載。</p>
+                  </div>
+                </button>
+
+                <button type="button" class="mf-card" data-mobile-shot-card="settings">
+                  <div class="mf-icon mf-icon-violet" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="3" width="7" height="7" />
+                      <rect x="14" y="3" width="7" height="7" />
+                      <rect x="3" y="14" width="7" height="7" />
+                      <path d="M14 14h3v3h-3zM20 14v3h-3M14 20h6" />
+                    </svg>
+                  </div>
+                  <div class="mf-body">
+                    <h4 data-i18n="mobile.f5Title">Tailscale 経由接続 &amp; QR 連携</h4>
+                    <p data-i18n="mobile.f5Desc">デスクトップの QR をスキャンするだけで接続完了。Chrome で <code>100.x.x.x:4789</code> を開く Web UI にも対応。</p>
+                  </div>
+                </button>
+
+                <button type="button" class="mf-card" data-mobile-shot-card="settings">
+                  <div class="mf-icon mf-icon-rose" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                  </div>
+                  <div class="mf-body">
+                    <h4 data-i18n="mobile.f6Title">単体アップデート（GitHub Releases）</h4>
+                    <p data-i18n="mobile.f6Desc">アプリ内で最新 APK を自動検知し、ワンタップでダウンロード＆上書き更新。ストア審査待ち不要。</p>
+                  </div>
+                </button>
+              </div>
+
+              <!-- Compact Tailscale + QR Flow & CTA Strip -->
+              <div class="mobile-connect-bar">
+                <div class="connect-flow" aria-hidden="true">
+                  <span class="cf-node">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="3" y="3" width="7" height="7" />
+                      <rect x="14" y="3" width="7" height="7" />
+                      <rect x="3" y="14" width="7" height="7" />
+                      <path d="M14 14h3v3h-3zM20 14v3h-3M14 20h6" />
+                    </svg>
+                    <span>Desktop QR</span>
+                  </span>
+                  <span class="cf-arrow"></span>
+                  <span class="bridge-tag">Tailscale</span>
+                  <span class="cf-arrow"></span>
+                  <span class="cf-node cf-node-live">
+                    <span class="cf-dot"></span>
+                    <span>Android · Live SSE</span>
+                  </span>
+                </div>
+
+                <div class="mobile-cta-row">
+                  <a
+                    href="https://github.com/goto-t-yuta/conductor/releases/latest"
+                    class="btn btn-primary btn-sm"
+                    id="mobile-dl-apk"
+                  >
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
+                      <path d="M17.523 15.341a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5Zm-11.046 0a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5ZM17.9 10.67l1.62-2.8a.45.45 0 0 0-.16-.62.45.45 0 0 0-.62.17l-1.64 2.84a10.48 10.48 0 0 0-5.1-1.26c-1.85 0-3.58.46-5.1 1.26L5.26 7.42a.45.45 0 0 0-.62-.17.45.45 0 0 0-.16.62l1.62 2.8C3.53 12.1 1.85 14.74 1.5 17.85h21c-.35-3.11-2.03-5.75-4.6-7.18Z" />
+                    </svg>
+                    <span data-i18n="mobile.ctaApk">Android APK をダウンロード</span>
+                    <span class="dl-size" id="size-mobile-apk"></span>
+                  </a>
+                  <a
+                    href="https://github.com/goto-t-yuta/conductor/blob/main/mobile/android/README.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="btn btn-secondary btn-sm"
+                    data-i18n="mobile.ctaGuide"
+                  >
+                    Tailscale・QR 接続ガイド ↗
+                  </a>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
