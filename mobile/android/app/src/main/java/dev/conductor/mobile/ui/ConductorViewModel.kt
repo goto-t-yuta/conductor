@@ -43,6 +43,8 @@ import dev.conductor.mobile.model.TerminalConnectionState
 import dev.conductor.mobile.model.TerminalUiState
 import dev.conductor.mobile.model.ThemeMode
 import dev.conductor.mobile.ui.components.ConductorImageLoader
+import dev.conductor.mobile.ui.components.ConductorVideoPlaybackCoordinator
+import dev.conductor.mobile.ui.components.ConductorVideoPreviewCache
 import dev.conductor.mobile.ui.screens.TerminalAuxKey
 import dev.conductor.mobile.ui.screens.TerminalAuxKeyKind
 import kotlinx.coroutines.CancellationException
@@ -97,12 +99,14 @@ data class ConductorUiState(
 class ConductorViewModel(application: Application) : AndroidViewModel(application) {
     private val appContext = application.applicationContext
     private val store = ConnectionStore(appContext)
-    private val api = ConductorApiClient()
+    val api = ConductorApiClient()
     private val terminalWsClient = TerminalWebSocketClient()
     private val terminalOutputBuffer = TerminalOutputBuffer()
     private val imageProcessor = AndroidImageAttachmentProcessor(appContext)
     private val attachmentImageCache = AttachmentByteCache()
     val imageLoader = ConductorImageLoader(api)
+    val videoPreviewCache = ConductorVideoPreviewCache()
+    val videoPlaybackCoordinator = ConductorVideoPlaybackCoordinator()
 
     private val currentBuildInfo = CurrentBuildInfo(
         versionName = BuildConfig.VERSION_NAME,
@@ -340,6 +344,8 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         stopTerminalConnection(resetState = true)
         attachmentImageCache.clear()
         imageLoader.clear()
+        videoPlaybackCoordinator.pauseAllInline()
+        videoPreviewCache.clear()
         viewModelScope.launch {
             store.clear()
             _uiState.update {
@@ -1711,6 +1717,8 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         updateDownloadJob?.cancel()
         updateClient.close()
         imageLoader.clear()
+        videoPlaybackCoordinator.pauseAllInline()
+        videoPreviewCache.clear()
         api.close()
         super.onCleared()
     }

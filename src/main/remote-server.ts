@@ -13,6 +13,11 @@ import {
   type LocalImageErrorCode,
 } from "./image-viewer.js";
 import {
+  inspectLocalVideoFile,
+  parseHttpByteRange,
+  type LocalVideoErrorCode,
+} from "./media-viewer.js";
+import {
   RemoteTerminalService,
   type RemoteTerminalServiceOptions,
 } from "./remote-terminal.js";
@@ -1017,8 +1022,12 @@ export class RemoteBridgeServer {
 
   private applyCorsHeaders(res: http.ServerResponse): void {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, Range, If-None-Match, If-Range");
+    res.setHeader(
+      "Access-Control-Expose-Headers",
+      "Content-Range, Accept-Ranges, Content-Length, Content-Type, ETag",
+    );
   }
 
   private sendJson(
@@ -1051,6 +1060,30 @@ export class RemoteBridgeServer {
       "Cache-Control": "no-store",
     });
     res.end(rawBuf);
+  }
+
+  private computeMediaCookieValue(): string {
+    return crypto
+      .createHmac("sha256", this.token)
+      .update("conductor-remote-media-cookie-v1")
+      .digest("hex");
+  }
+
+  private hasValidMediaCookie(req: http.IncomingMessage): boolean {
+    const cookieHeader = req.headers.cookie;
+    if (typeof cookieHeader !== "string" || !cookieHeader.trim()) return false;
+    const expected = this.computeMediaCookieValue();
+    for (const part of cookieHeader.split(";")) {
+      const eqIdx = part.indexOf("=");
+      if (eqIdx <= 0) continue;
+      const name = part.slice(0, eqIdx).trim();
+      if (name !== "conductor_remote_media") continue;
+      const value = part.slice(eqIdx + 1).trim();
+      if (timingSafeTokenEquals(expected, value)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private isAuthorized(req: http.IncomingMessage, parsedUrl: URL, allowQueryToken: boolean): boolean {
@@ -1170,10 +1203,29 @@ export class RemoteBridgeServer {
       return;
     }
 
+    // Clearing the mobile web media cookie does not require an active token
+    if (method === "DELETE" && pathname === "/api/media/session") {
+      this.applyCorsHeaders(res);
+      res.setHeader(
+        "Set-Cookie",
+        "conductor_remote_media=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0",
+      );
+      this.sendJson(res, 200, { ok: true }, req);
+      return;
+    }
+
     // All other /api/* endpoints require authentication
     if (pathname.startsWith("/api/")) {
       const allowQueryToken = method === "GET" && pathname === "/api/events";
-      if (!this.isAuthorized(req, parsedUrl, allowQueryToken)) {
+      const allowMediaCookie =
+        (method === "GET" || method === "HEAD") &&
+        (pathname === "/api/media/image" ||
+          pathname === "/api/media/video" ||
+          /^\/api\/attachments\/[^/]+$/.test(pathname));
+      if (
+        !this.isAuthorized(req, parsedUrl, allowQueryToken) &&
+        !(allowMediaCookie && this.hasValidMediaCookie(req))
+      ) {
         this.sendJson(res, 401, { ok: false, error: "Unauthorized" });
         return;
       }
@@ -1211,7 +1263,7 @@ export class RemoteBridgeServer {
     }
 
     const attachmentMatch = /^\/api\/attachments\/([^/]+)$/.exec(pathname);
-    if (attachmentMatch && method === "GET") {
+    if (attachmentMatch && (method === "GET" || method === "HEAD")) {
       let attachmentId = "";
       try {
         attachmentId = decodeURIComponent(attachmentMatch[1]).trim();
@@ -1237,12 +1289,31 @@ export class RemoteBridgeServer {
         "Cache-Control": "private, max-age=3600",
         "X-Content-Type-Options": "nosniff",
       });
-      res.end(resolved.buffer);
+      if (method === "HEAD") {
+        res.end();
+      } else {
+        res.end(resolved.buffer);
+      }
+      return;
+    }
+
+    if (method === "POST" && pathname === "/api/media/session") {
+      this.applyCorsHeaders(res);
+      res.setHeader(
+        "Set-Cookie",
+        `conductor_remote_media=${this.computeMediaCookieValue()}; HttpOnly; SameSite=Strict; Path=/api`,
+      );
+      this.sendJson(res, 200, { ok: true }, req);
       return;
     }
 
     if ((method === "GET" || method === "HEAD") && pathname === "/api/media/image") {
       this.handleLocalImageMedia(method, parsedUrl, req, res);
+      return;
+    }
+
+    if ((method === "GET" || method === "HEAD") && pathname === "/api/media/video") {
+      this.handleLocalVideoMedia(method, parsedUrl, req, res);
       return;
     }
 
@@ -1667,7 +1738,7 @@ export class RemoteBridgeServer {
     this.sendJson(res, 404, { ok: false, error: "Not Found" });
   }
 
-  private mapImageErrorToHttpStatus(errorCode: LocalImageErrorCode): number {
+  private mapMediaErrorToHttpStatus(errorCode: LocalImageErrorCode | LocalVideoErrorCode): number {
     switch (errorCode) {
       case "invalid":
         return 400;
@@ -1699,7 +1770,7 @@ export class RemoteBridgeServer {
     if (!inspected.ok) {
       this.sendJson(
         res,
-        this.mapImageErrorToHttpStatus(inspected.errorCode),
+        this.mapMediaErrorToHttpStatus(inspected.errorCode),
         { ok: false, error: inspected.error },
         req,
       );
@@ -1738,6 +1809,124 @@ export class RemoteBridgeServer {
     stream.on("error", () => {
       if (!res.headersSent) {
         this.sendJson(res, 500, { ok: false, error: "Failed to stream image file" }, req);
+      } else {
+        res.destroy();
+      }
+    });
+    res.on("close", () => {
+      if (!stream.destroyed) {
+        stream.destroy();
+      }
+    });
+    stream.pipe(res);
+  }
+
+  private handleLocalVideoMedia(
+    method: string,
+    parsedUrl: URL,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const rawPath = parsedUrl.searchParams.get("path")?.trim() ?? "";
+    const rawBase = parsedUrl.searchParams.get("base")?.trim() || undefined;
+    if (!rawPath) {
+      this.sendJson(res, 400, { ok: false, error: "path query parameter is required" }, req);
+      return;
+    }
+
+    const inspected = inspectLocalVideoFile(rawPath, rawBase);
+    if (!inspected.ok) {
+      this.sendJson(
+        res,
+        this.mapMediaErrorToHttpStatus(inspected.errorCode),
+        { ok: false, error: inspected.error },
+        req,
+      );
+      return;
+    }
+
+    const fileSize = inspected.sizeBytes;
+    const etag = `"${fileSize}-${Math.trunc(inspected.mtimeMs)}"`;
+    this.applyCorsHeaders(res);
+
+    const commonHeaders: http.OutgoingHttpHeaders = {
+      "Content-Type": inspected.playbackContentType,
+      "Accept-Ranges": "bytes",
+      "Content-Disposition": "inline",
+      "Cache-Control": "private, max-age=300",
+      ETag: etag,
+      Vary: "Range",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+    };
+
+    const rawRangeHeader = typeof req.headers.range === "string" ? req.headers.range.trim() : "";
+    const rawIfRange = typeof req.headers["if-range"] === "string" ? req.headers["if-range"].trim() : "";
+    const ifRangeAllowsPartial = !rawIfRange || rawIfRange === etag;
+
+    if (!rawRangeHeader && req.headers["if-none-match"] === etag) {
+      res.writeHead(304, commonHeaders);
+      res.end();
+      return;
+    }
+
+    const parsedRange =
+      rawRangeHeader && ifRangeAllowsPartial
+        ? parseHttpByteRange(rawRangeHeader, fileSize)
+        : null;
+
+    if (parsedRange === "invalid") {
+      res.writeHead(416, {
+        ...commonHeaders,
+        "Content-Range": `bytes */${fileSize}`,
+        "Content-Length": 0,
+      });
+      res.end();
+      return;
+    }
+
+    if (parsedRange) {
+      const { start, end } = parsedRange;
+      const chunkSize = end - start + 1;
+      res.writeHead(206, {
+        ...commonHeaders,
+        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+        "Content-Length": chunkSize,
+      });
+      if (method === "HEAD") {
+        res.end();
+        return;
+      }
+      const stream = fs.createReadStream(inspected.realPath, { start, end });
+      stream.on("error", () => {
+        if (!res.headersSent) {
+          this.sendJson(res, 500, { ok: false, error: "Failed to stream video file" }, req);
+        } else {
+          res.destroy();
+        }
+      });
+      res.on("close", () => {
+        if (!stream.destroyed) {
+          stream.destroy();
+        }
+      });
+      stream.pipe(res);
+      return;
+    }
+
+    res.writeHead(200, {
+      ...commonHeaders,
+      "Content-Length": fileSize,
+    });
+    if (method === "HEAD" || fileSize === 0) {
+      res.end();
+      return;
+    }
+
+    const stream = fs.createReadStream(inspected.realPath);
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        this.sendJson(res, 500, { ok: false, error: "Failed to stream video file" }, req);
       } else {
         res.destroy();
       }
@@ -2220,6 +2409,73 @@ export function renderMobileFallbackHtml(): string {
       margin: 0; background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
       padding: 10px; font-size: 11.5px; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
     }
+    .md-body { display: flex; flex-direction: column; gap: 8px; white-space: normal; }
+    .md-text { white-space: pre-wrap; word-break: break-word; }
+    .md-code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; background: rgba(0,0,0,.28); padding: 1px 5px; border-radius: 5px;
+    }
+    .media-card {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+      overflow: hidden; margin-top: 2px; max-width: 100%;
+    }
+    .media-img-wrap { position: relative; background: #090b10; display: flex; justify-content: center; cursor: zoom-in; }
+    .media-img {
+      display: block; max-width: 100%; max-height: 300px; width: auto; height: auto; object-fit: contain;
+    }
+    .media-video {
+      display: block; width: 100%; max-height: 280px; background: #000;
+    }
+    .media-footer {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 7px 10px; background: var(--surface); border-top: 1px solid var(--border);
+      font-size: 11.5px; color: var(--muted);
+    }
+    .media-caption { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+    .media-caption-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 500; }
+    .media-badge {
+      font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 6px;
+      background: var(--accent-soft); color: #c7d2fe; flex-shrink: 0;
+    }
+    .media-btn {
+      border: 1px solid var(--border); background: var(--surface2); color: var(--text);
+      border-radius: 7px; padding: 4px 8px; font-size: 11px; font-weight: 600;
+      cursor: pointer; flex-shrink: 0;
+    }
+    .media-error {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 9px 10px; border-radius: 10px;
+      background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.35);
+      color: #fca5a5; font-size: 12px;
+    }
+    .att-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+    .att-thumb {
+      width: 112px; height: 84px; object-fit: cover; border-radius: 9px;
+      border: 1px solid var(--border); background: #090b10; cursor: zoom-in;
+    }
+    .lightbox-bg {
+      position: fixed; inset: 0; z-index: 80; background: rgba(6,8,12,.94);
+      display: none; flex-direction: column;
+    }
+    .lightbox-bg.open { display: flex; }
+    .lightbox-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 12px 14px; background: rgba(15,17,21,.9); border-bottom: 1px solid var(--border);
+    }
+    .lightbox-title {
+      font-size: 13.5px; font-weight: 600; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+    }
+    .lightbox-stage {
+      flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+      padding: 12px; overflow: hidden;
+    }
+    .lightbox-stage img {
+      max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px;
+    }
+    .lightbox-stage video {
+      max-width: 100%; max-height: 100%; width: 100%; background: #000; border-radius: 8px;
+    }
   </style>
 </head>
 <body>
@@ -2309,6 +2565,15 @@ export function renderMobileFallbackHtml(): string {
     <div id="taskSheetBody" class="sheet" onclick="event.stopPropagation()"></div>
   </div>
 
+  <!-- Media Lightbox Modal (Image & Video) -->
+  <div id="mediaLightbox" class="lightbox-bg" onclick="closeMediaLightbox()">
+    <div class="lightbox-head" onclick="event.stopPropagation()">
+      <div id="mediaLightboxTitle" class="lightbox-title">メディア</div>
+      <button class="btn" onclick="closeMediaLightbox()">閉じる</button>
+    </div>
+    <div id="mediaLightboxStage" class="lightbox-stage" onclick="event.stopPropagation()"></div>
+  </div>
+
   <script>
     const TOKEN_KEY = "conductor_remote_token";
     let token = localStorage.getItem(TOKEN_KEY) || "";
@@ -2318,10 +2583,414 @@ export function renderMobileFallbackHtml(): string {
     let currentTab = "chat";
     let selectedMentions = [];
     let openTaskId = null;
+    let activeLightboxSourceVideo = null;
+    let lastTaskSheetSig = "";
 
     function esc(s) {
       return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     }
+
+    function escAttr(s) {
+      return esc(s);
+    }
+
+    function isVideoSrc(raw) {
+      const t = String(raw || "").trim();
+      if (!t) return false;
+      if (/^data:video\\//i.test(t)) return true;
+      const cleaned = t.split("#")[0].split("?")[0];
+      return /\\.(?:mp4|webm|mov)$/i.test(cleaned);
+    }
+
+    function extractMediaFileName(raw) {
+      const cleaned = String(raw || "").trim().split("#")[0].split("?")[0];
+      const parts = cleaned.split(/[/\\\\]/);
+      return parts[parts.length - 1] || cleaned || "media";
+    }
+
+    function extractVideoFormatBadge(raw) {
+      const cleaned = String(raw || "").trim().split("#")[0].split("?")[0].toLowerCase();
+      if (cleaned.endsWith(".mp4")) return "MP4";
+      if (cleaned.endsWith(".webm")) return "WEBM";
+      if (cleaned.endsWith(".mov")) return "MOV";
+      return "VIDEO";
+    }
+
+    function resolveMediaUrl(rawSrc, basePath, isVideo) {
+      const trimmed = String(rawSrc || "").trim();
+      if (!trimmed) return { ok: false, error: "メディアパスが空です" };
+      if (/^https?:\\/\\//i.test(trimmed)) return { ok: true, url: trimmed };
+      if (/^\\/\\/[^/]/.test(trimmed)) return { ok: true, url: "https:" + trimmed };
+      if (isVideo ? /^data:video\\/[a-z0-9.+-]+/i.test(trimmed) : /^data:image\\/[a-z0-9.+-]+/i.test(trimmed)) {
+        return { ok: true, url: trimmed };
+      }
+      const isWinDrive = /^[a-zA-Z]:[\\\\/]/.test(trimmed);
+      if (!isWinDrive && !/^file:\\/\\//i.test(trimmed) && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) {
+        return { ok: false, error: "未対応の URL スキームです" };
+      }
+      const isLocalAbs = /^file:\\/\\//i.test(trimmed) || trimmed.startsWith("/") || trimmed.startsWith("~/") || trimmed.startsWith("~\\\\") || isWinDrive;
+      const cleanBase = typeof basePath === "string" && basePath.trim() ? basePath.trim() : "";
+      if (!isLocalAbs && !cleanBase) {
+        return { ok: false, error: "相対パスのメディアを解決できません" };
+      }
+      const endpoint = isVideo ? "/api/media/video" : "/api/media/image";
+      const params = new URLSearchParams({ path: trimmed });
+      if (cleanBase) params.set("base", cleanBase);
+      return { ok: true, url: endpoint + "?" + params.toString() };
+    }
+
+    function parseHtmlAttrs(attrBody) {
+      const attrs = {};
+      const re = /([a-zA-Z_:][\\w:.-]*)\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\\`]+))/g;
+      let m;
+      while ((m = re.exec(attrBody)) !== null) {
+        attrs[m[1].toLowerCase()] = (m[2] ?? m[3] ?? m[4] ?? "").trim();
+      }
+      return attrs;
+    }
+
+    function findDestEnd(text, openParenIdx) {
+      let i = openParenIdx + 1;
+      const n = text.length;
+      while (i < n && /\\s/.test(text[i])) i++;
+      if (i >= n) return -1;
+      if (text[i] === "<") {
+        const closeAngle = text.indexOf(">", i + 1);
+        if (closeAngle < 0) return -1;
+        let j = closeAngle + 1;
+        while (j < n && text[j] !== ")" && text[j] !== "\\n") j++;
+        return j < n && text[j] === ")" ? j : -1;
+      }
+      let depth = 0;
+      let quote = null;
+      while (i < n) {
+        const ch = text[i];
+        if (ch === "\\n") return -1;
+        if (quote) {
+          if (ch === "\\\\" && i + 1 < n) { i += 2; continue; }
+          if (ch === quote) quote = null;
+        } else if (ch === "\\\\" && i + 1 < n) {
+          i += 2; continue;
+        } else if (ch === '"' || ch === "'") {
+          quote = ch;
+        } else if (ch === "(") {
+          depth++;
+        } else if (ch === ")") {
+          if (depth === 0) return i;
+          depth--;
+        }
+        i++;
+      }
+      return -1;
+    }
+
+    function splitDestAndTitle(rawInner) {
+      const trimmed = rawInner.trim();
+      if (trimmed.startsWith("<")) {
+        const closeAngle = trimmed.indexOf(">");
+        if (closeAngle > 1) {
+          return trimmed.slice(1, closeAngle).trim();
+        }
+      }
+      const m = /^(.*?\\S)\\s+(?:"[^"\\r\\n]*"|'[^'\\r\\n]*')$/.exec(trimmed);
+      return (m ? m[1] : trimmed).trim();
+    }
+
+    function renderVideoCardHtml(alt, rawSrc, basePath, poster) {
+      const label = (alt || "").trim() || extractMediaFileName(rawSrc);
+      const badge = extractVideoFormatBadge(rawSrc);
+      const resolved = resolveMediaUrl(rawSrc, basePath, true);
+      if (!resolved.ok) {
+        return '<div class="media-error" data-testid="mobile-video-error"><span>' +
+          esc(label) + ": " + esc(resolved.error) + "</span></div>";
+      }
+      const posterAttr = poster ? ' poster="' + escAttr(poster) + '"' : "";
+      return '<div class="media-card video-card" data-media-type="video">' +
+        '<video class="media-video" controls playsinline preload="metadata" src="' + escAttr(resolved.url) + '"' +
+        posterAttr + ' data-caption="' + escAttr(label) + '" data-badge="' + escAttr(badge) + '" data-raw-src="' + escAttr(rawSrc) + '"' +
+        ' onerror="handleMediaError(this, \\'video\\')"></video>' +
+        '<div class="media-footer">' +
+          '<div class="media-caption">' +
+            '<span class="media-badge">' + esc(badge) + "</span>" +
+            '<span class="media-caption-text" title="' + escAttr(label) + '">' + esc(label) + "</span>" +
+          "</div>" +
+          '<button type="button" class="media-btn" onclick="openVideoLightboxFromBtn(this)">全画面</button>' +
+        "</div>" +
+      "</div>";
+    }
+
+    function renderImageCardHtml(alt, rawSrc, basePath) {
+      const label = (alt || "").trim() || extractMediaFileName(rawSrc);
+      const resolved = resolveMediaUrl(rawSrc, basePath, false);
+      if (!resolved.ok) {
+        return '<div class="media-error" data-testid="mobile-image-error"><span>' +
+          esc(label) + ": " + esc(resolved.error) + "</span></div>";
+      }
+      return '<div class="media-card image-card" data-media-type="image">' +
+        '<div class="media-img-wrap" onclick="openImageLightboxFromCard(this)">' +
+          '<img class="media-img" loading="lazy" src="' + escAttr(resolved.url) + '" alt="' + escAttr(label) + '"' +
+          ' onerror="handleMediaError(this, \\'image\\')" />' +
+        "</div>" +
+        '<div class="media-footer">' +
+          '<div class="media-caption"><span class="media-caption-text">' + esc(label) + "</span></div>" +
+          '<button type="button" class="media-btn" onclick="openImageLightboxFromBtn(this)">拡大</button>' +
+        "</div>" +
+      "</div>";
+    }
+
+    function renderInlineChunkWithMedia(chunk, basePath) {
+      const out = [];
+      let textBuf = "";
+      let i = 0;
+      const n = chunk.length;
+
+      function flushText() {
+        if (!textBuf) return;
+        const trimmed = textBuf;
+        if (trimmed.trim()) {
+          out.push('<div class="md-text">' + renderInlineTextFormatting(trimmed) + "</div>");
+        }
+        textBuf = "";
+      }
+
+      while (i < n) {
+        // Inline code span: preserve verbatim
+        if (chunk[i] === "\`") {
+          const end = chunk.indexOf("\`", i + 1);
+          if (end > i + 1) {
+            textBuf += chunk.slice(i, end + 1);
+            i = end + 1;
+            continue;
+          }
+        }
+
+        // Markdown image/video: ![alt](src)
+        if (chunk[i] === "!" && i + 1 < n && chunk[i + 1] === "[") {
+          const closeBracket = chunk.indexOf("]", i + 2);
+          if (closeBracket > i + 1 && closeBracket + 1 < n && chunk[closeBracket + 1] === "(") {
+            const closeParen = findDestEnd(chunk, closeBracket + 1);
+            if (closeParen > closeBracket + 2) {
+              const alt = chunk.slice(i + 2, closeBracket);
+              const rawDest = splitDestAndTitle(chunk.slice(closeBracket + 2, closeParen));
+              if (rawDest) {
+                flushText();
+                out.push(
+                  isVideoSrc(rawDest)
+                    ? renderVideoCardHtml(alt, rawDest, basePath, null)
+                    : renderImageCardHtml(alt, rawDest, basePath),
+                );
+                i = closeParen + 1;
+                continue;
+              }
+            }
+          }
+        }
+
+        // HTML <video ...>...</video> or <video ... />
+        if (chunk[i] === "<" && /^<video\\b/i.test(chunk.slice(i))) {
+          const slice = chunk.slice(i);
+          const videoMatch = /^<video\\b([^>]*?)(?:\\/>|>([\\s\\S]*?)<\\/video>)/i.exec(slice);
+          if (videoMatch) {
+            const attrs = parseHtmlAttrs(videoMatch[1] || "");
+            let src = attrs.src || "";
+            if (!src && videoMatch[2]) {
+              const sourceMatch = /<source\\b([^>]*?)\\/?>/i.exec(videoMatch[2]);
+              if (sourceMatch) {
+                const sAttrs = parseHtmlAttrs(sourceMatch[1] || "");
+                src = sAttrs.src || "";
+              }
+            }
+            if (src) {
+              flushText();
+              const label = attrs["aria-label"] || attrs.title || attrs.alt || "";
+              out.push(renderVideoCardHtml(label, src, basePath, attrs.poster || null));
+              i += videoMatch[0].length;
+              continue;
+            }
+          }
+        }
+
+        // HTML <img ... />
+        if (chunk[i] === "<" && /^<img\\b/i.test(chunk.slice(i))) {
+          const slice = chunk.slice(i);
+          const imgMatch = /^<img\\b([^>]*?)\\/?>/i.exec(slice);
+          if (imgMatch) {
+            const attrs = parseHtmlAttrs(imgMatch[1] || "");
+            if (attrs.src) {
+              flushText();
+              out.push(
+                isVideoSrc(attrs.src)
+                  ? renderVideoCardHtml(attrs.alt || attrs.title || "", attrs.src, basePath, null)
+                  : renderImageCardHtml(attrs.alt || attrs.title || "", attrs.src, basePath),
+              );
+              i += imgMatch[0].length;
+              continue;
+            }
+          }
+        }
+
+        textBuf += chunk[i];
+        i++;
+      }
+
+      flushText();
+      return out.join("");
+    }
+
+    function renderInlineTextFormatting(text) {
+      // Split by inline code spans so code stays literal
+      const parts = String(text || "").split(/(\`[^\`]+\`)/g);
+      return parts.map((part, idx) => {
+        if (idx % 2 === 1) {
+          return '<code class="md-code">' + esc(part.slice(1, -1)) + "</code>";
+        }
+        return esc(part);
+      }).join("");
+    }
+
+    function renderMarkdownRichHtml(markdown, basePath) {
+      const raw = String(markdown || "");
+      if (!raw) return "";
+      const lines = raw.replace(/\\r\\n/g, "\\n").split("\\n");
+      const out = [];
+      let textLines = [];
+      let i = 0;
+
+      function flushProse() {
+        if (textLines.length === 0) return;
+        const joined = textLines.join("\\n");
+        textLines = [];
+        const rendered = renderInlineChunkWithMedia(joined, basePath);
+        if (rendered) out.push(rendered);
+      }
+
+      while (i < lines.length) {
+        const fenceMatch = /^\\s*(\`{3,}|~{3,})\\s*([A-Za-z0-9_+#.\\-]*)\\s*$/.exec(lines[i]);
+        if (fenceMatch) {
+          flushProse();
+          const marker = fenceMatch[1];
+          const ch = marker[0];
+          const len = marker.length;
+          i++;
+          const codeLines = [];
+          while (i < lines.length) {
+            const ct = lines[i].trim();
+            if (ct.length >= len && ct.split("").every((c) => c === ch)) {
+              i++;
+              break;
+            }
+            codeLines.push(lines[i]);
+            i++;
+          }
+          out.push("<pre>" + esc(codeLines.join("\\n")) + "</pre>");
+          continue;
+        }
+        textLines.push(lines[i]);
+        i++;
+      }
+      flushProse();
+      return '<div class="md-body">' + out.join("") + "</div>";
+    }
+
+    function handleMediaError(el, kind) {
+      const card = el.closest(".media-card");
+      if (!card) return;
+      const caption = el.getAttribute("data-caption") || el.getAttribute("alt") || (kind === "video" ? "動画" : "画像");
+      const badge = el.getAttribute("data-badge") || "VIDEO";
+      const src = el.getAttribute("src") || "";
+      card.innerHTML = '<div class="media-error"><span>' +
+        esc(caption) + " の読み込みに失敗しました</span>" +
+        '<button type="button" class="media-btn" data-retry-kind="' + escAttr(kind) + '" data-retry-src="' + escAttr(src) + '" data-retry-caption="' + escAttr(caption) + '" data-retry-badge="' + escAttr(badge) + '" onclick="retryMediaCard(this)">再試行</button>' +
+      "</div>";
+    }
+
+    function retryMediaCard(btn) {
+      const card = btn.closest(".media-card");
+      const kind = btn.getAttribute("data-retry-kind") || "image";
+      const src = btn.getAttribute("data-retry-src") || "";
+      const caption = btn.getAttribute("data-retry-caption") || "";
+      const badge = btn.getAttribute("data-retry-badge") || "VIDEO";
+      if (!card || !src) return;
+      const sep = src.includes("?") ? "&" : "?";
+      const busted = src + sep + "_r=" + Date.now();
+      if (kind === "video") {
+        card.innerHTML = '<video class="media-video" controls playsinline preload="metadata" src="' + escAttr(busted) + '"' +
+          ' data-caption="' + escAttr(caption) + '" data-badge="' + escAttr(badge) + '" onerror="handleMediaError(this, \\'video\\')"></video>' +
+          '<div class="media-footer"><div class="media-caption"><span class="media-badge">' + esc(badge) + '</span>' +
+          '<span class="media-caption-text">' + esc(caption) + '</span></div>' +
+          '<button type="button" class="media-btn" onclick="openVideoLightboxFromBtn(this)">全画面</button></div>';
+      } else {
+        card.innerHTML = '<div class="media-img-wrap" onclick="openImageLightboxFromCard(this)">' +
+          '<img class="media-img" src="' + escAttr(busted) + '" alt="' + escAttr(caption) + '" onerror="handleMediaError(this, \\'image\\')" />' +
+          '</div><div class="media-footer"><div class="media-caption"><span class="media-caption-text">' + esc(caption) + '</span></div>' +
+          '<button type="button" class="media-btn" onclick="openImageLightboxFromBtn(this)">拡大</button></div>';
+      }
+    }
+
+    function openImageLightbox(src, title) {
+      if (!src) return;
+      activeLightboxSourceVideo = null;
+      document.getElementById("mediaLightboxTitle").textContent = title || "画像";
+      document.getElementById("mediaLightboxStage").innerHTML =
+        '<img src="' + escAttr(src) + '" alt="' + escAttr(title || "画像") + '" />';
+      document.getElementById("mediaLightbox").classList.add("open");
+    }
+
+    function openImageLightboxFromCard(wrap) {
+      const img = wrap && wrap.querySelector("img");
+      if (img) openImageLightbox(img.src, img.alt);
+    }
+
+    function openImageLightboxFromBtn(btn) {
+      const card = btn && btn.closest(".media-card");
+      const img = card && card.querySelector("img");
+      if (img) openImageLightbox(img.src, img.alt);
+    }
+
+    function openVideoLightboxFromBtn(btn) {
+      const card = btn && btn.closest(".media-card");
+      const srcVideo = card && card.querySelector("video");
+      if (!srcVideo) return;
+      const startTime = Number.isFinite(srcVideo.currentTime) ? srcVideo.currentTime : 0;
+      try { srcVideo.pause(); } catch {}
+      activeLightboxSourceVideo = srcVideo;
+      const caption = srcVideo.getAttribute("data-caption") || "動画";
+      document.getElementById("mediaLightboxTitle").textContent = caption;
+      const stage = document.getElementById("mediaLightboxStage");
+      stage.innerHTML = '<video id="lightboxVideoEl" controls playsinline autoplay src="' + escAttr(srcVideo.currentSrc || srcVideo.src) + '"></video>';
+      const modalVideo = document.getElementById("lightboxVideoEl");
+      if (modalVideo && startTime > 0) {
+        modalVideo.addEventListener("loadedmetadata", () => {
+          try { modalVideo.currentTime = startTime; } catch {}
+        }, { once: true });
+      }
+      document.getElementById("mediaLightbox").classList.add("open");
+    }
+
+    function closeMediaLightbox() {
+      const modalVideo = document.getElementById("lightboxVideoEl");
+      if (modalVideo) {
+        const endTime = Number.isFinite(modalVideo.currentTime) ? modalVideo.currentTime : 0;
+        try { modalVideo.pause(); } catch {}
+        if (activeLightboxSourceVideo && endTime > 0) {
+          try { activeLightboxSourceVideo.currentTime = endTime; } catch {}
+        }
+        modalVideo.removeAttribute("src");
+        try { modalVideo.load(); } catch {}
+      }
+      activeLightboxSourceVideo = null;
+      document.getElementById("mediaLightboxStage").innerHTML = "";
+      document.getElementById("mediaLightbox").classList.remove("open");
+    }
+
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") {
+        const lb = document.getElementById("mediaLightbox");
+        if (lb && lb.classList.contains("open")) {
+          closeMediaLightbox();
+        }
+      }
+    });
 
     function showToast(msg) {
       const el = document.getElementById("toast");
@@ -2351,7 +3020,7 @@ export function renderMobileFallbackHtml(): string {
       if (options.body && !headers["Content-Type"]) {
         headers["Content-Type"] = "application/json";
       }
-      const res = await fetch(path, Object.assign({}, options, { headers }));
+      const res = await fetch(path, Object.assign({ credentials: "same-origin" }, options, { headers }));
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         const err = new Error(data.error || data.message || ("HTTP " + res.status));
@@ -2368,6 +3037,7 @@ export function renderMobileFallbackHtml(): string {
       token = input;
       try {
         const snap = await apiFetch("/api/snapshot");
+        await apiFetch("/api/media/session", { method: "POST" }).catch(() => {});
         localStorage.setItem(TOKEN_KEY, token);
         applySnapshot(snap);
         enterApp();
@@ -2386,9 +3056,13 @@ export function renderMobileFallbackHtml(): string {
 
     function disconnect() {
       stopStream();
+      closeMediaLightbox();
+      fetch("/api/media/session", { method: "DELETE", credentials: "same-origin" }).catch(() => {});
       localStorage.removeItem(TOKEN_KEY);
       token = "";
       snapshot = null;
+      lastTaskSheetSig = "";
+      document.getElementById("chatScroll").innerHTML = "";
       document.getElementById("bottomNav").style.display = "none";
       document.getElementById("newChatBtn").style.display = "none";
       document.getElementById("stopAllBtn").style.display = "none";
@@ -2464,26 +3138,80 @@ export function renderMobileFallbackHtml(): string {
       if (openTaskId) renderTaskSheet(openTaskId);
     }
 
+    function buildChatMessageHtml(m, tasksById) {
+      const mentions = (m.mentions || []).map((ref) =>
+        '<span class="chip">@' + esc(ref.kind === "task" ? ("T" + ref.taskNumber) : ref.projectName) + "</span>"
+      ).join("");
+      const stopBtn = m.isStreaming
+        ? ' <button class="btn danger" style="padding:2px 7px;font-size:11px;" onclick="stopMsg(\\'' + esc(m.id) + '\\')">停止</button>'
+        : "";
+      const meta = m.role === "assistant"
+        ? '<div class="meta"><span>' + esc(m.provider || "conductor") + "</span>" + (m.isStreaming ? "<span>● 応答中...</span>" : "") + stopBtn + "</div>"
+        : (mentions ? '<div class="meta">' + mentions + "</div>" : "");
+      const imgAtts = (m.attachments || []).filter((a) => a.kind === "image" && a.id);
+      const attHtml = imgAtts.length > 0
+        ? '<div class="att-grid">' + imgAtts.map((a) => {
+            const url = "/api/attachments/" + encodeURIComponent(a.id);
+            const label = a.label || "Image";
+            return '<img class="att-thumb" loading="lazy" src="' + escAttr(url) + '" alt="' + escAttr(label) + '" onclick="openImageLightbox(this.src, this.alt)" />';
+          }).join("") + "</div>"
+        : "";
+      const linkedTask = m.relatedTaskId ? tasksById[m.relatedTaskId] : null;
+      const basePath = linkedTask ? (linkedTask.worktreePath || linkedTask.projectPath || "") : "";
+      const bodyText = m.text || (m.isStreaming ? "..." : "");
+      const bodyHtml = renderMarkdownRichHtml(bodyText, basePath);
+      return meta + attHtml + bodyHtml;
+    }
+
     function renderChat() {
       const el = document.getElementById("chatScroll");
       const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
       const msgs = (snapshot && snapshot.messages) || [];
       if (msgs.length === 0) {
-        el.innerHTML = '<div style="text-align:center;color:var(--muted);margin-top:40px;font-size:13px;">メッセージはまだありません</div>';
+        if (!el.querySelector("[data-empty-chat]")) {
+          el.innerHTML = '<div data-empty-chat="1" style="text-align:center;color:var(--muted);margin-top:40px;font-size:13px;">メッセージはまだありません</div>';
+        }
         return;
       }
-      el.innerHTML = msgs.map((m) => {
-        const mentions = (m.mentions || []).map((ref) =>
-          '<span class="chip">@' + esc(ref.kind === "task" ? ("T" + ref.taskNumber) : ref.projectName) + "</span>"
-        ).join("");
-        const stopBtn = m.isStreaming
-          ? ' <button class="btn danger" style="padding:2px 7px;font-size:11px;" onclick="stopMsg(\\'' + esc(m.id) + '\\')">停止</button>'
-          : "";
-        const meta = m.role === "assistant"
-          ? '<div class="meta"><span>' + esc(m.provider || "conductor") + "</span>" + (m.isStreaming ? "<span>● 応答中...</span>" : "") + stopBtn + "</div>"
-          : (mentions ? '<div class="meta">' + mentions + "</div>" : "");
-        return '<div class="msg ' + esc(m.role) + '">' + meta + esc(m.text || (m.isStreaming ? "..." : "")) + "</div>";
-      }).join("");
+      const emptyEl = el.querySelector("[data-empty-chat]");
+      if (emptyEl) emptyEl.remove();
+
+      const tasksById = {};
+      for (const t of ((snapshot && snapshot.tasks) || [])) {
+        tasksById[t.id] = t;
+      }
+
+      const existingNodes = new Map();
+      for (const child of Array.from(el.children)) {
+        const id = child.getAttribute("data-msg-id");
+        if (id) existingNodes.set(id, child);
+      }
+
+      const activeIds = new Set();
+      msgs.forEach((m, idx) => {
+        activeIds.add(m.id);
+        const linkedTask = m.relatedTaskId ? tasksById[m.relatedTaskId] : null;
+        const basePath = linkedTask ? (linkedTask.worktreePath || linkedTask.projectPath || "") : "";
+        const sig = JSON.stringify([m.role, m.provider || "", m.isStreaming ? 1 : 0, m.text || "", basePath, (m.attachments || []).map((a) => a.id), (m.mentions || []).length]);
+        let node = existingNodes.get(m.id);
+        if (!node) {
+          node = document.createElement("div");
+          node.setAttribute("data-msg-id", m.id);
+        }
+        node.className = "msg " + m.role;
+        if (node.getAttribute("data-render-sig") !== sig) {
+          node.setAttribute("data-render-sig", sig);
+          node.innerHTML = buildChatMessageHtml(m, tasksById);
+        }
+        const currentAtIdx = el.children[idx];
+        if (currentAtIdx !== node) {
+          el.insertBefore(node, currentAtIdx || null);
+        }
+      });
+
+      for (const [id, node] of existingNodes.entries()) {
+        if (!activeIds.has(id)) node.remove();
+      }
       if (nearBottom) el.scrollTop = el.scrollHeight;
     }
 
@@ -2622,12 +3350,18 @@ export function renderMobileFallbackHtml(): string {
 
     function closeTaskSheet() {
       openTaskId = null;
+      lastTaskSheetSig = "";
       document.getElementById("taskModal").classList.remove("open");
     }
 
     function renderTaskSheet(taskId, detail) {
       const t = (detail && detail.task) || ((snapshot && snapshot.tasks) || []).find((x) => x.id === taskId);
       if (!t) return;
+      const basePath = t.worktreePath || t.projectPath || "";
+      const gitStatus = detail && detail.gitStatus ? detail.gitStatus : "";
+      const sig = JSON.stringify([t.id, t.status, t.landStatus || "", t.title, t.summary || "", t.latestOutput || "", basePath, gitStatus]);
+      if (sig === lastTaskSheetSig) return;
+      lastTaskSheetSig = sig;
       const body = document.getElementById("taskSheetBody");
       const isRunning = t.status === "running";
       const isDone = t.status === "done";
@@ -2638,7 +3372,7 @@ export function renderMobileFallbackHtml(): string {
         '<div class="row"><strong>T' + esc(t.taskNumber) + " · " + esc(t.title) + '</strong><button class="btn" onclick="closeTaskSheet()">閉じる</button></div>' +
         '<div class="meta"><span class="chip">' + esc(t.status) + "</span><span>" + esc(t.projectName || "General") + "</span>" +
         (t.landStatus ? ('<span class="chip">Land: ' + esc(t.landStatus) + "</span>") : "") + "</div>" +
-        (t.summary ? ('<div style="font-size:13px;">' + esc(t.summary) + "</div>") : "") +
+        (t.summary ? ('<div style="font-size:13px;">' + renderMarkdownRichHtml(t.summary, basePath) + "</div>") : "") +
         '<div class="row">' +
           (isRunning ? '<button class="btn danger" onclick="taskStop(\\'' + esc(t.id) + '\\')">ワーカー停止</button>' : "") +
           (!isRunning && (hasWorktree || isUnlanded) ? '<button class="btn primary" onclick="taskLand(\\'' + esc(t.id) + '\\')">Land</button>' : "") +
@@ -2648,8 +3382,8 @@ export function renderMobileFallbackHtml(): string {
             : '<button class="btn ok" onclick="taskStatus(\\'' + esc(t.id) + '\\', \\'done\\', false)">Done</button>')
                    : '<button class="btn" onclick="taskStatus(\\'' + esc(t.id) + '\\', \\'needs_review\\', false)">Reopen</button>') +
         "</div>" +
-        (t.latestOutput ? ('<div style="font-size:12px;color:var(--muted);">最新出力</div><pre>' + esc(t.latestOutput) + "</pre>") : "") +
-        (detail && detail.gitStatus ? ('<div style="font-size:12px;color:var(--muted);">Git Status</div><pre>' + esc(detail.gitStatus) + "</pre>") : "");
+        (t.latestOutput ? ('<div style="font-size:12px;color:var(--muted);">最新出力</div><div class="card" style="background:var(--bg);font-size:12.5px;">' + renderMarkdownRichHtml(t.latestOutput, basePath) + "</div>") : "") +
+        (gitStatus ? ('<div style="font-size:12px;color:var(--muted);">Git Status</div><pre>' + esc(gitStatus) + "</pre>") : "");
     }
 
     async function taskStatus(id, status, force) {

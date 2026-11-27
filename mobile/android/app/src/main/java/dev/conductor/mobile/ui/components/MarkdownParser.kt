@@ -16,6 +16,12 @@ sealed interface MarkdownBlock {
     data class Heading(val level: Int, val text: String) : MarkdownBlock
     data class Paragraph(val text: String) : MarkdownBlock
     data class Image(val alt: String, val src: String, val title: String? = null) : MarkdownBlock
+    data class Video(
+        val alt: String,
+        val src: String,
+        val title: String? = null,
+        val poster: String? = null,
+    ) : MarkdownBlock
     data class CodeBlock(val language: String?, val code: String) : MarkdownBlock
     data class Quote(val text: String) : MarkdownBlock
     data class BulletList(val items: List<ListItem>) : MarkdownBlock
@@ -45,6 +51,12 @@ sealed interface InlineNode {
     data class Code(val code: String) : InlineNode
     data class Link(val label: String, val url: String) : InlineNode
     data class Image(val alt: String, val src: String, val title: String? = null) : InlineNode
+    data class Video(
+        val alt: String,
+        val src: String,
+        val title: String? = null,
+        val poster: String? = null,
+    ) : InlineNode
 }
 
 object MarkdownParser {
@@ -56,6 +68,11 @@ object MarkdownParser {
     private val orderedRegex = Regex("""^(\s*)(\d+)\.\s+(.*)$""")
     private val tableSeparatorCellRegex = Regex("""^:?-{2,}:?$""")
     private val htmlImgTagRegex = Regex("""^<img\b([^>]*?)/?>""", RegexOption.IGNORE_CASE)
+    private val htmlVideoTagRegex = Regex(
+        """^<video\b([^>]*?)(?:/>|>([\s\S]*?)</video>)""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val htmlSourceTagRegex = Regex("""<source\b([^>]*?)/?>""", RegexOption.IGNORE_CASE)
     private val htmlAttrRegex = Regex("""([a-zA-Z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))""")
     private val optionalTitleSuffixRegex = Regex("""^(.*?\S)\s+(?:"([^"\r\n]*)"|'([^'\r\n]*)')$""")
 
@@ -63,6 +80,14 @@ object MarkdownParser {
         val alt: String,
         val src: String,
         val title: String?,
+        val endIndex: Int,
+    )
+
+    private data class ParsedVideoToken(
+        val alt: String,
+        val src: String,
+        val title: String?,
+        val poster: String?,
         val endIndex: Int,
     )
 
@@ -136,6 +161,21 @@ object MarkdownParser {
                     ),
                 )
                 i++
+                continue
+            }
+
+            // Standalone HTML <video ...>...</video> (single-line or multi-line)
+            val standaloneVideo = parseStandaloneHtmlVideoBlock(lines, i)
+            if (standaloneVideo != null) {
+                blocks.add(
+                    MarkdownBlock.Video(
+                        alt = standaloneVideo.first.alt,
+                        src = standaloneVideo.first.src,
+                        title = standaloneVideo.first.title,
+                        poster = standaloneVideo.first.poster,
+                    ),
+                )
+                i = standaloneVideo.second
                 continue
             }
 
@@ -226,6 +266,7 @@ object MarkdownParser {
                             headingRegex.matches(curTrimmed) ||
                             dividerRegex.matches(cur) ||
                             parseStandaloneImageLine(curTrimmed) != null ||
+                            parseStandaloneHtmlVideoBlock(lines, i) != null ||
                             curTrimmed.startsWith(">") ||
                             unorderedRegex.matches(cur) ||
                             orderedRegex.matches(cur) ||
@@ -291,6 +332,24 @@ object MarkdownParser {
                         ),
                     )
                     i = parsedImg.endIndex
+                    continue
+                }
+            }
+
+            // HTML <video ...>...</video> or <video ... />
+            if (text[i] == '<' && text.startsWith("<video", i, ignoreCase = true)) {
+                val parsedHtmlVideo = parseHtmlVideoAt(text, i)
+                if (parsedHtmlVideo != null) {
+                    flushPlain()
+                    result.add(
+                        InlineNode.Video(
+                            alt = parsedHtmlVideo.alt,
+                            src = parsedHtmlVideo.src,
+                            title = parsedHtmlVideo.title,
+                            poster = parsedHtmlVideo.poster,
+                        ),
+                    )
+                    i = parsedHtmlVideo.endIndex
                     continue
                 }
             }
@@ -516,6 +575,89 @@ object MarkdownParser {
             alt = alt,
             src = src,
             title = title,
+            endIndex = startIndex + match.value.length,
+        )
+    }
+
+    private fun parseStandaloneHtmlVideoBlock(
+        lines: List<String>,
+        startLine: Int,
+    ): Pair<ParsedVideoToken, Int>? {
+        val firstTrimmed = lines[startLine].trim()
+        if (!firstTrimmed.startsWith("<video", ignoreCase = true)) return null
+
+        // Single-line <video ...>...</video> or <video ... />
+        val single = parseHtmlVideoAt(firstTrimmed, 0)
+        if (single != null && single.endIndex == firstTrimmed.length) {
+            return single to (startLine + 1)
+        }
+
+        // Multi-line <video ...>\n  <source src="..." />\n</video>
+        val sb = StringBuilder(firstTrimmed)
+        var j = startLine + 1
+        val maxEnd = (startLine + 20).coerceAtMost(lines.size)
+        while (j < maxEnd) {
+            sb.append('\n').append(lines[j].trim())
+            val joined = sb.toString()
+            if (joined.endsWith("</video>", ignoreCase = true)) {
+                val multi = parseHtmlVideoAt(joined, 0)
+                if (multi != null && multi.endIndex == joined.length) {
+                    return multi to (j + 1)
+                }
+                return null
+            }
+            j++
+        }
+        return null
+    }
+
+    private fun parseHtmlVideoAt(text: String, startIndex: Int): ParsedVideoToken? {
+        val slice = text.substring(startIndex)
+        val match = htmlVideoTagRegex.find(slice) ?: return null
+        val attrBody = match.groupValues[1]
+        val innerBody = match.groupValues[2]
+
+        var src = ""
+        var alt = ""
+        var title: String? = null
+        var poster: String? = null
+
+        for (attr in htmlAttrRegex.findAll(attrBody)) {
+            val name = attr.groupValues[1].lowercase()
+            val value = attr.groupValues[2].ifEmpty {
+                attr.groupValues[3].ifEmpty { attr.groupValues[4] }
+            }.trim()
+            when (name) {
+                "src" -> src = value
+                "aria-label", "alt" -> if (value.isNotEmpty() && alt.isEmpty()) alt = value
+                "title" -> if (value.isNotEmpty()) title = value
+                "poster" -> if (value.isNotEmpty()) poster = value
+            }
+        }
+
+        if (src.isEmpty() && innerBody.isNotBlank()) {
+            val sourceMatch = htmlSourceTagRegex.find(innerBody)
+            if (sourceMatch != null) {
+                for (attr in htmlAttrRegex.findAll(sourceMatch.groupValues[1])) {
+                    val name = attr.groupValues[1].lowercase()
+                    val value = attr.groupValues[2].ifEmpty {
+                        attr.groupValues[3].ifEmpty { attr.groupValues[4] }
+                    }.trim()
+                    if (name == "src" && value.isNotEmpty()) {
+                        src = value
+                        break
+                    }
+                }
+            }
+        }
+
+        if (src.isEmpty()) return null
+        val resolvedAlt = alt.ifBlank { title.orEmpty() }
+        return ParsedVideoToken(
+            alt = resolvedAlt,
+            src = src,
+            title = title,
+            poster = poster,
             endIndex = startIndex + match.value.length,
         )
     }

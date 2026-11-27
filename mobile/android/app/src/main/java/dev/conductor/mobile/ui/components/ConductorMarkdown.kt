@@ -143,6 +143,15 @@ fun ConductorMarkdown(
                     )
                 }
 
+                is MarkdownBlock.Video -> {
+                    MarkdownVideoBlock(
+                        alt = block.alt,
+                        src = block.src,
+                        basePath = basePath,
+                        poster = block.poster,
+                    )
+                }
+
                 is MarkdownBlock.CodeBlock -> {
                     MarkdownCodeBlock(
                         language = block.language,
@@ -485,10 +494,11 @@ private fun MarkdownTable(
 private sealed interface RichSegment {
     data class InlineNodes(val nodes: List<InlineNode>) : RichSegment
     data class ImageSegment(val node: InlineNode.Image) : RichSegment
+    data class VideoSegment(val node: InlineNode.Video) : RichSegment
 }
 
 private fun splitInlineSegments(nodes: List<InlineNode>): List<RichSegment> {
-    if (nodes.none { it is InlineNode.Image }) return emptyList()
+    if (nodes.none { it is InlineNode.Image || it is InlineNode.Video }) return emptyList()
     val segments = mutableListOf<RichSegment>()
     val buf = mutableListOf<InlineNode>()
     fun flush() {
@@ -501,11 +511,18 @@ private fun splitInlineSegments(nodes: List<InlineNode>): List<RichSegment> {
         }
     }
     for (node in nodes) {
-        if (node is InlineNode.Image) {
-            flush()
-            segments.add(RichSegment.ImageSegment(node))
-        } else {
-            buf.add(node)
+        when (node) {
+            is InlineNode.Image -> {
+                flush()
+                segments.add(RichSegment.ImageSegment(node))
+            }
+
+            is InlineNode.Video -> {
+                flush()
+                segments.add(RichSegment.VideoSegment(node))
+            }
+
+            else -> buf.add(node)
         }
     }
     flush()
@@ -556,6 +573,15 @@ private fun MarkdownRichText(
                             alt = seg.node.alt,
                             src = seg.node.src,
                             basePath = basePath,
+                        )
+                    }
+
+                    is RichSegment.VideoSegment -> {
+                        MarkdownVideoBlock(
+                            alt = seg.node.alt,
+                            src = seg.node.src,
+                            basePath = basePath,
+                            poster = seg.node.poster,
                         )
                     }
                 }
@@ -704,6 +730,11 @@ private fun buildMarkdownAnnotatedString(
                 }
 
                 is InlineNode.Image -> {
+                    val label = node.alt.ifBlank { node.src }
+                    append("[$label]")
+                }
+
+                is InlineNode.Video -> {
                     val label = node.alt.ifBlank { node.src }
                     append("[$label]")
                 }

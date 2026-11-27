@@ -59,7 +59,9 @@ import dev.conductor.mobile.model.AppUpdateStatus
 import dev.conductor.mobile.model.TerminalConnectionState
 import dev.conductor.mobile.ui.ConductorViewModel
 import dev.conductor.mobile.ui.components.ConductorImageContext
+import dev.conductor.mobile.ui.components.ConductorVideoContext
 import dev.conductor.mobile.ui.components.LocalConductorImageContext
+import dev.conductor.mobile.ui.components.LocalConductorVideoContext
 import dev.conductor.mobile.ui.components.UpdateAvailableBanner
 import dev.conductor.mobile.ui.screens.ChatScreen
 import dev.conductor.mobile.ui.screens.QrScannerScreen
@@ -106,9 +108,25 @@ class MainActivity : ComponentActivity() {
                     config = state.config.takeIf { it.isConfigured },
                 )
             }
+            val videoContext = remember(
+                viewModel.api,
+                viewModel.videoPreviewCache,
+                viewModel.videoPlaybackCoordinator,
+                state.config,
+            ) {
+                ConductorVideoContext(
+                    api = viewModel.api,
+                    config = state.config.takeIf { it.isConfigured },
+                    previewCache = viewModel.videoPreviewCache,
+                    coordinator = viewModel.videoPlaybackCoordinator,
+                )
+            }
 
             ConductorTheme(themeMode = state.themeMode) {
-                CompositionLocalProvider(LocalConductorImageContext provides imageContext) {
+                CompositionLocalProvider(
+                    LocalConductorImageContext provides imageContext,
+                    LocalConductorVideoContext provides videoContext,
+                ) {
                     ConductorMobileApp(viewModel = viewModel)
                 }
             }
@@ -150,6 +168,10 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
     val terminalListState = rememberLazyListState()
     val chatScrollSessionState = rememberChatScrollSessionState()
     var lastConnectedServerUrl by rememberSaveable { mutableStateOf("") }
+
+    LaunchedEffect(currentTab) {
+        viewModel.videoPlaybackCoordinator.pauseAllInline()
+    }
 
     LaunchedEffect(state.isLoaded, state.config.isConfigured, state.config.serverUrl) {
         if (!state.isLoaded) return@LaunchedEffect

@@ -849,7 +849,11 @@ private fun ChatMessageRow(
         )
 
         "system" -> SystemMessageItem(message = message)
-        else -> AssistantMessageItem(message = message, onStop = onStop)
+        else -> AssistantMessageItem(
+            message = message,
+            basePath = linkedTask?.worktreePath ?: linkedTask?.projectPath,
+            onStop = onStop,
+        )
     }
 }
 
@@ -1059,6 +1063,7 @@ private fun RemoteAttachmentImageCard(
 @Composable
 private fun AssistantMessageItem(
     message: ChatMessage,
+    basePath: String? = null,
     onStop: () -> Unit,
 ) {
     val colors = ConductorTheme.colors
@@ -1239,6 +1244,7 @@ private fun AssistantMessageItem(
                 markdown = message.text,
                 variant = MarkdownVariant.DEFAULT,
                 textColor = colors.textPrimary,
+                basePath = basePath,
                 modifier = Modifier.fillMaxWidth(),
             )
         } else if (message.isStreaming) {

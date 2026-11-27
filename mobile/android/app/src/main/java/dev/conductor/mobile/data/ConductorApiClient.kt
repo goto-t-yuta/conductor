@@ -46,11 +46,101 @@ sealed interface ClassifiedImageSource {
     data class Invalid(val reason: String) : ClassifiedImageSource
 }
 
+sealed interface ClassifiedVideoSource {
+    data class RemoteUrl(val url: String) : ClassifiedVideoSource
+    data class DataUrl(val mimeType: String, val base64Data: String) : ClassifiedVideoSource
+    data class LocalPath(val path: String, val basePath: String? = null) : ClassifiedVideoSource
+    data class Invalid(val reason: String) : ClassifiedVideoSource
+}
+
+sealed interface VideoPlaybackTarget {
+    data class HttpStream(
+        val url: String,
+        val headers: Map<String, String>,
+        val requiresConductorAuth: Boolean,
+        val displayFileName: String,
+        val formatBadge: String,
+    ) : VideoPlaybackTarget
+
+    data class InlineData(
+        val mimeType: String,
+        val base64Data: String,
+        val displayFileName: String,
+        val formatBadge: String,
+    ) : VideoPlaybackTarget
+}
+
 data class FetchedImageBytes(
     val bytes: ByteArray,
     val contentType: String?,
     val sourceLabel: String,
 )
+
+object VideoSourceClassifier {
+    private val windowsDriveRegex = Regex("""^[A-Za-z]:[\\/]""")
+    private val urlSchemeRegex = Regex("""^[A-Za-z][A-Za-z0-9+.-]*:""")
+    private val dataVideoBase64Regex = Regex(
+        """^data:(video/[a-zA-Z0-9.+-]+)(?:;[^,]*)?;base64,(.+)$""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+    )
+
+    fun extractFormatBadge(rawSrc: String): String {
+        val cleaned = rawSrc.trim().substringBefore('#').substringBefore('?').lowercase()
+        return when {
+            cleaned.endsWith(".mp4") || cleaned.startsWith("data:video/mp4") -> "MP4"
+            cleaned.endsWith(".webm") || cleaned.startsWith("data:video/webm") -> "WEBM"
+            cleaned.endsWith(".mov") || cleaned.startsWith("data:video/quicktime") -> "MOV"
+            else -> "VIDEO"
+        }
+    }
+
+    fun classify(rawSrc: String?, basePath: String? = null): ClassifiedVideoSource {
+        val trimmed = rawSrc?.trim().orEmpty()
+        if (trimmed.isEmpty()) {
+            return ClassifiedVideoSource.Invalid("動画パスが空です")
+        }
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true)
+        ) {
+            return ClassifiedVideoSource.RemoteUrl(trimmed)
+        }
+        if (trimmed.startsWith("//") && trimmed.length > 2 && trimmed[2] != '/') {
+            return ClassifiedVideoSource.RemoteUrl("https:$trimmed")
+        }
+        val dataMatch = dataVideoBase64Regex.matchEntire(trimmed)
+        if (dataMatch != null) {
+            return ClassifiedVideoSource.DataUrl(
+                mimeType = dataMatch.groupValues[1].lowercase(),
+                base64Data = dataMatch.groupValues[2].replace(Regex("\\s+"), ""),
+            )
+        }
+        if (trimmed.startsWith("file://", ignoreCase = true)) {
+            return ClassifiedVideoSource.LocalPath(
+                path = trimmed,
+                basePath = basePath?.trim()?.ifBlank { null },
+            )
+        }
+        val isWinDrive = windowsDriveRegex.containsMatchIn(trimmed)
+        if (!isWinDrive && urlSchemeRegex.containsMatchIn(trimmed)) {
+            return ClassifiedVideoSource.Invalid("未対応の動画 URL スキームです")
+        }
+        if (trimmed.startsWith("/") ||
+            trimmed.startsWith("~/") ||
+            trimmed.startsWith("~\\") ||
+            isWinDrive
+        ) {
+            return ClassifiedVideoSource.LocalPath(
+                path = trimmed,
+                basePath = basePath?.trim()?.ifBlank { null },
+            )
+        }
+        val cleanBase = basePath?.trim()?.ifBlank { null }
+        if (cleanBase != null) {
+            return ClassifiedVideoSource.LocalPath(path = trimmed, basePath = cleanBase)
+        }
+        return ClassifiedVideoSource.Invalid("相対パスの動画を解決できません")
+    }
+}
 
 object ImageSourceClassifier {
     private val windowsDriveRegex = Regex("""^[A-Za-z]:[\\/]""")
@@ -182,6 +272,15 @@ class ConductorApiClient(
         .followRedirects(true)
         .build()
 
+    // Streaming client for ExoPlayer video Range playback (no total callTimeout so long videos stream cleanly).
+    private val videoStreamClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(restConnectTimeoutMs, TimeUnit.MILLISECONDS)
+        .readTimeout(30_000L, TimeUnit.MILLISECONDS)
+        .retryOnConnectionFailure(true)
+        .followRedirects(true)
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .build()
+
     // Server sends `: ping\n\n` every 15s; a finite readTimeout detects half-open/stalled sockets
     // after network switches or sleep instead of hanging indefinitely.
     private val sseClient: OkHttpClient = OkHttpClient.Builder()
@@ -194,8 +293,11 @@ class ConductorApiClient(
     fun close() {
         restClient.connectionPool.evictAll()
         mediaClient.connectionPool.evictAll()
+        videoStreamClient.connectionPool.evictAll()
         sseClient.connectionPool.evictAll()
     }
+
+    fun getVideoStreamClient(): OkHttpClient = videoStreamClient
 
     fun buildMediaImageUrl(
         config: ConnectionConfig,
@@ -211,6 +313,66 @@ class ConductorApiClient(
             builder.addQueryParameter("base", basePath)
         }
         return builder.build().toString()
+    }
+
+    fun buildMediaVideoUrl(
+        config: ConnectionConfig,
+        localPath: String,
+        basePath: String? = null,
+    ): String {
+        val base = baseUrl(config)
+        val parsed = "$base/api/media/video".toHttpUrlOrNull()
+            ?: throw IllegalArgumentException("サーバー URL が不正です: $base")
+        val builder = parsed.newBuilder()
+            .addQueryParameter("path", localPath)
+        if (!basePath.isNullOrBlank()) {
+            builder.addQueryParameter("base", basePath)
+        }
+        return builder.build().toString()
+    }
+
+    fun resolveVideoPlaybackTarget(
+        config: ConnectionConfig?,
+        rawSrc: String,
+        basePath: String? = null,
+    ): Result<VideoPlaybackTarget> = runCatching {
+        val displayFileName = ImageSourceClassifier.extractDisplayFileName(rawSrc)
+        val formatBadge = VideoSourceClassifier.extractFormatBadge(rawSrc)
+        when (val classified = VideoSourceClassifier.classify(rawSrc, basePath)) {
+            is ClassifiedVideoSource.Invalid -> throw IOException(classified.reason)
+            is ClassifiedVideoSource.DataUrl -> VideoPlaybackTarget.InlineData(
+                mimeType = classified.mimeType,
+                base64Data = classified.base64Data,
+                displayFileName = displayFileName.ifBlank { "video.${formatBadge.lowercase()}" },
+                formatBadge = formatBadge,
+            )
+
+            is ClassifiedVideoSource.RemoteUrl -> VideoPlaybackTarget.HttpStream(
+                url = classified.url,
+                headers = emptyMap(),
+                requiresConductorAuth = false,
+                displayFileName = displayFileName,
+                formatBadge = formatBadge,
+            )
+
+            is ClassifiedVideoSource.LocalPath -> {
+                if (config == null || !config.isConfigured) {
+                    throw IOException("サーバー未接続のためローカル動画を再生できません")
+                }
+                val url = buildMediaVideoUrl(
+                    config = config,
+                    localPath = classified.path,
+                    basePath = classified.basePath,
+                )
+                VideoPlaybackTarget.HttpStream(
+                    url = url,
+                    headers = mapOf("Authorization" to "Bearer ${config.bearerToken.trim()}"),
+                    requiresConductorAuth = true,
+                    displayFileName = displayFileName,
+                    formatBadge = formatBadge,
+                )
+            }
+        }
     }
 
     suspend fun fetchImageBytes(
