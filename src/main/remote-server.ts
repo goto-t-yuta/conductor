@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
+import zlib from "node:zlib";
 import {
   buildConductorConnectUri,
   buildConductorLinkUri,
@@ -25,7 +26,15 @@ export { buildConductorConnectUri, buildConductorLinkUri, parseConductorConnectU
 
 export const DEFAULT_REMOTE_ACCESS_PORT = 4789;
 const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB
-const SSE_HEARTBEAT_INTERVAL_MS = 20_000;
+const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
+const DEFAULT_SSE_THROTTLE_MS = 200;
+const SSE_MAX_BACKPRESSURE_BYTES = 512 * 1024; // 512 KiB
+const REMOTE_TASK_OUTPUT_MAX_CHARS = 3_000;
+const REMOTE_TOOL_DETAIL_MAX_CHARS = 300;
+const REMOTE_REASONING_MAX_CHARS = 4_000;
+const GZIP_MIN_BYTES = 1_024;
+const SERVER_KEEP_ALIVE_TIMEOUT_MS = 65_000;
+const SERVER_HEADERS_TIMEOUT_MS = 70_000;
 
 const VALID_TASK_STATUSES: ReadonlySet<AgentTaskStatus> = new Set([
   "queued",
@@ -61,6 +70,8 @@ export interface RemoteBridgeServerOptions {
   token?: string;
   detectNetwork?: () => TailscaleNetworkInfo;
   onClientsChanged?: (count: number) => void;
+  sseThrottleMs?: number;
+  sseHeartbeatIntervalMs?: number;
 }
 
 export function generateRemoteAccessToken(): string {
@@ -328,6 +339,128 @@ function sanitizeAttachments(raw: unknown): ChatAttachment[] {
 }
 
 /**
+ * Projects a desktop AppSnapshot into a compact, mobile-safe payload.
+ * Strips multi-MB base64 screenshot data URLs, desktop-only browser/usage/model catalogs,
+ * and verbose worker histories (full task details remain available via GET /api/tasks/:id).
+ */
+export function buildRemoteSnapshot(snapshot: AppSnapshot): Record<string, unknown> {
+  const tasks = (snapshot.tasks ?? []).map((t) => ({
+    id: t.id,
+    taskNumber: t.taskNumber,
+    title: t.title,
+    summary: t.summary,
+    projectId: t.projectId,
+    projectName: t.projectName,
+    projectPath: t.projectPath,
+    status: t.status,
+    ...(t.provider ? { provider: t.provider } : {}),
+    currentStep: t.currentStep,
+    previewURL: t.previewURL,
+    latestOutput:
+      typeof t.latestOutput === "string" && t.latestOutput.length > REMOTE_TASK_OUTPUT_MAX_CHARS
+        ? t.latestOutput.slice(-REMOTE_TASK_OUTPUT_MAX_CHARS)
+        : t.latestOutput ?? "",
+    activities: [],
+    ...(t.worktreePath !== undefined ? { worktreePath: t.worktreePath } : {}),
+    ...(t.worktreeBranch !== undefined ? { worktreeBranch: t.worktreeBranch } : {}),
+    ...(t.baseBranch !== undefined ? { baseBranch: t.baseBranch } : {}),
+    ...(t.landStatus !== undefined ? { landStatus: t.landStatus } : {}),
+    ...(t.landedBranch !== undefined ? { landedBranch: t.landedBranch } : {}),
+    ...(t.prUrl !== undefined ? { prUrl: t.prUrl } : {}),
+    ...(t.landError !== undefined ? { landError: t.landError } : {}),
+    createdAt: t.createdAt,
+    updatedAt: t.updatedAt,
+  }));
+
+  const messages = (snapshot.messages ?? []).map((m) => ({
+    id: m.id,
+    role: m.role,
+    ...(m.provider ? { provider: m.provider } : {}),
+    text: m.text,
+    ...(m.reasoningSummary
+      ? {
+          reasoningSummary:
+            m.reasoningSummary.length > REMOTE_REASONING_MAX_CHARS
+              ? m.reasoningSummary.slice(-REMOTE_REASONING_MAX_CHARS)
+              : m.reasoningSummary,
+        }
+      : {}),
+    attachments: (m.attachments ?? []).map((att) => ({
+      id: att.id,
+      kind: att.kind,
+      label: att.label,
+      ...(att.url ? { url: att.url } : {}),
+    })),
+    ...(m.mentions && m.mentions.length > 0 ? { mentions: m.mentions } : {}),
+    ...(m.inferredMentions && m.inferredMentions.length > 0
+      ? { inferredMentions: m.inferredMentions }
+      : {}),
+    toolChips: (m.toolChips ?? []).slice(-12).map((chip) => ({
+      id: chip.id,
+      ...(chip.toolName ? { toolName: chip.toolName } : {}),
+      label: chip.label,
+      detail:
+        chip.detail && chip.detail.length > REMOTE_TOOL_DETAIL_MAX_CHARS
+          ? `${chip.detail.slice(0, REMOTE_TOOL_DETAIL_MAX_CHARS)}…`
+          : chip.detail,
+      isCompleted: chip.isCompleted,
+      isError: chip.isError,
+    })),
+    ...(m.relatedTaskId ? { relatedTaskId: m.relatedTaskId } : {}),
+    ...(m.replyToMessageId ? { replyToMessageId: m.replyToMessageId } : {}),
+    ...(m.replyToSnippet ? { replyToSnippet: m.replyToSnippet } : {}),
+    isStreaming: m.isStreaming,
+    createdAt: m.createdAt,
+  }));
+
+  return {
+    projects: snapshot.projects ?? [],
+    tasks,
+    messages,
+    activeChatSessionId: snapshot.activeChatSessionId,
+    chatSessions: (snapshot.chatSessions ?? []).slice(0, 20),
+    isConnected: snapshot.isConnected,
+    connectionStatus: snapshot.connectionStatus,
+    activeResponderCount: snapshot.activeResponderCount,
+    chatProvider: snapshot.chatProvider,
+    workerProvider: snapshot.workerProvider,
+    chatModel: snapshot.chatModel,
+    chatEffort: snapshot.chatEffort,
+    workerModel: snapshot.workerModel,
+    workerEffort: snapshot.workerEffort,
+    defaultIntegrationMode: snapshot.defaultIntegrationMode,
+    autoLandOnComplete: snapshot.autoLandOnComplete,
+    preferredLanguage: snapshot.preferredLanguage,
+    lastErrorBanner: snapshot.lastErrorBanner,
+  };
+}
+
+function computeSnapshotPriorityKey(snapshot: AppSnapshot): string {
+  const msgs = snapshot.messages ?? [];
+  const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+  const taskSig = (snapshot.tasks ?? [])
+    .map((t) => `${t.id}:${t.status}:${t.landStatus ?? ""}:${t.title}`)
+    .join("|");
+  return [
+    snapshot.activeChatSessionId ?? "",
+    String(msgs.length),
+    lastMsg ? `${lastMsg.id}:${lastMsg.isStreaming ? "1" : "0"}` : "",
+    String(snapshot.activeResponderCount ?? 0),
+    snapshot.isConnected ? "1" : "0",
+    snapshot.lastErrorBanner ?? "",
+    taskSig,
+  ].join("\0");
+}
+
+interface SseClientState {
+  res: http.ServerResponse;
+  waitingDrain: boolean;
+  pendingFrame: string | null;
+  lastSentJson: string | null;
+  cleanup: () => void;
+}
+
+/**
  * Tailscale-ready HTTP + SSE Remote Bridge server for Conductor.
  * Exposes authenticated JSON/SSE endpoints wired directly to ConductorController,
  * plus a mobile-friendly Web UI fallback at `GET /`.
@@ -336,6 +469,8 @@ export class RemoteBridgeServer {
   private readonly controller: RemoteBridgeController;
   private readonly detectNetworkFn: () => TailscaleNetworkInfo;
   private readonly onClientsChanged?: (count: number) => void;
+  private readonly sseThrottleMs: number;
+  private readonly sseHeartbeatIntervalMs: number;
 
   private server: http.Server | null = null;
   private host: string;
@@ -344,8 +479,12 @@ export class RemoteBridgeServer {
   private token: string;
   private lastError: string | null = null;
   private networkInfo: TailscaleNetworkInfo;
-  private readonly sseClients = new Set<http.ServerResponse>();
+  private readonly sseClients = new Set<SseClientState>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private sseThrottleTimer: NodeJS.Timeout | null = null;
+  private pendingSnapshot: AppSnapshot | null = null;
+  private lastPublishedAt = 0;
+  private lastPublishedPriorityKey = "";
 
   constructor(controller: RemoteBridgeController, options: RemoteBridgeServerOptions = {}) {
     this.controller = controller;
@@ -358,6 +497,11 @@ export class RemoteBridgeServer {
         : generateRemoteAccessToken();
     this.detectNetworkFn = options.detectNetwork ?? (() => detectTailscaleNetwork());
     this.onClientsChanged = options.onClientsChanged;
+    this.sseThrottleMs = Math.max(0, options.sseThrottleMs ?? DEFAULT_SSE_THROTTLE_MS);
+    this.sseHeartbeatIntervalMs = Math.max(
+      1_000,
+      options.sseHeartbeatIntervalMs ?? SSE_HEARTBEAT_INTERVAL_MS,
+    );
     this.networkInfo = options.detectNetwork
       ? this.safeDetectNetwork()
       : {
@@ -385,12 +529,13 @@ export class RemoteBridgeServer {
     this.token = trimmed;
     // Disconnect existing SSE clients authenticated with the old token
     if (this.sseClients.size > 0) {
-      for (const client of this.sseClients) {
+      for (const client of [...this.sseClients]) {
         try {
-          client.end();
+          client.res.end();
         } catch {
           // ignore
         }
+        client.cleanup();
       }
       this.sseClients.clear();
       this.onClientsChanged?.(0);
@@ -467,6 +612,9 @@ export class RemoteBridgeServer {
     const server = http.createServer((req, res) => {
       void this.handleRequest(req, res);
     });
+    server.keepAliveTimeout = SERVER_KEEP_ALIVE_TIMEOUT_MS;
+    server.headersTimeout = SERVER_HEADERS_TIMEOUT_MS;
+    server.requestTimeout = 0;
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -503,15 +651,19 @@ export class RemoteBridgeServer {
 
   public async stop(): Promise<RemoteAccessStatus> {
     this.stopHeartbeat();
+    this.clearSseThrottleTimer();
+    this.pendingSnapshot = null;
 
-    for (const client of this.sseClients) {
+    const hadClients = this.sseClients.size > 0;
+    for (const client of [...this.sseClients]) {
       try {
-        client.end();
+        client.res.end();
       } catch {
         // ignore
       }
+      client.cleanup();
     }
-    if (this.sseClients.size > 0) {
+    if (hadClients) {
       this.sseClients.clear();
       this.onClientsChanged?.(0);
     }
@@ -533,17 +685,91 @@ export class RemoteBridgeServer {
 
   public publishSnapshot(snapshot: AppSnapshot): void {
     if (this.sseClients.size === 0) return;
-    const frame = `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`;
+    const priorityKey = computeSnapshotPriorityKey(snapshot);
+    const now = Date.now();
+    const elapsed = now - this.lastPublishedAt;
+
+    if (
+      this.sseThrottleMs === 0 ||
+      priorityKey !== this.lastPublishedPriorityKey ||
+      elapsed >= this.sseThrottleMs
+    ) {
+      this.flushSnapshotNow(snapshot, priorityKey);
+      return;
+    }
+
+    this.pendingSnapshot = snapshot;
+    if (!this.sseThrottleTimer) {
+      const waitMs = Math.max(10, this.sseThrottleMs - elapsed);
+      this.sseThrottleTimer = setTimeout(() => {
+        this.sseThrottleTimer = null;
+        const queued = this.pendingSnapshot;
+        this.pendingSnapshot = null;
+        if (queued && this.sseClients.size > 0) {
+          this.flushSnapshotNow(queued, computeSnapshotPriorityKey(queued));
+        }
+      }, waitMs);
+      this.sseThrottleTimer.unref?.();
+    }
+  }
+
+  private clearSseThrottleTimer(): void {
+    if (this.sseThrottleTimer) {
+      clearTimeout(this.sseThrottleTimer);
+      this.sseThrottleTimer = null;
+    }
+  }
+
+  private flushSnapshotNow(snapshot: AppSnapshot, priorityKey: string): void {
+    this.clearSseThrottleTimer();
+    this.pendingSnapshot = null;
+    if (this.sseClients.size === 0) return;
+
+    const json = JSON.stringify(buildRemoteSnapshot(snapshot));
+    this.lastPublishedPriorityKey = priorityKey;
+    this.lastPublishedAt = Date.now();
+
+    const frame = `event: snapshot\ndata: ${json}\n\n`;
     for (const client of [...this.sseClients]) {
-      if (client.writableEnded || client.destroyed) {
-        this.removeSseClient(client);
+      if (client.lastSentJson === json) {
         continue;
       }
+      this.writeSseFrame(client, frame, json);
+    }
+  }
+
+  private writeSseFrame(client: SseClientState, frame: string, jsonPayload: string | null): void {
+    const res = client.res;
+    if (res.writableEnded || res.destroyed) {
+      client.cleanup();
+      return;
+    }
+    if (res.writableLength > SSE_MAX_BACKPRESSURE_BYTES) {
       try {
-        client.write(frame);
+        res.destroy();
       } catch {
-        this.removeSseClient(client);
+        // ignore
       }
+      client.cleanup();
+      return;
+    }
+    if (client.waitingDrain) {
+      if (jsonPayload !== null) {
+        client.pendingFrame = frame;
+        client.lastSentJson = jsonPayload;
+      }
+      return;
+    }
+    try {
+      const canContinue = res.write(frame);
+      if (jsonPayload !== null) {
+        client.lastSentJson = jsonPayload;
+      }
+      if (!canContinue) {
+        client.waitingDrain = true;
+      }
+    } catch {
+      client.cleanup();
     }
   }
 
@@ -571,17 +797,26 @@ export class RemoteBridgeServer {
     this.heartbeatTimer = setInterval(() => {
       if (this.sseClients.size === 0) return;
       for (const client of [...this.sseClients]) {
-        if (client.writableEnded || client.destroyed) {
-          this.removeSseClient(client);
+        if (client.res.writableEnded || client.res.destroyed) {
+          client.cleanup();
           continue;
         }
-        try {
-          client.write(": ping\n\n");
-        } catch {
-          this.removeSseClient(client);
+        if (client.res.writableLength > SSE_MAX_BACKPRESSURE_BYTES) {
+          try {
+            client.res.destroy();
+          } catch {
+            // ignore
+          }
+          client.cleanup();
+          continue;
         }
+        if (client.waitingDrain) {
+          // Data is already draining on the socket; skip redundant ping
+          continue;
+        }
+        this.writeSseFrame(client, ": ping\n\n", null);
       }
-    }, SSE_HEARTBEAT_INTERVAL_MS);
+    }, this.sseHeartbeatIntervalMs);
     this.heartbeatTimer.unref?.();
   }
 
@@ -592,8 +827,12 @@ export class RemoteBridgeServer {
     }
   }
 
-  private removeSseClient(res: http.ServerResponse): void {
-    if (this.sseClients.delete(res)) {
+  private removeSseClient(client: SseClientState): void {
+    if (this.sseClients.delete(client)) {
+      if (this.sseClients.size === 0) {
+        this.clearSseThrottleTimer();
+        this.pendingSnapshot = null;
+      }
       this.onClientsChanged?.(this.sseClients.size);
     }
   }
@@ -604,15 +843,36 @@ export class RemoteBridgeServer {
     res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
   }
 
-  private sendJson(res: http.ServerResponse, statusCode: number, payload: unknown): void {
+  private sendJson(
+    res: http.ServerResponse,
+    statusCode: number,
+    payload: unknown,
+    req?: http.IncomingMessage,
+  ): void {
     this.applyCorsHeaders(res);
     const body = JSON.stringify(payload);
+    const rawBuf = Buffer.from(body, "utf8");
+    const acceptEncoding = typeof req?.headers["accept-encoding"] === "string"
+      ? req.headers["accept-encoding"]
+      : "";
+    if (rawBuf.length >= GZIP_MIN_BYTES && /\bgzip\b/i.test(acceptEncoding)) {
+      const compressed = zlib.gzipSync(rawBuf, { level: zlib.constants.Z_BEST_SPEED });
+      res.writeHead(statusCode, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Encoding": "gzip",
+        Vary: "Accept-Encoding",
+        "Content-Length": compressed.length,
+        "Cache-Control": "no-store",
+      });
+      res.end(compressed);
+      return;
+    }
     res.writeHead(statusCode, {
       "Content-Type": "application/json; charset=utf-8",
-      "Content-Length": Buffer.byteLength(body, "utf8"),
+      "Content-Length": rawBuf.length,
       "Cache-Control": "no-store",
     });
-    res.end(body);
+    res.end(rawBuf);
   }
 
   private isAuthorized(req: http.IncomingMessage, parsedUrl: URL, allowQueryToken: boolean): boolean {
@@ -662,6 +922,16 @@ export class RemoteBridgeServer {
 
       req.on("error", () => {
         finish({ ok: false, status: 400, error: "Failed to read request body" });
+      });
+
+      req.on("aborted", () => {
+        finish({ ok: false, status: 499, error: "Request aborted" });
+      });
+
+      req.on("close", () => {
+        if (!req.complete) {
+          finish({ ok: false, status: 499, error: "Request closed prematurely" });
+        }
       });
 
       req.on("end", () => {
@@ -751,7 +1021,7 @@ export class RemoteBridgeServer {
     res: http.ServerResponse,
   ): Promise<void> {
     if (method === "GET" && pathname === "/api/snapshot") {
-      this.sendJson(res, 200, this.controller.getSnapshot());
+      this.sendJson(res, 200, buildRemoteSnapshot(this.controller.getSnapshot()), req);
       return;
     }
 
@@ -763,7 +1033,7 @@ export class RemoteBridgeServer {
     if (method === "POST" && pathname === "/api/chat/send") {
       const parsed = await this.readJsonBody(req);
       if (!parsed.ok) {
-        this.sendJson(res, parsed.status, { ok: false, error: parsed.error });
+        this.sendJson(res, parsed.status, { ok: false, error: parsed.error }, req);
         return;
       }
       const text = typeof parsed.data.text === "string" ? parsed.data.text : "";
@@ -772,7 +1042,7 @@ export class RemoteBridgeServer {
         parsed.data.explicitMentions ?? parsed.data.mentions,
       );
       if (!text.trim() && attachments.length === 0) {
-        this.sendJson(res, 400, { ok: false, error: "text or attachments is required" });
+        this.sendJson(res, 400, { ok: false, error: "text or attachments is required" }, req);
         return;
       }
       await this.controller.sendMessage({
@@ -780,14 +1050,19 @@ export class RemoteBridgeServer {
         attachments,
         ...(explicitMentions && explicitMentions.length > 0 ? { mentions: explicitMentions } : {}),
       });
-      this.sendJson(res, 200, { ok: true });
+      this.sendJson(
+        res,
+        200,
+        { ok: true, snapshot: buildRemoteSnapshot(this.controller.getSnapshot()) },
+        req,
+      );
       return;
     }
 
     if (method === "POST" && pathname === "/api/chat/stop") {
       const parsed = await this.readJsonBody(req);
       if (!parsed.ok) {
-        this.sendJson(res, parsed.status, { ok: false, error: parsed.error });
+        this.sendJson(res, parsed.status, { ok: false, error: parsed.error }, req);
         return;
       }
       const messageId =
@@ -797,32 +1072,47 @@ export class RemoteBridgeServer {
       } else {
         await this.controller.stopAllResponders();
       }
-      this.sendJson(res, 200, { ok: true });
+      this.sendJson(
+        res,
+        200,
+        { ok: true, snapshot: buildRemoteSnapshot(this.controller.getSnapshot()) },
+        req,
+      );
       return;
     }
 
     if (method === "POST" && pathname === "/api/chat/new") {
       await this.controller.startFreshChat();
-      this.sendJson(res, 200, { ok: true });
+      this.sendJson(
+        res,
+        200,
+        { ok: true, snapshot: buildRemoteSnapshot(this.controller.getSnapshot()) },
+        req,
+      );
       return;
     }
 
     if (method === "POST" && pathname === "/api/chat/session") {
       const parsed = await this.readJsonBody(req);
       if (!parsed.ok) {
-        this.sendJson(res, parsed.status, { ok: false, error: parsed.error });
+        this.sendJson(res, parsed.status, { ok: false, error: parsed.error }, req);
         return;
       }
       const sessionId =
         typeof parsed.data.sessionId === "string" ? parsed.data.sessionId.trim() : "";
       if (!sessionId) {
-        this.sendJson(res, 400, { ok: false, error: "sessionId is required" });
+        this.sendJson(res, 400, { ok: false, error: "sessionId is required" }, req);
         return;
       }
       if (this.controller.selectChatSession) {
         await this.controller.selectChatSession(sessionId);
       }
-      this.sendJson(res, 200, { ok: true });
+      this.sendJson(
+        res,
+        200,
+        { ok: true, snapshot: buildRemoteSnapshot(this.controller.getSnapshot()) },
+        req,
+      );
       return;
     }
 
@@ -842,12 +1132,17 @@ export class RemoteBridgeServer {
       if (method === "GET" && !action) {
         const worktreeStatus = this.controller.getTaskWorktreeStatus(task.id);
         const gitStatus = this.controller.getTaskGitStatus(task.id);
-        this.sendJson(res, 200, {
-          ok: true,
-          task,
-          worktreeStatus,
-          gitStatus,
-        });
+        this.sendJson(
+          res,
+          200,
+          {
+            ok: true,
+            task,
+            worktreeStatus,
+            gitStatus,
+          },
+          req,
+        );
         return;
       }
 
@@ -904,6 +1199,10 @@ export class RemoteBridgeServer {
   }
 
   private handleSseStream(req: http.IncomingMessage, res: http.ServerResponse): void {
+    req.socket?.setNoDelay(true);
+    req.socket?.setKeepAlive(true, this.sseHeartbeatIntervalMs);
+    res.setTimeout(0);
+
     this.applyCorsHeaders(res);
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -911,23 +1210,64 @@ export class RemoteBridgeServer {
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
     });
+    res.flushHeaders?.();
 
-    this.sseClients.add(res);
-    this.onClientsChanged?.(this.sseClients.size);
+    let cleaned = false;
+    const onDrain = () => {
+      client.waitingDrain = false;
+      const nextFrame = client.pendingFrame;
+      client.pendingFrame = null;
+      if (nextFrame !== null && !cleaned) {
+        this.writeSseFrame(client, nextFrame, client.lastSentJson);
+      }
+    };
 
-    // Send initial snapshot immediately
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      client.pendingFrame = null;
+      res.off("drain", onDrain);
+      res.off("close", cleanup);
+      res.off("error", cleanup);
+      req.off("error", cleanup);
+      this.removeSseClient(client);
+    };
+
+    const client: SseClientState = {
+      res,
+      waitingDrain: false,
+      pendingFrame: null,
+      lastSentJson: null,
+      cleanup,
+    };
+
+    res.on("drain", onDrain);
+    res.on("close", cleanup);
+    res.on("error", cleanup);
+    req.on("error", cleanup);
+
+    this.sseClients.add(client);
+
+    // Send initial snapshot immediately before notifying onClientsChanged,
+    // so the subsequent desktop broadcast deduplicates against client.lastSentJson.
     try {
       const snapshot = this.controller.getSnapshot();
-      res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
+      const json = JSON.stringify(buildRemoteSnapshot(snapshot));
+      const frame = `event: snapshot\ndata: ${json}\n\n`;
+      this.writeSseFrame(client, frame, json);
     } catch {
-      this.removeSseClient(res);
-      res.end();
+      cleanup();
+      try {
+        res.end();
+      } catch {
+        // ignore
+      }
       return;
     }
 
-    req.on("close", () => {
-      this.removeSseClient(res);
-    });
+    if (!cleaned) {
+      this.onClientsChanged?.(this.sseClients.size);
+    }
   }
 }
 
@@ -1232,6 +1572,7 @@ export function renderMobileFallbackHtml(): string {
       eventSource = new EventSource(url);
       eventSource.addEventListener("snapshot", (ev) => {
         setDot("live");
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
         try { applySnapshot(JSON.parse(ev.data)); } catch {}
       });
       eventSource.onerror = () => {
@@ -1352,27 +1693,37 @@ export function renderMobileFallbackHtml(): string {
       selectedMentions = [];
       renderSelectedMentions();
       try {
-        await apiFetch("/api/chat/send", {
+        const res = await apiFetch("/api/chat/send", {
           method: "POST",
           body: JSON.stringify({ text, explicitMentions: mentionsToSend, attachments: [] }),
         });
+        if (res && res.snapshot) applySnapshot(res.snapshot);
       } catch (err) {
         showToast("送信エラー: " + err.message);
       }
     }
 
     async function stopMsg(id) {
-      try { await apiFetch("/api/chat/stop", { method: "POST", body: JSON.stringify({ messageId: id }) }); }
+      try {
+        const res = await apiFetch("/api/chat/stop", { method: "POST", body: JSON.stringify({ messageId: id }) });
+        if (res && res.snapshot) applySnapshot(res.snapshot);
+      }
       catch (err) { showToast(err.message); }
     }
 
     async function stopAll() {
-      try { await apiFetch("/api/chat/stop", { method: "POST", body: JSON.stringify({}) }); }
+      try {
+        const res = await apiFetch("/api/chat/stop", { method: "POST", body: JSON.stringify({}) });
+        if (res && res.snapshot) applySnapshot(res.snapshot);
+      }
       catch (err) { showToast(err.message); }
     }
 
     async function newChat() {
-      try { await apiFetch("/api/chat/new", { method: "POST", body: JSON.stringify({}) }); }
+      try {
+        const res = await apiFetch("/api/chat/new", { method: "POST", body: JSON.stringify({}) });
+        if (res && res.snapshot) applySnapshot(res.snapshot);
+      }
       catch (err) { showToast(err.message); }
     }
 

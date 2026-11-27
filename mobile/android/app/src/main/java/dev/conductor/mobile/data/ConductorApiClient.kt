@@ -12,14 +12,17 @@ import dev.conductor.mobile.model.TaskDetailResponse
 import dev.conductor.mobile.model.TaskLandRequest
 import dev.conductor.mobile.model.TaskStatusRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -42,7 +45,13 @@ data class ConnectionTestResult(
     val message: String,
 )
 
-class ConductorApiClient {
+class ConductorApiClient(
+    restConnectTimeoutMs: Long = 8_000L,
+    restReadTimeoutMs: Long = 25_000L,
+    restWriteTimeoutMs: Long = 15_000L,
+    landReadTimeoutMs: Long = 60_000L,
+    sseReadTimeoutMs: Long = 40_000L,
+) {
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
@@ -52,16 +61,32 @@ class ConductorApiClient {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     private val restClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(restConnectTimeoutMs, TimeUnit.MILLISECONDS)
+        .readTimeout(restReadTimeoutMs, TimeUnit.MILLISECONDS)
+        .writeTimeout(restWriteTimeoutMs, TimeUnit.MILLISECONDS)
+        .callTimeout(restReadTimeoutMs + restConnectTimeoutMs, TimeUnit.MILLISECONDS)
+        .retryOnConnectionFailure(true)
+        .protocols(listOf(Protocol.HTTP_1_1))
         .build()
 
-    private val sseClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS) // infinite read for SSE stream
-        .pingInterval(25, TimeUnit.SECONDS)
+    private val landClient: OkHttpClient = restClient.newBuilder()
+        .readTimeout(landReadTimeoutMs, TimeUnit.MILLISECONDS)
+        .callTimeout(landReadTimeoutMs + restConnectTimeoutMs, TimeUnit.MILLISECONDS)
         .build()
+
+    // Server sends `: ping\n\n` every 15s; a finite readTimeout detects half-open/stalled sockets
+    // after network switches or sleep instead of hanging indefinitely.
+    private val sseClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(restConnectTimeoutMs, TimeUnit.MILLISECONDS)
+        .readTimeout(sseReadTimeoutMs, TimeUnit.MILLISECONDS)
+        .retryOnConnectionFailure(true)
+        .protocols(listOf(Protocol.HTTP_1_1))
+        .build()
+
+    fun close() {
+        restClient.connectionPool.evictAll()
+        sseClient.connectionPool.evictAll()
+    }
 
     private fun baseUrl(config: ConnectionConfig): String =
         ConnectUriParser.normalizeServerUrl(config.serverUrl)
@@ -131,6 +156,7 @@ class ConductorApiClient {
     fun openSnapshotSse(config: ConnectionConfig): Flow<SseEvent> = callbackFlow {
         val request = authRequestBuilder(config, "/api/events")
             .header("Accept", "text/event-stream")
+            .header("Cache-Control", "no-cache")
             .get()
             .build()
 
@@ -148,6 +174,15 @@ class ConductorApiClient {
                 if (type == null || type == "snapshot") {
                     runCatching { json.decodeFromString<AppSnapshot>(data) }
                         .onSuccess { trySend(SseEvent.SnapshotReceived(it)) }
+                        .onFailure { err ->
+                            trySend(
+                                SseEvent.Disconnected(
+                                    reason = "スナップショット解析エラー: ${err.message ?: "不明な形式"}",
+                                ),
+                            )
+                            eventSource.cancel()
+                            close()
+                        }
                 }
             }
 
@@ -172,27 +207,27 @@ class ConductorApiClient {
         awaitClose {
             source.cancel()
         }
-    }
+    }.buffer(capacity = 4, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     suspend fun sendMessage(
         config: ConnectionConfig,
         text: String,
         mentions: List<ExplicitMentionTarget>,
-    ): Result<Unit> = postAction(
+    ): Result<ApiActionResponse> = postAction(
         config = config,
         path = "/api/chat/send",
         payload = json.encodeToString(ChatSendRequest(text = text, explicitMentions = mentions)),
-    ).map { Unit }
+    )
 
-    suspend fun stopChat(config: ConnectionConfig, messageId: String? = null): Result<Unit> =
+    suspend fun stopChat(config: ConnectionConfig, messageId: String? = null): Result<ApiActionResponse> =
         postAction(
             config = config,
             path = "/api/chat/stop",
             payload = json.encodeToString(ChatStopRequest(messageId = messageId)),
-        ).map { Unit }
+        )
 
-    suspend fun newChat(config: ConnectionConfig): Result<Unit> =
-        postAction(config = config, path = "/api/chat/new", payload = "{}").map { Unit }
+    suspend fun newChat(config: ConnectionConfig): Result<ApiActionResponse> =
+        postAction(config = config, path = "/api/chat/new", payload = "{}")
 
     suspend fun getTaskDetail(config: ConnectionConfig, taskId: String): Result<TaskDetailResponse> =
         withContext(Dispatchers.IO) {
@@ -229,18 +264,20 @@ class ConductorApiClient {
         config = config,
         path = "/api/tasks/$taskId/land",
         payload = json.encodeToString(TaskLandRequest(createPr = createPr)),
+        client = landClient,
     )
 
     private suspend fun postAction(
         config: ConnectionConfig,
         path: String,
         payload: String,
+        client: OkHttpClient = restClient,
     ): Result<ApiActionResponse> = withContext(Dispatchers.IO) {
         runCatching {
             val req = authRequestBuilder(config, path)
                 .post(payload.toRequestBody(jsonMediaType))
                 .build()
-            restClient.newCall(req).execute().use { res ->
+            client.newCall(req).execute().use { res ->
                 val body = res.body?.string().orEmpty()
                 val parsed = runCatching { json.decodeFromString<ApiActionResponse>(body) }.getOrNull()
                 if (!res.isSuccessful) {

@@ -49,6 +49,7 @@ private enum class MainTab(val label: String) {
 
 class MainActivity : ComponentActivity() {
     private val viewModel: ConductorViewModel by viewModels()
+    private var hasStartedOnce = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,6 +60,15 @@ class MainActivity : ComponentActivity() {
             ConductorTheme {
                 ConductorMobileApp(viewModel = viewModel)
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (hasStartedOnce) {
+            viewModel.onAppForegrounded()
+        } else {
+            hasStartedOnce = true
         }
     }
 

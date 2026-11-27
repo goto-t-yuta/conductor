@@ -98,6 +98,7 @@ data class ApiActionResponse(
     val error: String? = null,
     val action: String? = null,
     val prUrl: String? = null,
+    val snapshot: AppSnapshot? = null,
 )
 
 @Serializable

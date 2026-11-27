@@ -93,9 +93,23 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     var showMentionSheet by remember { mutableStateOf(false) }
 
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length) {
+    LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
+            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val nearBottom = messages.size <= 2 || lastVisibleIndex >= messages.lastIndex - 2
+            if (nearBottom) {
+                listState.scrollToItem(messages.lastIndex)
+            }
+        }
+    }
+
+    LaunchedEffect(messages.lastOrNull()?.id, messages.lastOrNull()?.text?.length) {
+        if (messages.isNotEmpty()) {
+            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val nearBottom = lastVisibleIndex >= messages.lastIndex - 1
+            if (nearBottom) {
+                listState.scrollToItem(messages.lastIndex)
+            }
         }
     }
 
