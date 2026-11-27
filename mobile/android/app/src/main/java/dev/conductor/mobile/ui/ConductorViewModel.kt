@@ -13,6 +13,7 @@ import dev.conductor.mobile.model.ConnectionConfig
 import dev.conductor.mobile.model.ExplicitMentionTarget
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.TaskDetailResponse
+import dev.conductor.mobile.model.ThemeMode
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -29,6 +30,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 data class ConductorUiState(
     val isLoaded: Boolean = false,
     val config: ConnectionConfig = ConnectionConfig(),
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    val groupTasksByProject: Boolean = false,
     val transportState: StreamTransportState = StreamTransportState.DISCONNECTED,
     val transportDetail: String = "未接続",
     val snapshot: AppSnapshot? = null,
@@ -60,6 +63,20 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
 
     init {
         viewModelScope.launch {
+            store.themeModeFlow
+                .distinctUntilChanged()
+                .collect { mode ->
+                    _uiState.update { it.copy(themeMode = mode) }
+                }
+        }
+        viewModelScope.launch {
+            store.groupTasksByProjectFlow
+                .distinctUntilChanged()
+                .collect { grouped ->
+                    _uiState.update { it.copy(groupTasksByProject = grouped) }
+                }
+        }
+        viewModelScope.launch {
             store.configFlow
                 .distinctUntilChanged()
                 .collect { saved ->
@@ -80,6 +97,21 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                     }
                 }
+        }
+    }
+
+    fun setThemeMode(mode: ThemeMode) {
+        _uiState.update { it.copy(themeMode = mode) }
+        viewModelScope.launch {
+            store.saveThemeMode(mode)
+        }
+    }
+
+    fun toggleGroupTasksByProject() {
+        val next = !_uiState.value.groupTasksByProject
+        _uiState.update { it.copy(groupTasksByProject = next) }
+        viewModelScope.launch {
+            store.saveGroupTasksByProject(next)
         }
     }
 

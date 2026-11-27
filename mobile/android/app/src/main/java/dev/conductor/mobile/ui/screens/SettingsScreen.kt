@@ -1,5 +1,6 @@
 package dev.conductor.mobile.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,25 +19,24 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -52,30 +52,35 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.conductor.mobile.data.ConnectionTestResult
 import dev.conductor.mobile.model.AppSnapshot
 import dev.conductor.mobile.model.ConnectUriParser
 import dev.conductor.mobile.model.ConnectionConfig
 import dev.conductor.mobile.model.StreamTransportState
-import dev.conductor.mobile.ui.theme.ConductorAmber
-import dev.conductor.mobile.ui.theme.ConductorEmerald
-import dev.conductor.mobile.ui.theme.ConductorRed
+import dev.conductor.mobile.model.ThemeMode
+import dev.conductor.mobile.ui.components.ConductorCard
+import dev.conductor.mobile.ui.components.ThemeModeSelector
+import dev.conductor.mobile.ui.components.transportStatusColor
+import dev.conductor.mobile.ui.theme.ConductorTheme
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     config: ConnectionConfig,
+    themeMode: ThemeMode,
     transportState: StreamTransportState,
     transportDetail: String,
     snapshot: AppSnapshot?,
     isTesting: Boolean,
     lastTestResult: ConnectionTestResult?,
+    onSelectThemeMode: (ThemeMode) -> Unit,
     onOpenQrScanner: () -> Unit,
     onReconnect: () -> Unit,
     onTestConnection: (url: String, token: String) -> Unit,
     onSaveConfig: (url: String, token: String) -> Unit,
     onDisconnect: () -> Unit,
 ) {
+    val colors = ConductorTheme.colors
     val clipboard = LocalClipboardManager.current
     var serverUrl by rememberSaveable { mutableStateOf(config.serverUrl) }
     var bearerToken by rememberSaveable { mutableStateOf(config.bearerToken) }
@@ -86,91 +91,195 @@ fun SettingsScreen(
         bearerToken = config.bearerToken
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = {
+    val fieldColors = OutlinedTextFieldDefaults.colors(
+        focusedBorderColor = colors.indigo,
+        unfocusedBorderColor = colors.border,
+        focusedContainerColor = colors.surfaceSecondary,
+        unfocusedContainerColor = colors.surfaceSecondary,
+        focusedTextColor = colors.textPrimary,
+        unfocusedTextColor = colors.textPrimary,
+        focusedLabelColor = colors.indigoText,
+        unfocusedLabelColor = colors.textMuted,
+        cursorColor = colors.indigo,
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(colors.surfaceSecondary),
+    ) {
+        // Desktop-aligned flat header
+        Column(modifier = Modifier.background(colors.canvas)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = null,
+                    tint = colors.indigo,
+                    modifier = Modifier.size(18.dp),
+                )
                 Text(
                     text = "Settings",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.textPrimary,
                 )
-            },
-        )
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+            }
+            HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
+        }
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // Live Status Card
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(16.dp),
+            // Appearance / Theme Switcher Card
+            ConductorCard(
+                modifier = Modifier.fillMaxWidth(),
+                cornerRadius = 14.dp,
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
                     ) {
-                        val dotColor = when (transportState) {
-                            StreamTransportState.CONNECTED_SSE -> ConductorEmerald
-                            StreamTransportState.CONNECTED_POLLING,
-                            StreamTransportState.CONNECTING -> ConductorAmber
-                            StreamTransportState.ERROR -> ConductorRed
-                            StreamTransportState.DISCONNECTED -> Color.Gray
-                        }
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(dotColor),
+                        Icon(
+                            imageVector = Icons.Default.Contrast,
+                            contentDescription = null,
+                            tint = colors.indigo,
+                            modifier = Modifier.size(16.dp),
                         )
                         Text(
-                            text = "接続ステータス",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
+                            text = "テーマ・外観",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.textPrimary,
                         )
                     }
 
                     Text(
+                        text = "デスクトップ版 Conductor と統一された配色を System / Light / Dark から選択できます。",
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        color = colors.textMuted,
+                    )
+
+                    ThemeModeSelector(
+                        selectedMode = themeMode,
+                        onSelectMode = onSelectThemeMode,
+                    )
+                }
+            }
+
+            // Connection Status Card
+            ConductorCard(
+                modifier = Modifier.fillMaxWidth(),
+                cornerRadius = 14.dp,
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(9.dp)
+                                .clip(CircleShape)
+                                .background(transportStatusColor(transportState)),
+                        )
+                        Text(
+                            text = "接続ステータス",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.textPrimary,
+                            modifier = Modifier.weight(1f),
+                        )
+                        val (statusText, statusBg, statusFg) = when (transportState) {
+                            StreamTransportState.CONNECTED_SSE -> Triple("Live SSE", colors.emeraldBg, colors.emeraldText)
+                            StreamTransportState.CONNECTED_POLLING -> Triple("Polling", colors.amberBg, colors.amberText)
+                            StreamTransportState.CONNECTING -> Triple("接続中", colors.amberBg, colors.amberText)
+                            StreamTransportState.ERROR -> Triple("エラー", colors.roseBg, colors.roseText)
+                            StreamTransportState.DISCONNECTED -> Triple("未接続", colors.surfaceSubtle, colors.textMuted)
+                        }
+                        Surface(
+                            color = statusBg,
+                            shape = RoundedCornerShape(99.dp),
+                        ) {
+                            Text(
+                                text = statusText,
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = statusFg,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+
+                    Text(
                         text = transportDetail,
-                        style = MaterialTheme.typography.bodyMedium,
+                        fontSize = 13.sp,
+                        color = colors.textSecondary,
                     )
 
                     if (snapshot != null) {
-                        Text(
-                            text = "Engine: ${snapshot.connectionStatus} · Projects: ${snapshot.projects.size} · Tasks: ${snapshot.tasks.size}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            StatPill(label = "Projects", value = "${snapshot.projects.size}")
+                            StatPill(label = "Tasks", value = "${snapshot.tasks.size}")
+                            if (snapshot.connectionStatus.isNotBlank()) {
+                                StatPill(label = "Engine", value = snapshot.connectionStatus)
+                            }
+                        }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(onClick = onReconnect) {
-                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = onReconnect,
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, colors.borderStrong),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("再接続")
+                            Text("再接続", fontSize = 12.5.sp)
                         }
                         Button(
                             onClick = onDisconnect,
-                            colors = ButtonDefaults.buttonColors(containerColor = ConductorRed),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = colors.rose,
+                                contentColor = Color.White,
+                            ),
+                            modifier = Modifier.weight(1f),
                         ) {
-                            Text("切断")
+                            Text("切断", fontSize = 12.5.sp)
                         }
                     }
                 }
             }
 
             // Edit Server / Token Card
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(16.dp),
+            ConductorCard(
+                modifier = Modifier.fillMaxWidth(),
+                cornerRadius = 14.dp,
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -182,9 +291,10 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Text(
-                            text = "サーバー URL / Token 編集",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
+                            text = "サーバー URL / Token",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.textPrimary,
                         )
                         OutlinedButton(
                             onClick = {
@@ -195,28 +305,37 @@ fun SettingsScreen(
                                     bearerToken = parsed.bearerToken
                                 }
                             },
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, colors.borderStrong),
                         ) {
                             Icon(
                                 Icons.Default.ContentPaste,
                                 contentDescription = null,
-                                modifier = Modifier.size(15.dp),
+                                modifier = Modifier.size(14.dp),
                             )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("URI 貼付")
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text("URI 貼付", fontSize = 11.5.sp)
                         }
                     }
 
                     OutlinedButton(
                         onClick = onOpenQrScanner,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, colors.indigoBorder),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Icon(
                             Icons.Default.QrCodeScanner,
                             contentDescription = null,
-                            modifier = Modifier.size(18.dp),
+                            tint = colors.indigoText,
+                            modifier = Modifier.size(17.dp),
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("QRコードをスキャンしてリンク")
+                        Text(
+                            text = "QRコードをスキャンしてリンク",
+                            fontSize = 12.5.sp,
+                            color = colors.indigoText,
+                        )
                     }
 
                     OutlinedTextField(
@@ -224,7 +343,9 @@ fun SettingsScreen(
                         onValueChange = { serverUrl = it },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("サーバー URL") },
+                        shape = RoundedCornerShape(10.dp),
+                        colors = fieldColors,
+                        label = { Text("サーバー URL", fontSize = 12.sp) },
                     )
 
                     OutlinedTextField(
@@ -232,7 +353,9 @@ fun SettingsScreen(
                         onValueChange = { bearerToken = it },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("Bearer Token") },
+                        shape = RoundedCornerShape(10.dp),
+                        colors = fieldColors,
+                        label = { Text("Bearer Token", fontSize = 12.sp) },
                         visualTransformation = if (showToken) {
                             VisualTransformation.None
                         } else {
@@ -247,31 +370,43 @@ fun SettingsScreen(
                                         Icons.Default.Visibility
                                     },
                                     contentDescription = null,
+                                    tint = colors.textMuted,
                                 )
                             }
                         },
                     )
 
                     if (lastTestResult != null) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        Surface(
+                            color = if (lastTestResult.ok) colors.emeraldBg else colors.roseBg,
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(
+                                1.dp,
+                                if (lastTestResult.ok) colors.emeraldBorder else colors.roseBorder,
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Icon(
-                                imageVector = if (lastTestResult.ok) {
-                                    Icons.Default.CheckCircle
-                                } else {
-                                    Icons.Default.Error
-                                },
-                                contentDescription = null,
-                                tint = if (lastTestResult.ok) ConductorEmerald else ConductorRed,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Text(
-                                text = lastTestResult.message,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (lastTestResult.ok) ConductorEmerald else ConductorRed,
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (lastTestResult.ok) {
+                                        Icons.Default.CheckCircle
+                                    } else {
+                                        Icons.Default.Error
+                                    },
+                                    contentDescription = null,
+                                    tint = if (lastTestResult.ok) colors.emerald else colors.rose,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Text(
+                                    text = lastTestResult.message,
+                                    fontSize = 12.sp,
+                                    color = if (lastTestResult.ok) colors.emeraldText else colors.roseText,
+                                )
+                            }
                         }
                     }
 
@@ -282,25 +417,64 @@ fun SettingsScreen(
                         OutlinedButton(
                             onClick = { onTestConnection(serverUrl, bearerToken) },
                             enabled = !isTesting && serverUrl.isNotBlank() && bearerToken.isNotBlank(),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, colors.borderStrong),
                             modifier = Modifier.weight(1f),
                         ) {
                             if (isTesting) {
-                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(15.dp),
+                                    strokeWidth = 2.dp,
+                                    color = colors.indigo,
+                                )
                             } else {
-                                Text("接続テスト")
+                                Text("接続テスト", fontSize = 12.5.sp)
                             }
                         }
 
                         Button(
                             onClick = { onSaveConfig(serverUrl, bearerToken) },
                             enabled = serverUrl.isNotBlank() && bearerToken.isNotBlank(),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = colors.indigoAction,
+                                contentColor = Color.White,
+                            ),
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text("保存して再接続")
+                            Text("保存して再接続", fontSize = 12.5.sp)
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun StatPill(label: String, value: String) {
+    val colors = ConductorTheme.colors
+    Surface(
+        color = colors.surfaceSubtle,
+        shape = RoundedCornerShape(7.dp),
+        border = BorderStroke(1.dp, colors.borderSubtle),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                fontSize = 10.5.sp,
+                color = colors.textMuted,
+            )
+            Text(
+                text = value,
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.textPrimary,
+            )
         }
     }
 }
