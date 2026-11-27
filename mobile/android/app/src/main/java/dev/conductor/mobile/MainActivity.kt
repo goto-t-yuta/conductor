@@ -18,9 +18,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Checklist
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CircularProgressIndicator
@@ -54,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import dev.conductor.mobile.model.AppUpdateStatus
+import dev.conductor.mobile.model.TerminalConnectionState
 import dev.conductor.mobile.ui.ConductorViewModel
 import dev.conductor.mobile.ui.components.ConductorImageContext
 import dev.conductor.mobile.ui.components.LocalConductorImageContext
@@ -63,6 +66,7 @@ import dev.conductor.mobile.ui.screens.QrScannerScreen
 import dev.conductor.mobile.ui.screens.SettingsScreen
 import dev.conductor.mobile.ui.screens.SetupScreen
 import dev.conductor.mobile.ui.screens.TasksScreen
+import dev.conductor.mobile.ui.screens.TerminalScreen
 import dev.conductor.mobile.ui.screens.rememberChatScrollSessionState
 import dev.conductor.mobile.ui.theme.ConductorTheme
 import dev.conductor.mobile.ui.theme.resolveDarkTheme
@@ -70,6 +74,7 @@ import dev.conductor.mobile.ui.theme.resolveDarkTheme
 private enum class MainTab(val label: String) {
     CHAT("Chat"),
     TASKS("Tasks"),
+    TERMINAL("Terminal"),
     SETTINGS("Settings"),
 }
 
@@ -136,11 +141,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ConductorMobileApp(viewModel: ConductorViewModel) {
     val state by viewModel.uiState.collectAsState()
+    val terminalState by viewModel.terminalUiState.collectAsState()
     val colors = ConductorTheme.colors
     val snackbarHostState = remember { SnackbarHostState() }
     var currentTab by rememberSaveable { mutableStateOf(MainTab.CHAT) }
     var showQrScanner by rememberSaveable { mutableStateOf(false) }
     val chatListState = rememberLazyListState()
+    val terminalListState = rememberLazyListState()
     val chatScrollSessionState = rememberChatScrollSessionState()
     var lastConnectedServerUrl by rememberSaveable { mutableStateOf("") }
 
@@ -311,6 +318,36 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                         },
                     )
                     NavigationBarItem(
+                        selected = currentTab == MainTab.TERMINAL,
+                        onClick = { currentTab = MainTab.TERMINAL },
+                        colors = navItemColors,
+                        icon = {
+                            BadgedBox(
+                                badge = {
+                                    if (terminalState.connectionState == TerminalConnectionState.CONNECTED) {
+                                        Badge(containerColor = colors.emerald)
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = if (currentTab == MainTab.TERMINAL) {
+                                        Icons.Filled.Terminal
+                                    } else {
+                                        Icons.Outlined.Terminal
+                                    },
+                                    contentDescription = "Terminal",
+                                )
+                            }
+                        },
+                        label = {
+                            Text(
+                                text = MainTab.TERMINAL.label,
+                                fontSize = 11.sp,
+                                fontWeight = if (currentTab == MainTab.TERMINAL) FontWeight.SemiBold else FontWeight.Medium,
+                            )
+                        },
+                    )
+                    NavigationBarItem(
                         selected = currentTab == MainTab.SETTINGS,
                         onClick = { currentTab = MainTab.SETTINGS },
                         colors = navItemColors,
@@ -418,6 +455,21 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
                             viewModel.addMention(target)
                             currentTab = MainTab.CHAT
                         },
+                    )
+
+                    MainTab.TERMINAL -> TerminalScreen(
+                        terminalState = terminalState,
+                        projects = state.snapshot?.projects.orEmpty(),
+                        onEnsureConnected = viewModel::ensureTerminalConnected,
+                        onSelectProject = viewModel::selectTerminalProject,
+                        onCommandInputChange = viewModel::updateTerminalCommandInput,
+                        onSubmitCommand = viewModel::submitTerminalCommand,
+                        onAuxKeyClick = viewModel::sendTerminalAuxKey,
+                        onClearOutput = viewModel::clearTerminalOutput,
+                        onRestartSession = viewModel::restartTerminalSession,
+                        onReconnect = viewModel::reconnectTerminal,
+                        onDimensionsChanged = viewModel::updateTerminalDimensions,
+                        listState = terminalListState,
                     )
 
                     MainTab.SETTINGS -> SettingsScreen(

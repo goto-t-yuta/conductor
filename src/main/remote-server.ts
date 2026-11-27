@@ -4,6 +4,7 @@ import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
+import type { Duplex } from "node:stream";
 import zlib from "node:zlib";
 import {
   getMimeTypeForImagePath,
@@ -11,6 +12,11 @@ import {
   MAX_IMAGE_FILE_BYTES,
   type LocalImageErrorCode,
 } from "./image-viewer.js";
+import {
+  RemoteTerminalService,
+  type RemoteTerminalServiceOptions,
+} from "./remote-terminal.js";
+import { RemoteWebSocketConnection, writeHttpUpgradeError } from "./remote-websocket.js";
 import {
   buildConductorConnectUri,
   buildConductorLinkUri,
@@ -87,6 +93,7 @@ export interface RemoteBridgeServerOptions {
   onClientsChanged?: (count: number) => void;
   sseThrottleMs?: number;
   sseHeartbeatIntervalMs?: number;
+  terminal?: RemoteTerminalServiceOptions;
 }
 
 export function generateRemoteAccessToken(): string {
@@ -588,10 +595,18 @@ interface SseClientState {
   cleanup: () => void;
 }
 
+interface TerminalWsClientState {
+  ws: RemoteWebSocketConnection;
+  sessionId: string | null;
+  projectPath: string | null;
+  unsubscribe: () => void;
+  cleanup: () => void;
+}
+
 /**
- * Tailscale-ready HTTP + SSE Remote Bridge server for Conductor.
+ * Tailscale-ready HTTP + SSE + WebSocket Remote Bridge server for Conductor.
  * Exposes authenticated JSON/SSE endpoints wired directly to ConductorController,
- * plus a mobile-friendly Web UI fallback at `GET /`.
+ * real-time PTY terminal WebSocket/HTTP APIs, plus a mobile-friendly Web UI fallback at `GET /`.
  */
 export class RemoteBridgeServer {
   private readonly controller: RemoteBridgeController;
@@ -599,6 +614,7 @@ export class RemoteBridgeServer {
   private readonly onClientsChanged?: (count: number) => void;
   private readonly sseThrottleMs: number;
   private readonly sseHeartbeatIntervalMs: number;
+  private readonly remoteTerminal: RemoteTerminalService;
 
   private server: http.Server | null = null;
   private host: string;
@@ -608,6 +624,7 @@ export class RemoteBridgeServer {
   private lastError: string | null = null;
   private networkInfo: TailscaleNetworkInfo;
   private readonly sseClients = new Set<SseClientState>();
+  private readonly terminalWsClients = new Set<TerminalWsClientState>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private sseThrottleTimer: NodeJS.Timeout | null = null;
   private pendingSnapshot: AppSnapshot | null = null;
@@ -630,6 +647,7 @@ export class RemoteBridgeServer {
       1_000,
       options.sseHeartbeatIntervalMs ?? SSE_HEARTBEAT_INTERVAL_MS,
     );
+    this.remoteTerminal = new RemoteTerminalService(options.terminal);
     this.networkInfo = options.detectNetwork
       ? this.safeDetectNetwork()
       : {
@@ -655,7 +673,7 @@ export class RemoteBridgeServer {
     const trimmed = token.trim();
     if (!trimmed) return;
     this.token = trimmed;
-    // Disconnect existing SSE clients authenticated with the old token
+    // Disconnect existing SSE and terminal WebSocket clients authenticated with the old token
     if (this.sseClients.size > 0) {
       for (const client of [...this.sseClients]) {
         try {
@@ -668,6 +686,7 @@ export class RemoteBridgeServer {
       this.sseClients.clear();
       this.onClientsChanged?.(0);
     }
+    this.closeAllTerminalWsClients(4001, "Token regenerated");
   }
 
   public refreshNetwork(): TailscaleNetworkInfo {
@@ -740,6 +759,9 @@ export class RemoteBridgeServer {
     const server = http.createServer((req, res) => {
       void this.handleRequest(req, res);
     });
+    server.on("upgrade", (req, socket, head) => {
+      this.handleUpgrade(req, socket, head);
+    });
     server.keepAliveTimeout = SERVER_KEEP_ALIVE_TIMEOUT_MS;
     server.headersTimeout = SERVER_HEADERS_TIMEOUT_MS;
     server.requestTimeout = 0;
@@ -795,6 +817,8 @@ export class RemoteBridgeServer {
       this.sseClients.clear();
       this.onClientsChanged?.(0);
     }
+    this.closeAllTerminalWsClients(1001, "Server stopping");
+    this.remoteTerminal.disposeAll();
 
     const srv = this.server;
     this.server = null;
@@ -923,26 +947,36 @@ export class RemoteBridgeServer {
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
-      if (this.sseClients.size === 0) return;
-      for (const client of [...this.sseClients]) {
-        if (client.res.writableEnded || client.res.destroyed) {
-          client.cleanup();
-          continue;
-        }
-        if (client.res.writableLength > SSE_MAX_BACKPRESSURE_BYTES) {
-          try {
-            client.res.destroy();
-          } catch {
-            // ignore
+      if (this.sseClients.size > 0) {
+        for (const client of [...this.sseClients]) {
+          if (client.res.writableEnded || client.res.destroyed) {
+            client.cleanup();
+            continue;
           }
-          client.cleanup();
-          continue;
+          if (client.res.writableLength > SSE_MAX_BACKPRESSURE_BYTES) {
+            try {
+              client.res.destroy();
+            } catch {
+              // ignore
+            }
+            client.cleanup();
+            continue;
+          }
+          if (client.waitingDrain) {
+            // Data is already draining on the socket; skip redundant ping
+            continue;
+          }
+          this.writeSseFrame(client, ": ping\n\n", null);
         }
-        if (client.waitingDrain) {
-          // Data is already draining on the socket; skip redundant ping
-          continue;
+      }
+      if (this.terminalWsClients.size > 0) {
+        for (const wsClient of [...this.terminalWsClients]) {
+          if (!wsClient.ws.isOpen()) {
+            wsClient.cleanup();
+            continue;
+          }
+          wsClient.ws.sendPing();
         }
-        this.writeSseFrame(client, ": ping\n\n", null);
       }
     }, this.sseHeartbeatIntervalMs);
     this.heartbeatTimer.unref?.();
@@ -967,7 +1001,7 @@ export class RemoteBridgeServer {
 
   private applyCorsHeaders(res: http.ServerResponse): void {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
   }
 
@@ -1375,6 +1409,140 @@ export class RemoteBridgeServer {
       return;
     }
 
+    if (method === "GET" && pathname === "/api/terminal/sessions") {
+      this.sendJson(res, 200, { ok: true, sessions: this.remoteTerminal.listSessions() }, req);
+      return;
+    }
+
+    if (method === "POST" && pathname === "/api/terminal/sessions") {
+      const parsed = await this.readJsonBody(req);
+      if (!parsed.ok) {
+        this.sendJson(res, parsed.status, { ok: false, error: parsed.error }, req);
+        return;
+      }
+      const projectPath =
+        typeof parsed.data.projectPath === "string" ? parsed.data.projectPath : null;
+      const cwd = typeof parsed.data.cwd === "string" ? parsed.data.cwd : null;
+      const cols = typeof parsed.data.cols === "number" ? parsed.data.cols : undefined;
+      const rows = typeof parsed.data.rows === "number" ? parsed.data.rows : undefined;
+      const id = typeof parsed.data.id === "string" ? parsed.data.id : undefined;
+
+      const created = this.remoteTerminal.createSession({
+        id,
+        projectPath,
+        cwd,
+        cols,
+        rows,
+      });
+      if (!created.ok) {
+        this.sendJson(res, 500, { ok: false, error: created.error }, req);
+        return;
+      }
+      this.sendJson(res, 200, { ok: true, session: created.session }, req);
+      return;
+    }
+
+    const terminalSessionMatch =
+      /^\/api\/terminal\/sessions\/([^/]+)(?:\/(input|resize|close))?$/.exec(pathname);
+    if (terminalSessionMatch) {
+      let sessionId = "";
+      try {
+        sessionId = decodeURIComponent(terminalSessionMatch[1]).trim();
+      } catch {
+        this.sendJson(res, 400, { ok: false, error: "Invalid session ID" }, req);
+        return;
+      }
+      const action = terminalSessionMatch[2] ?? null;
+
+      if (!sessionId) {
+        this.sendJson(res, 400, { ok: false, error: "Invalid session ID" }, req);
+        return;
+      }
+
+      if (method === "GET" && !action) {
+        const session = this.remoteTerminal.getSession(sessionId);
+        if (!session) {
+          this.sendJson(res, 404, { ok: false, error: "Terminal session not found" }, req);
+          return;
+        }
+        const afterSeqRaw = parsedUrl.searchParams.get("afterSeq");
+        const afterSeq =
+          afterSeqRaw !== null && /^\d+$/.test(afterSeqRaw.trim())
+            ? Number(afterSeqRaw.trim())
+            : undefined;
+        const replay = this.remoteTerminal.getReplay(sessionId, afterSeq);
+        this.sendJson(
+          res,
+          200,
+          {
+            ok: true,
+            session,
+            buffer: replay?.replay ?? "",
+            seq: replay?.seq ?? 0,
+            replayMode: replay?.replayMode ?? "full",
+          },
+          req,
+        );
+        return;
+      }
+
+      if (method === "POST" && action === "input") {
+        const parsed = await this.readJsonBody(req);
+        if (!parsed.ok) {
+          this.sendJson(res, parsed.status, { ok: false, error: parsed.error }, req);
+          return;
+        }
+        const data = typeof parsed.data.data === "string" ? parsed.data.data : "";
+        if (!data) {
+          this.sendJson(res, 400, { ok: false, error: "data is required" }, req);
+          return;
+        }
+        const result = this.remoteTerminal.write(sessionId, data);
+        if (!result.ok) {
+          const statusCode = result.error?.includes("not found") ? 404 : 409;
+          this.sendJson(res, statusCode, { ok: false, error: result.error }, req);
+          return;
+        }
+        this.sendJson(res, 200, { ok: true }, req);
+        return;
+      }
+
+      if (method === "POST" && action === "resize") {
+        const parsed = await this.readJsonBody(req);
+        if (!parsed.ok) {
+          this.sendJson(res, parsed.status, { ok: false, error: parsed.error }, req);
+          return;
+        }
+        const cols = typeof parsed.data.cols === "number" ? parsed.data.cols : Number(parsed.data.cols);
+        const rows = typeof parsed.data.rows === "number" ? parsed.data.rows : Number(parsed.data.rows);
+        if (!Number.isFinite(cols) || !Number.isFinite(rows)) {
+          this.sendJson(res, 400, { ok: false, error: "cols and rows must be numbers" }, req);
+          return;
+        }
+        const result = this.remoteTerminal.resize(sessionId, cols, rows);
+        if (!result.ok) {
+          const statusCode = result.error.includes("not found") ? 404 : 400;
+          this.sendJson(res, statusCode, { ok: false, error: result.error }, req);
+          return;
+        }
+        this.sendJson(res, 200, { ok: true, session: result.session }, req);
+        return;
+      }
+
+      if ((method === "DELETE" && !action) || (method === "POST" && action === "close")) {
+        const result = this.remoteTerminal.closeSession(sessionId);
+        if (!result.ok) {
+          this.sendJson(res, 404, { ok: false, error: "Terminal session not found" }, req);
+          return;
+        }
+        this.sendJson(res, 200, { ok: true }, req);
+        return;
+      }
+
+      this.sendJson(res, 405, { ok: false, error: "Method Not Allowed" }, req);
+      return;
+    }
+
     this.sendJson(res, 404, { ok: false, error: "Not Found" });
   }
 
@@ -1531,6 +1699,292 @@ export class RemoteBridgeServer {
     if (!cleaned) {
       this.onClientsChanged?.(this.sseClients.size);
     }
+  }
+
+  private closeAllTerminalWsClients(code: number, reason: string): void {
+    for (const client of [...this.terminalWsClients]) {
+      try {
+        client.ws.close(code, reason);
+      } catch {
+        // ignore
+      }
+      client.cleanup();
+    }
+    this.terminalWsClients.clear();
+  }
+
+  private handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    } catch {
+      writeHttpUpgradeError(socket, 400, "Bad Request");
+      return;
+    }
+
+    if (parsedUrl.pathname !== "/api/terminal/ws") {
+      writeHttpUpgradeError(socket, 404, "Not Found");
+      return;
+    }
+
+    if (!this.isAuthorized(req, parsedUrl, true)) {
+      writeHttpUpgradeError(
+        socket,
+        401,
+        "Unauthorized",
+        JSON.stringify({ ok: false, error: "Unauthorized" }),
+      );
+      return;
+    }
+
+    this.handleTerminalWebSocket(req, socket, head, parsedUrl);
+  }
+
+  private handleTerminalWebSocket(
+    req: http.IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    parsedUrl: URL,
+  ): void {
+    const parseOptionalInt = (raw: string | null): number | undefined => {
+      if (raw === null) return undefined;
+      const trimmed = raw.trim();
+      if (!/^\d+$/.test(trimmed)) return undefined;
+      return Number(trimmed);
+    };
+
+    const initialSessionId = parsedUrl.searchParams.get("sessionId")?.trim() || null;
+    const initialProjectPath = parsedUrl.searchParams.get("projectPath")?.trim() || null;
+    const initialCwd = parsedUrl.searchParams.get("cwd")?.trim() || null;
+    const initialCols = parseOptionalInt(parsedUrl.searchParams.get("cols"));
+    const initialRows = parseOptionalInt(parsedUrl.searchParams.get("rows"));
+    const initialAfterSeq = parseOptionalInt(parsedUrl.searchParams.get("afterSeq"));
+
+    let clientState: TerminalWsClientState | null = null;
+    let cleaned = false;
+
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      if (clientState) {
+        clientState.unsubscribe();
+        clientState.unsubscribe = () => {};
+        this.terminalWsClients.delete(clientState);
+      }
+    };
+
+    const attachSession = (
+      ws: RemoteWebSocketConnection,
+      options: {
+        sessionId?: string | null;
+        projectPath?: string | null;
+        cwd?: string | null;
+        cols?: number;
+        rows?: number;
+        afterSeq?: number;
+        forceCreate?: boolean;
+      },
+    ) => {
+      if (!clientState || !ws.isOpen()) return;
+      clientState.unsubscribe();
+      clientState.unsubscribe = () => {};
+
+      const resolved = options.forceCreate
+        ? (() => {
+            const created = this.remoteTerminal.createSession({
+              projectPath: options.projectPath,
+              cwd: options.cwd,
+              cols: options.cols,
+              rows: options.rows,
+            });
+            return created.ok
+              ? { ok: true as const, session: created.session, recreated: false }
+              : created;
+          })()
+        : this.remoteTerminal.getOrCreateSession({
+            sessionId: options.sessionId,
+            projectPath: options.projectPath,
+            cwd: options.cwd,
+            cols: options.cols,
+            rows: options.rows,
+          });
+
+      if (!resolved.ok) {
+        ws.sendJson({ type: "error", message: resolved.error });
+        return;
+      }
+
+      const session = resolved.session;
+      clientState.sessionId = session.id;
+      clientState.projectPath = session.projectPath;
+
+      const replay = this.remoteTerminal.getReplay(
+        session.id,
+        resolved.recreated ? undefined : options.afterSeq,
+      );
+
+      clientState.unsubscribe = this.remoteTerminal.subscribe(session.id, {
+        onData: (ev) => {
+          ws.sendJson({
+            type: "output",
+            sessionId: ev.sessionId,
+            data: ev.data,
+            seq: ev.seq,
+          });
+        },
+        onExit: (ev) => {
+          ws.sendJson({
+            type: "exit",
+            sessionId: ev.sessionId,
+            exitCode: ev.exitCode,
+            signal: ev.signal,
+          });
+        },
+      });
+
+      ws.sendJson({
+        type: "ready",
+        session,
+        replay: replay?.replay ?? "",
+        seq: replay?.seq ?? 0,
+        replayMode: replay?.replayMode ?? "full",
+        recreated: resolved.recreated,
+      });
+    };
+
+    const ws = RemoteWebSocketConnection.acceptUpgrade(req, socket, head, {
+      onMessage: (text) => {
+        if (!clientState) return;
+        let msg: Record<string, unknown>;
+        try {
+          const parsed = JSON.parse(text) as unknown;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            ws?.sendJson({ type: "error", message: "Message must be a JSON object" });
+            return;
+          }
+          msg = parsed as Record<string, unknown>;
+        } catch {
+          ws?.sendJson({ type: "error", message: "Invalid JSON message" });
+          return;
+        }
+
+        const type = typeof msg.type === "string" ? msg.type.trim() : "";
+        if (type === "ping") {
+          ws?.sendJson({
+            type: "pong",
+            ts: typeof msg.ts === "number" ? msg.ts : Date.now(),
+          });
+          return;
+        }
+
+        if (type === "input") {
+          const data = typeof msg.data === "string" ? msg.data : "";
+          const sid = clientState.sessionId;
+          if (!sid) {
+            ws?.sendJson({ type: "error", message: "No active terminal session" });
+            return;
+          }
+          if (!data) return;
+          const res = this.remoteTerminal.write(sid, data);
+          if (!res.ok) {
+            ws?.sendJson({ type: "error", message: res.error ?? "Failed to write to terminal" });
+          }
+          return;
+        }
+
+        if (type === "resize") {
+          const sid = clientState.sessionId;
+          const cols = typeof msg.cols === "number" ? msg.cols : Number(msg.cols);
+          const rows = typeof msg.rows === "number" ? msg.rows : Number(msg.rows);
+          if (!sid || !Number.isFinite(cols) || !Number.isFinite(rows)) {
+            return;
+          }
+          const res = this.remoteTerminal.resize(sid, cols, rows);
+          if (!res.ok) {
+            ws?.sendJson({ type: "error", message: res.error });
+          }
+          return;
+        }
+
+        if (type === "restart") {
+          const prevSessionId = clientState.sessionId;
+          const hasExplicitProjectPath = Object.prototype.hasOwnProperty.call(msg, "projectPath");
+          const nextProjectPath = hasExplicitProjectPath
+            ? typeof msg.projectPath === "string" && msg.projectPath.trim().length > 0
+              ? msg.projectPath.trim()
+              : null
+            : clientState.projectPath;
+          const nextCwd =
+            typeof msg.cwd === "string" && msg.cwd.trim().length > 0 ? msg.cwd.trim() : null;
+          const cols =
+            typeof msg.cols === "number" && Number.isFinite(msg.cols) ? msg.cols : undefined;
+          const rows =
+            typeof msg.rows === "number" && Number.isFinite(msg.rows) ? msg.rows : undefined;
+
+          clientState.unsubscribe();
+          clientState.unsubscribe = () => {};
+          if (prevSessionId) {
+            this.remoteTerminal.closeSession(prevSessionId);
+          }
+
+          if (ws) {
+            attachSession(ws, {
+              projectPath: nextProjectPath,
+              cwd: nextCwd,
+              cols,
+              rows,
+              forceCreate: true,
+            });
+          }
+          return;
+        }
+
+        if (type === "close") {
+          const sid = clientState.sessionId;
+          clientState.unsubscribe();
+          clientState.unsubscribe = () => {};
+          clientState.sessionId = null;
+          if (sid) {
+            this.remoteTerminal.closeSession(sid);
+            ws?.sendJson({
+              type: "exit",
+              sessionId: sid,
+              exitCode: 0,
+              signal: null,
+            });
+          }
+          return;
+        }
+
+        ws?.sendJson({ type: "error", message: `Unknown message type: ${type || "(empty)"}` });
+      },
+      onClose: () => {
+        cleanup();
+      },
+    });
+
+    if (!ws) {
+      return;
+    }
+
+    clientState = {
+      ws,
+      sessionId: null,
+      projectPath: initialProjectPath,
+      unsubscribe: () => {},
+      cleanup,
+    };
+    this.terminalWsClients.add(clientState);
+
+    attachSession(ws, {
+      sessionId: initialSessionId,
+      projectPath: initialProjectPath,
+      cwd: initialCwd,
+      cols: initialCols,
+      rows: initialRows,
+      afterSeq: initialAfterSeq,
+      forceCreate: false,
+    });
   }
 }
 

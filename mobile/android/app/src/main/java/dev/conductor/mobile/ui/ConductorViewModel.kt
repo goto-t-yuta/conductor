@@ -18,6 +18,10 @@ import dev.conductor.mobile.data.ConnectionTestResult
 import dev.conductor.mobile.data.ImageAttachmentLogic
 import dev.conductor.mobile.data.ReleaseFetchResult
 import dev.conductor.mobile.data.SseEvent
+import dev.conductor.mobile.data.TerminalConnectionHandle
+import dev.conductor.mobile.data.TerminalOutputBuffer
+import dev.conductor.mobile.data.TerminalWebSocketClient
+import dev.conductor.mobile.data.TerminalWsEvent
 import dev.conductor.mobile.model.AppSnapshot
 import dev.conductor.mobile.model.AppUpdateErrorCode
 import dev.conductor.mobile.model.AppUpdateLogic
@@ -33,8 +37,12 @@ import dev.conductor.mobile.model.PendingImageAttachment
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.TaskDetailResponse
 import dev.conductor.mobile.model.TaskStatusActions
+import dev.conductor.mobile.model.TerminalConnectionState
+import dev.conductor.mobile.model.TerminalUiState
 import dev.conductor.mobile.model.ThemeMode
 import dev.conductor.mobile.ui.components.ConductorImageLoader
+import dev.conductor.mobile.ui.screens.TerminalAuxKey
+import dev.conductor.mobile.ui.screens.TerminalAuxKeyKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -87,6 +95,8 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     private val appContext = application.applicationContext
     private val store = ConnectionStore(appContext)
     private val api = ConductorApiClient()
+    private val terminalWsClient = TerminalWebSocketClient()
+    private val terminalOutputBuffer = TerminalOutputBuffer()
     private val imageProcessor = AndroidImageAttachmentProcessor(appContext)
     private val attachmentImageCache = AttachmentByteCache()
     val imageLoader = ConductorImageLoader(api)
@@ -110,8 +120,19 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     )
     val uiState: StateFlow<ConductorUiState> = _uiState.asStateFlow()
 
+    private val _terminalUiState = MutableStateFlow(TerminalUiState())
+    val terminalUiState: StateFlow<TerminalUiState> = _terminalUiState.asStateFlow()
+
     private var streamJob: Job? = null
     private var streamingSyncJob: Job? = null
+    private var terminalJob: Job? = null
+    private var terminalHandle: TerminalConnectionHandle? = null
+    private var activeTerminalConfig: ConnectionConfig? = null
+    private var activeTerminalSessionId: String? = null
+    private var lastTerminalSeq: Long = -1L
+    private var terminalOutputVersion: Long = 0L
+    private var terminalAutoConnectActive: Boolean = false
+    private val terminalReconnectSignal = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     private var updateCheckJob: Job? = null
     private var updateDownloadJob: Job? = null
     private var activeSyncConfig: ConnectionConfig? = null
@@ -144,8 +165,15 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         if (saved != prev || streamJob?.isActive != true) {
                             startRealtimeSync(saved)
                         }
+                        if (saved != prev && terminalAutoConnectActive) {
+                            activeTerminalSessionId = null
+                            lastTerminalSeq = -1L
+                            terminalOutputBuffer.clear()
+                            startTerminalConnection(saved)
+                        }
                     } else {
                         stopRealtimeSync()
+                        stopTerminalConnection(resetState = true)
                         _uiState.update {
                             it.copy(
                                 transportState = StreamTransportState.DISCONNECTED,
@@ -294,10 +322,19 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                 nudgeRealtimeSync(cfg)
             }
         }
+        if (terminalAutoConnectActive) {
+            val termState = _terminalUiState.value.connectionState
+            if (termState != TerminalConnectionState.CONNECTED &&
+                termState != TerminalConnectionState.EXITED
+            ) {
+                nudgeTerminalConnection(cfg)
+            }
+        }
     }
 
     fun disconnect() {
         stopRealtimeSync()
+        stopTerminalConnection(resetState = true)
         attachmentImageCache.clear()
         imageLoader.clear()
         viewModelScope.launch {
@@ -1139,8 +1176,360 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         launchApkInstaller(file)
     }
 
+    // --- Remote Terminal (WebSocket PTY) ---
+
+    fun ensureTerminalConnected() {
+        terminalAutoConnectActive = true
+        val cfg = _uiState.value.config
+        if (!cfg.isConfigured) return
+        val currentState = _terminalUiState.value.connectionState
+        if (terminalJob?.isActive != true || activeTerminalConfig != cfg) {
+            startTerminalConnection(cfg)
+        } else if (currentState == TerminalConnectionState.ERROR ||
+            currentState == TerminalConnectionState.DISCONNECTED
+        ) {
+            nudgeTerminalConnection(cfg)
+        }
+    }
+
+    fun reconnectTerminal() {
+        terminalAutoConnectActive = true
+        val cfg = _uiState.value.config
+        if (!cfg.isConfigured) return
+        startTerminalConnection(cfg)
+    }
+
+    fun updateTerminalCommandInput(text: String) {
+        _terminalUiState.update { it.copy(commandInput = text) }
+    }
+
+    fun submitTerminalCommand() {
+        val current = _terminalUiState.value
+        val command = current.commandInput
+        val sent = terminalHandle?.sendInput("$command\r") == true
+        if (sent) {
+            _terminalUiState.update { it.copy(commandInput = "") }
+        } else {
+            showBanner("ターミナルが未接続です。再接続してください。")
+            reconnectTerminal()
+        }
+    }
+
+    fun sendTerminalAuxKey(key: TerminalAuxKey) {
+        when (key.kind) {
+            TerminalAuxKeyKind.INSERT -> {
+                _terminalUiState.update { it.copy(commandInput = it.commandInput + key.payload) }
+            }
+
+            TerminalAuxKeyKind.CONTROL -> {
+                val handle = terminalHandle
+                if (handle == null || _terminalUiState.value.connectionState != TerminalConnectionState.CONNECTED) {
+                    return
+                }
+                if (key.payload == "\t" && _terminalUiState.value.commandInput.isNotEmpty()) {
+                    val typed = _terminalUiState.value.commandInput
+                    if (handle.sendInput(typed + "\t")) {
+                        _terminalUiState.update { it.copy(commandInput = "") }
+                    }
+                } else {
+                    handle.sendInput(key.payload)
+                }
+            }
+        }
+    }
+
+    fun selectTerminalProject(projectPath: String?, projectName: String?) {
+        val cleanPath = projectPath?.trim()?.takeIf { it.isNotEmpty() }
+        val cleanName = projectName?.trim()?.takeIf { it.isNotEmpty() }
+        terminalOutputBuffer.clear()
+        lastTerminalSeq = -1L
+        terminalOutputVersion += 1L
+        _terminalUiState.update {
+            it.copy(
+                selectedProjectPath = cleanPath,
+                selectedProjectName = cleanName,
+                lines = emptyList(),
+                outputVersion = terminalOutputVersion,
+                lastError = null,
+            )
+        }
+        val handle = terminalHandle
+        val dims = _terminalUiState.value
+        if (handle != null &&
+            (dims.connectionState == TerminalConnectionState.CONNECTED ||
+                dims.connectionState == TerminalConnectionState.EXITED)
+        ) {
+            activeTerminalSessionId = null
+            _terminalUiState.update {
+                it.copy(
+                    connectionState = TerminalConnectionState.CONNECTING,
+                    statusDetail = "ディレクトリを切り替え中...",
+                )
+            }
+            if (!handle.sendRestart(cleanPath, dims.cols, dims.rows)) {
+                reconnectTerminal()
+            }
+        } else {
+            activeTerminalSessionId = null
+            reconnectTerminal()
+        }
+    }
+
+    fun clearTerminalOutput() {
+        terminalOutputBuffer.clear()
+        terminalOutputVersion += 1L
+        _terminalUiState.update {
+            it.copy(
+                lines = emptyList(),
+                outputVersion = terminalOutputVersion,
+            )
+        }
+    }
+
+    fun restartTerminalSession() {
+        terminalOutputBuffer.clear()
+        lastTerminalSeq = -1L
+        terminalOutputVersion += 1L
+        val current = _terminalUiState.value
+        _terminalUiState.update {
+            it.copy(
+                lines = emptyList(),
+                outputVersion = terminalOutputVersion,
+                lastError = null,
+            )
+        }
+        val handle = terminalHandle
+        if (handle != null &&
+            (current.connectionState == TerminalConnectionState.CONNECTED ||
+                current.connectionState == TerminalConnectionState.EXITED)
+        ) {
+            activeTerminalSessionId = null
+            _terminalUiState.update {
+                it.copy(
+                    connectionState = TerminalConnectionState.CONNECTING,
+                    statusDetail = "シェルを再起動中...",
+                )
+            }
+            if (!handle.sendRestart(current.selectedProjectPath, current.cols, current.rows)) {
+                reconnectTerminal()
+            }
+        } else {
+            activeTerminalSessionId = null
+            reconnectTerminal()
+        }
+    }
+
+    fun updateTerminalDimensions(cols: Int, rows: Int) {
+        val current = _terminalUiState.value
+        if (current.cols == cols && current.rows == rows) return
+        _terminalUiState.update { it.copy(cols = cols, rows = rows) }
+        if (current.connectionState == TerminalConnectionState.CONNECTED) {
+            terminalHandle?.sendResize(cols, rows)
+        }
+    }
+
+    private fun stopTerminalConnection(resetState: Boolean) {
+        terminalJob?.cancel()
+        terminalJob = null
+        terminalHandle?.disconnect()
+        terminalHandle = null
+        activeTerminalConfig = null
+        if (resetState) {
+            terminalAutoConnectActive = false
+            activeTerminalSessionId = null
+            lastTerminalSeq = -1L
+            terminalOutputBuffer.clear()
+            terminalOutputVersion += 1L
+            _terminalUiState.value = TerminalUiState(outputVersion = terminalOutputVersion)
+        }
+    }
+
+    private fun nudgeTerminalConnection(config: ConnectionConfig) {
+        if (terminalJob?.isActive == true && activeTerminalConfig == config) {
+            terminalReconnectSignal.tryEmit(Unit)
+        } else {
+            startTerminalConnection(config)
+        }
+    }
+
+    private fun startTerminalConnection(config: ConnectionConfig) {
+        stopTerminalConnection(resetState = false)
+        activeTerminalConfig = config
+        terminalJob = viewModelScope.launch {
+            var backoffMs = 1_000L
+            while (isActive) {
+                val snapState = _terminalUiState.value
+                val isReconnecting = activeTerminalSessionId != null
+                _terminalUiState.update {
+                    it.copy(
+                        connectionState = if (isReconnecting) {
+                            TerminalConnectionState.RECONNECTING
+                        } else {
+                            TerminalConnectionState.CONNECTING
+                        },
+                        statusDetail = if (isReconnecting) "再接続中..." else "シェルに接続中...",
+                        lastError = null,
+                    )
+                }
+
+                val handleResult = runCatching {
+                    terminalWsClient.connect(
+                        config = config,
+                        sessionId = activeTerminalSessionId,
+                        projectPath = snapState.selectedProjectPath,
+                        cols = snapState.cols,
+                        rows = snapState.rows,
+                        afterSeq = if (activeTerminalSessionId != null && lastTerminalSeq >= 0L) {
+                            lastTerminalSeq
+                        } else {
+                            null
+                        },
+                    )
+                }
+                if (handleResult.isFailure) {
+                    val err = handleResult.exceptionOrNull()
+                    _terminalUiState.update {
+                        it.copy(
+                            connectionState = TerminalConnectionState.ERROR,
+                            statusDetail = "接続エラー",
+                            lastError = err?.message ?: "ターミナル URL が不正です",
+                        )
+                    }
+                    break
+                }
+                val handle = handleResult.getOrThrow()
+                terminalHandle = handle
+
+                var unauthorized = false
+                var receivedReadyInAttempt = false
+                var stopLoop = false
+
+                try {
+                    handle.events.collect { event ->
+                        when (event) {
+                            is TerminalWsEvent.Opened -> {
+                                backoffMs = 1_000L
+                            }
+
+                            is TerminalWsEvent.Ready -> {
+                                backoffMs = 1_000L
+                                receivedReadyInAttempt = true
+                                activeTerminalSessionId = event.session.id
+                                lastTerminalSeq = event.seq
+                                if (event.replayMode == "full" || event.recreated) {
+                                    terminalOutputBuffer.replaceAll(event.replay)
+                                } else if (event.replay.isNotEmpty()) {
+                                    terminalOutputBuffer.append(event.replay)
+                                }
+                                terminalOutputVersion += 1L
+                                val isExited = event.session.status == "exited"
+                                _terminalUiState.update {
+                                    it.copy(
+                                        connectionState = if (isExited) {
+                                            TerminalConnectionState.EXITED
+                                        } else {
+                                            TerminalConnectionState.CONNECTED
+                                        },
+                                        statusDetail = if (isExited) {
+                                            "プロセス終了"
+                                        } else {
+                                            "${event.session.shellName} 接続中"
+                                        },
+                                        session = event.session,
+                                        lines = terminalOutputBuffer.snapshotLines(),
+                                        outputVersion = terminalOutputVersion,
+                                        lastError = null,
+                                    )
+                                }
+                            }
+
+                            is TerminalWsEvent.Output -> {
+                                if (event.seq > lastTerminalSeq) {
+                                    lastTerminalSeq = event.seq
+                                }
+                                terminalOutputBuffer.append(event.data)
+                                terminalOutputVersion += 1L
+                                _terminalUiState.update {
+                                    it.copy(
+                                        lines = terminalOutputBuffer.snapshotLines(),
+                                        outputVersion = terminalOutputVersion,
+                                    )
+                                }
+                            }
+
+                            is TerminalWsEvent.Exit -> {
+                                _terminalUiState.update { state ->
+                                    state.copy(
+                                        connectionState = TerminalConnectionState.EXITED,
+                                        statusDetail = "プロセス終了",
+                                        session = state.session?.copy(
+                                            status = "exited",
+                                            exitCode = event.exitCode,
+                                            signal = event.signal,
+                                        ),
+                                    )
+                                }
+                            }
+
+                            is TerminalWsEvent.ServerError -> {
+                                _terminalUiState.update {
+                                    it.copy(lastError = event.message)
+                                }
+                                showBanner("ターミナル: ${event.message}")
+                            }
+
+                            is TerminalWsEvent.Disconnected -> {
+                                unauthorized = event.unauthorized
+                                stopLoop = event.normalClose || event.unauthorized
+                                _terminalUiState.update { state ->
+                                    if (state.connectionState == TerminalConnectionState.EXITED && event.normalClose) {
+                                        state
+                                    } else {
+                                        state.copy(
+                                            connectionState = if (unauthorized) {
+                                                TerminalConnectionState.ERROR
+                                            } else if (event.normalClose) {
+                                                TerminalConnectionState.DISCONNECTED
+                                            } else {
+                                                TerminalConnectionState.RECONNECTING
+                                            },
+                                            statusDetail = event.reason,
+                                            lastError = if (unauthorized) event.reason else state.lastError,
+                                        )
+                                    }
+                                }
+                                throw CancellationException("Terminal socket closed")
+                            }
+                        }
+                    }
+                } catch (_: CancellationException) {
+                    if (!isActive) {
+                        handle.disconnect()
+                        throw CancellationException("Terminal coroutine cancelled")
+                    }
+                } finally {
+                    if (terminalHandle === handle) {
+                        terminalHandle = null
+                    }
+                }
+
+                if (unauthorized || stopLoop) {
+                    break
+                }
+
+                val waitMs = if (receivedReadyInAttempt) 1_000L else backoffMs
+                withTimeoutOrNull(waitMs) {
+                    terminalReconnectSignal.first()
+                }
+                backoffMs = (backoffMs * 2).coerceAtMost(8_000L)
+            }
+        }
+    }
+
     override fun onCleared() {
         stopRealtimeSync()
+        stopTerminalConnection(resetState = false)
+        terminalWsClient.close()
         updateCheckJob?.cancel()
         updateDownloadJob?.cancel()
         updateClient.close()
