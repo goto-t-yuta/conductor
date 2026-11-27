@@ -10,6 +10,7 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -158,7 +159,12 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
             containerColor = colors.canvas,
             snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { innerPadding ->
-            Box(modifier = Modifier.padding(innerPadding)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .consumeWindowInsets(innerPadding),
+            ) {
                 SetupScreen(
                     initialConfig = state.config,
                     pendingDeepLink = state.pendingDeepLinkConfig,
@@ -281,7 +287,8 @@ private fun ConductorMobileApp(viewModel: ConductorViewModel) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
+                .padding(innerPadding)
+                .consumeWindowInsets(innerPadding),
         ) {
             when (currentTab) {
                 MainTab.CHAT -> ChatScreen(
