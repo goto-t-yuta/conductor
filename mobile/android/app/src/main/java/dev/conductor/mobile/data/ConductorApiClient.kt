@@ -22,6 +22,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -33,7 +34,86 @@ import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import java.io.IOException
 import java.net.URLEncoder
+import java.util.Base64
 import java.util.concurrent.TimeUnit
+
+sealed interface ClassifiedImageSource {
+    data class RemoteUrl(val url: String) : ClassifiedImageSource
+    data class DataUrl(val mimeType: String, val base64Data: String) : ClassifiedImageSource
+    data class LocalPath(val path: String, val basePath: String? = null) : ClassifiedImageSource
+    data class VideoMedia(val path: String) : ClassifiedImageSource
+    data class Invalid(val reason: String) : ClassifiedImageSource
+}
+
+data class FetchedImageBytes(
+    val bytes: ByteArray,
+    val contentType: String?,
+    val sourceLabel: String,
+)
+
+object ImageSourceClassifier {
+    private val windowsDriveRegex = Regex("""^[A-Za-z]:[\\/]""")
+    private val urlSchemeRegex = Regex("""^[A-Za-z][A-Za-z0-9+.-]*:""")
+    private val dataImageBase64Regex = Regex("""^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$""", RegexOption.DOT_MATCHES_ALL)
+    private val videoExtRegex = Regex("""\.(?:mp4|webm|mov)(?:[?#].*)?$""", RegexOption.IGNORE_CASE)
+
+    fun isVideoPathOrUrl(raw: String?): Boolean {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isEmpty()) return false
+        if (trimmed.startsWith("data:video/", ignoreCase = true)) return true
+        return videoExtRegex.containsMatchIn(trimmed)
+    }
+
+    fun classify(rawSrc: String?, basePath: String? = null): ClassifiedImageSource {
+        val trimmed = rawSrc?.trim().orEmpty()
+        if (trimmed.isEmpty()) {
+            return ClassifiedImageSource.Invalid("画像パスが空です")
+        }
+        if (isVideoPathOrUrl(trimmed)) {
+            return ClassifiedImageSource.VideoMedia(trimmed)
+        }
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true)
+        ) {
+            return ClassifiedImageSource.RemoteUrl(trimmed)
+        }
+        if (trimmed.startsWith("//") && trimmed.length > 2 && trimmed[2] != '/') {
+            return ClassifiedImageSource.RemoteUrl("https:$trimmed")
+        }
+        val dataMatch = dataImageBase64Regex.matchEntire(trimmed)
+        if (dataMatch != null) {
+            return ClassifiedImageSource.DataUrl(
+                mimeType = dataMatch.groupValues[1].lowercase(),
+                base64Data = dataMatch.groupValues[2].replace(Regex("\\s+"), ""),
+            )
+        }
+        if (trimmed.startsWith("file://", ignoreCase = true)) {
+            return ClassifiedImageSource.LocalPath(path = trimmed, basePath = basePath?.trim()?.ifBlank { null })
+        }
+        val isWinDrive = windowsDriveRegex.containsMatchIn(trimmed)
+        if (!isWinDrive && urlSchemeRegex.containsMatchIn(trimmed)) {
+            return ClassifiedImageSource.Invalid("未対応の画像 URL スキームです")
+        }
+        if (trimmed.startsWith("/") ||
+            trimmed.startsWith("~/") ||
+            trimmed.startsWith("~\\") ||
+            isWinDrive
+        ) {
+            return ClassifiedImageSource.LocalPath(path = trimmed, basePath = basePath?.trim()?.ifBlank { null })
+        }
+        val cleanBase = basePath?.trim()?.ifBlank { null }
+        if (cleanBase != null) {
+            return ClassifiedImageSource.LocalPath(path = trimmed, basePath = cleanBase)
+        }
+        return ClassifiedImageSource.Invalid("相対パスの画像を解決できません")
+    }
+
+    fun extractDisplayFileName(rawSrc: String): String {
+        val cleaned = rawSrc.trim().substringBefore('#').substringBefore('?')
+        val last = cleaned.substringAfterLast('/').substringAfterLast('\\')
+        return last.ifBlank { cleaned }
+    }
+}
 
 sealed interface SseEvent {
     data object Opened : SseEvent
@@ -86,6 +166,15 @@ class ConductorApiClient(
         .callTimeout(landReadTimeoutMs + restConnectTimeoutMs, TimeUnit.MILLISECONDS)
         .build()
 
+    // Dedicated client for fetching remote & companion-server media images.
+    private val mediaClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(restConnectTimeoutMs, TimeUnit.MILLISECONDS)
+        .readTimeout(30_000L, TimeUnit.MILLISECONDS)
+        .callTimeout(40_000L, TimeUnit.MILLISECONDS)
+        .retryOnConnectionFailure(true)
+        .followRedirects(true)
+        .build()
+
     // Server sends `: ping\n\n` every 15s; a finite readTimeout detects half-open/stalled sockets
     // after network switches or sleep instead of hanging indefinitely.
     private val sseClient: OkHttpClient = OkHttpClient.Builder()
@@ -97,7 +186,109 @@ class ConductorApiClient(
 
     fun close() {
         restClient.connectionPool.evictAll()
+        mediaClient.connectionPool.evictAll()
         sseClient.connectionPool.evictAll()
+    }
+
+    fun buildMediaImageUrl(
+        config: ConnectionConfig,
+        localPath: String,
+        basePath: String? = null,
+    ): String {
+        val base = baseUrl(config)
+        val parsed = "$base/api/media/image".toHttpUrlOrNull()
+            ?: throw IllegalArgumentException("サーバー URL が不正です: $base")
+        val builder = parsed.newBuilder()
+            .addQueryParameter("path", localPath)
+        if (!basePath.isNullOrBlank()) {
+            builder.addQueryParameter("base", basePath)
+        }
+        return builder.build().toString()
+    }
+
+    suspend fun fetchImageBytes(
+        config: ConnectionConfig?,
+        rawSrc: String,
+        basePath: String? = null,
+    ): Result<FetchedImageBytes> = withContext(Dispatchers.IO) {
+        runCatching {
+            when (val classified = ImageSourceClassifier.classify(rawSrc, basePath)) {
+                is ClassifiedImageSource.Invalid -> throw IOException(classified.reason)
+                is ClassifiedImageSource.VideoMedia -> throw IOException("動画ファイルは画像として表示できません")
+                is ClassifiedImageSource.DataUrl -> {
+                    val bytes = Base64.getDecoder().decode(classified.base64Data)
+                    if (bytes.isEmpty()) throw IOException("画像データが空です")
+                    if (bytes.size > MAX_IMAGE_BYTES) throw IOException("画像サイズが大きすぎます (上限 30MB)")
+                    FetchedImageBytes(
+                        bytes = bytes,
+                        contentType = classified.mimeType,
+                        sourceLabel = "inline-image",
+                    )
+                }
+
+                is ClassifiedImageSource.RemoteUrl -> {
+                    val req = Request.Builder()
+                        .url(classified.url)
+                        .get()
+                        .build()
+                    executeImageRequest(req, classified.url)
+                }
+
+                is ClassifiedImageSource.LocalPath -> {
+                    if (config == null || !config.isConfigured) {
+                        throw IOException("サーバー未接続のためローカル画像を読み込めません")
+                    }
+                    val url = buildMediaImageUrl(
+                        config = config,
+                        localPath = classified.path,
+                        basePath = classified.basePath,
+                    )
+                    val req = Request.Builder()
+                        .url(url)
+                        .header("Authorization", "Bearer ${config.bearerToken.trim()}")
+                        .get()
+                        .build()
+                    executeImageRequest(req, classified.path)
+                }
+            }
+        }
+    }
+
+    private fun executeImageRequest(req: Request, sourceLabel: String): FetchedImageBytes {
+        mediaClient.newCall(req).execute().use { res ->
+            val contentType = res.header("Content-Type")?.substringBefore(';')?.trim()?.lowercase()
+            if (!res.isSuccessful) {
+                val errBody = res.body?.string().orEmpty()
+                val msg = when (res.code) {
+                    401 -> "認証エラー (401)"
+                    403 -> extractError(errBody, "アクセスが拒否されました (403)")
+                    404 -> extractError(errBody, "画像ファイルが見つかりません (404)")
+                    413 -> extractError(errBody, "画像サイズが大きすぎます (413)")
+                    else -> extractError(errBody, "HTTP ${res.code}")
+                }
+                throw IOException(msg)
+            }
+            val contentLength = res.body?.contentLength() ?: -1L
+            if (contentLength > MAX_IMAGE_BYTES) {
+                throw IOException("画像サイズが大きすぎます (上限 30MB)")
+            }
+            val bytes = res.body?.bytes() ?: throw IOException("画像データが空です")
+            if (bytes.isEmpty()) {
+                throw IOException("画像データが空です")
+            }
+            if (bytes.size > MAX_IMAGE_BYTES) {
+                throw IOException("画像サイズが大きすぎます (上限 30MB)")
+            }
+            return FetchedImageBytes(
+                bytes = bytes,
+                contentType = contentType,
+                sourceLabel = sourceLabel,
+            )
+        }
+    }
+
+    companion object {
+        private const val MAX_IMAGE_BYTES = 30 * 1024 * 1024 // 30 MB
     }
 
     private fun baseUrl(config: ConnectionConfig): String =

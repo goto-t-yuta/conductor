@@ -709,19 +709,21 @@ private fun UserMessageItem(
             }
         }
 
-        // Desktop-aligned soft indigo tinted user bubble (bg-indigo-500/12 dark:bg-indigo-500/20)
-        Surface(
-            color = colors.userBubbleBg,
-            shape = RoundedCornerShape(16.dp),
-            border = BorderStroke(1.dp, colors.userBubbleBorder),
-            modifier = Modifier.widthIn(max = 316.dp),
-        ) {
-            ConductorMarkdown(
-                markdown = message.text,
-                variant = MarkdownVariant.USER_BUBBLE,
-                textColor = colors.textPrimary,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            )
+        if (message.text.isNotBlank()) {
+            // Desktop-aligned soft indigo tinted user bubble (bg-indigo-500/12 dark:bg-indigo-500/20)
+            Surface(
+                color = colors.userBubbleBg,
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, colors.userBubbleBorder),
+                modifier = Modifier.widthIn(max = 316.dp),
+            ) {
+                ConductorMarkdown(
+                    markdown = message.text,
+                    variant = MarkdownVariant.USER_BUBBLE,
+                    textColor = colors.textPrimary,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+            }
         }
     }
 }
@@ -1170,6 +1172,7 @@ private fun TaskEventCard(
                 markdown = message.text,
                 variant = MarkdownVariant.COMPACT,
                 textColor = colors.textPrimary,
+                basePath = linkedTask?.worktreePath ?: linkedTask?.projectPath,
             )
 
             if (targetTaskId != null) {

@@ -20,6 +20,7 @@ import dev.conductor.mobile.model.PendingImageAttachment
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.TaskDetailResponse
 import dev.conductor.mobile.model.ThemeMode
+import dev.conductor.mobile.ui.components.ConductorImageLoader
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -61,6 +62,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     private val api = ConductorApiClient()
     private val imageProcessor = AndroidImageAttachmentProcessor(application.applicationContext)
     private val attachmentImageCache = AttachmentByteCache()
+    val imageLoader = ConductorImageLoader(api)
 
     private val _uiState = MutableStateFlow(ConductorUiState())
     val uiState: StateFlow<ConductorUiState> = _uiState.asStateFlow()
@@ -220,6 +222,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     fun disconnect() {
         stopRealtimeSync()
         attachmentImageCache.clear()
+        imageLoader.clear()
         viewModelScope.launch {
             store.clear()
             _uiState.update {
@@ -670,6 +673,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun onCleared() {
         stopRealtimeSync()
+        imageLoader.clear()
         api.close()
         super.onCleared()
     }

@@ -15,6 +15,7 @@ package dev.conductor.mobile.ui.components
 sealed interface MarkdownBlock {
     data class Heading(val level: Int, val text: String) : MarkdownBlock
     data class Paragraph(val text: String) : MarkdownBlock
+    data class Image(val alt: String, val src: String, val title: String? = null) : MarkdownBlock
     data class CodeBlock(val language: String?, val code: String) : MarkdownBlock
     data class Quote(val text: String) : MarkdownBlock
     data class BulletList(val items: List<ListItem>) : MarkdownBlock
@@ -43,6 +44,7 @@ sealed interface InlineNode {
     data class Strike(val children: List<InlineNode>) : InlineNode
     data class Code(val code: String) : InlineNode
     data class Link(val label: String, val url: String) : InlineNode
+    data class Image(val alt: String, val src: String, val title: String? = null) : InlineNode
 }
 
 object MarkdownParser {
@@ -53,6 +55,16 @@ object MarkdownParser {
     private val taskPrefixRegex = Regex("""^\[([ xX])\]\s+(.*)$""")
     private val orderedRegex = Regex("""^(\s*)(\d+)\.\s+(.*)$""")
     private val tableSeparatorCellRegex = Regex("""^:?-{2,}:?$""")
+    private val htmlImgTagRegex = Regex("""^<img\b([^>]*?)/?>""", RegexOption.IGNORE_CASE)
+    private val htmlAttrRegex = Regex("""([a-zA-Z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))""")
+    private val optionalTitleSuffixRegex = Regex("""^(.*?\S)\s+(?:"([^"\r\n]*)"|'([^'\r\n]*)')$""")
+
+    private data class ParsedImageToken(
+        val alt: String,
+        val src: String,
+        val title: String?,
+        val endIndex: Int,
+    )
 
     fun parseBlocks(markdown: String): List<MarkdownBlock> {
         if (markdown.isBlank()) return emptyList()
@@ -109,6 +121,20 @@ object MarkdownParser {
             // Horizontal rule
             if (dividerRegex.matches(line)) {
                 blocks.add(MarkdownBlock.Divider)
+                i++
+                continue
+            }
+
+            // Standalone image line: ![alt](src), ![alt](<src with spaces>), or <img src="..." />
+            val standaloneImage = parseStandaloneImageLine(trimmed)
+            if (standaloneImage != null) {
+                blocks.add(
+                    MarkdownBlock.Image(
+                        alt = standaloneImage.alt,
+                        src = standaloneImage.src,
+                        title = standaloneImage.title,
+                    ),
+                )
                 i++
                 continue
             }
@@ -199,6 +225,7 @@ object MarkdownParser {
                         fenceOpenRegex.matches(cur) ||
                             headingRegex.matches(curTrimmed) ||
                             dividerRegex.matches(cur) ||
+                            parseStandaloneImageLine(curTrimmed) != null ||
                             curTrimmed.startsWith(">") ||
                             unorderedRegex.matches(cur) ||
                             orderedRegex.matches(cur) ||
@@ -251,15 +278,62 @@ object MarkdownParser {
                 }
             }
 
-            // Markdown link: [label](url)
+            // Markdown image: ![alt](src) or ![alt](<src with spaces>)
+            if (text[i] == '!' && i + 1 < n && text[i + 1] == '[') {
+                val parsedImg = parseMarkdownImageAt(text, i)
+                if (parsedImg != null) {
+                    flushPlain()
+                    result.add(
+                        InlineNode.Image(
+                            alt = parsedImg.alt,
+                            src = parsedImg.src,
+                            title = parsedImg.title,
+                        ),
+                    )
+                    i = parsedImg.endIndex
+                    continue
+                }
+            }
+
+            // HTML <img src="..." alt="..." />
+            if (text[i] == '<' && (text.startsWith("<img", i, ignoreCase = true))) {
+                val parsedHtmlImg = parseHtmlImageAt(text, i)
+                if (parsedHtmlImg != null) {
+                    flushPlain()
+                    result.add(
+                        InlineNode.Image(
+                            alt = parsedHtmlImg.alt,
+                            src = parsedHtmlImg.src,
+                            title = parsedHtmlImg.title,
+                        ),
+                    )
+                    i = parsedHtmlImg.endIndex
+                    continue
+                }
+            }
+
+            // Markdown link: [label](url) (also handles linked image [![alt](img)](href))
             if (text[i] == '[') {
                 val closeBracket = findMatchingBracket(text, i)
                 if (closeBracket > i + 1 && closeBracket + 1 < n && text[closeBracket + 1] == '(') {
-                    val closeParen = text.indexOf(')', startIndex = closeBracket + 2)
+                    val closeParen = findMatchingLinkDestinationEnd(text, closeBracket + 1)
                     if (closeParen > closeBracket + 2) {
                         val label = text.substring(i + 1, closeBracket)
-                        val url = text.substring(closeBracket + 2, closeParen).trim()
+                        val url = unwrapAngleBrackets(text.substring(closeBracket + 2, closeParen).trim())
                         if (url.isNotEmpty()) {
+                            val nestedImg = parseStandaloneImageLine(label.trim())
+                            if (nestedImg != null) {
+                                flushPlain()
+                                result.add(
+                                    InlineNode.Image(
+                                        alt = nestedImg.alt,
+                                        src = nestedImg.src,
+                                        title = nestedImg.title,
+                                    ),
+                                )
+                                i = closeParen + 1
+                                continue
+                            }
                             flushPlain()
                             result.add(InlineNode.Link(label = label, url = url))
                             i = closeParen + 1
@@ -366,16 +440,184 @@ object MarkdownParser {
         return result
     }
 
+    private fun parseStandaloneImageLine(trimmedLine: String): ParsedImageToken? {
+        if (trimmedLine.isEmpty()) return null
+        if (trimmedLine.startsWith("![")) {
+            val img = parseMarkdownImageAt(trimmedLine, 0)
+            if (img != null && img.endIndex == trimmedLine.length) return img
+        }
+        if (trimmedLine.startsWith("<img", ignoreCase = true)) {
+            val htmlImg = parseHtmlImageAt(trimmedLine, 0)
+            if (htmlImg != null && htmlImg.endIndex == trimmedLine.length) return htmlImg
+        }
+        // Linked image on its own line: [![alt](img.png)](https://...)
+        if (trimmedLine.startsWith("[![")) {
+            val closeBracket = findMatchingBracket(trimmedLine, 0)
+            if (closeBracket > 2 && closeBracket + 1 < trimmedLine.length && trimmedLine[closeBracket + 1] == '(') {
+                val closeParen = findMatchingLinkDestinationEnd(trimmedLine, closeBracket + 1)
+                if (closeParen == trimmedLine.length - 1) {
+                    val inner = trimmedLine.substring(1, closeBracket).trim()
+                    val nested = parseMarkdownImageAt(inner, 0)
+                    if (nested != null && nested.endIndex == inner.length) {
+                        return nested.copy(endIndex = trimmedLine.length)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun parseMarkdownImageAt(text: String, startIndex: Int): ParsedImageToken? {
+        if (startIndex + 3 >= text.length) return null
+        if (text[startIndex] != '!' || text[startIndex + 1] != '[') return null
+        val closeBracket = findMatchingBracket(text, startIndex + 1)
+        if (closeBracket < startIndex + 2 || closeBracket + 1 >= text.length) return null
+        if (text[closeBracket + 1] != '(') return null
+
+        val openParen = closeBracket + 1
+        val closeParen = findMatchingLinkDestinationEnd(text, openParen)
+        if (closeParen <= openParen + 1) return null
+
+        val alt = text.substring(startIndex + 2, closeBracket)
+        val rawInner = text.substring(openParen + 1, closeParen).trim()
+        if (rawInner.isEmpty()) return null
+
+        val (src, title) = parseDestinationAndTitle(rawInner)
+        if (src.isEmpty()) return null
+
+        return ParsedImageToken(
+            alt = alt,
+            src = src,
+            title = title,
+            endIndex = closeParen + 1,
+        )
+    }
+
+    private fun parseHtmlImageAt(text: String, startIndex: Int): ParsedImageToken? {
+        val slice = text.substring(startIndex)
+        val match = htmlImgTagRegex.find(slice) ?: return null
+        val attrBody = match.groupValues[1]
+        var src = ""
+        var alt = ""
+        var title: String? = null
+        for (attr in htmlAttrRegex.findAll(attrBody)) {
+            val name = attr.groupValues[1].lowercase()
+            val value = attr.groupValues[2].ifEmpty {
+                attr.groupValues[3].ifEmpty { attr.groupValues[4] }
+            }.trim()
+            when (name) {
+                "src" -> src = value
+                "alt" -> alt = value
+                "title" -> if (value.isNotEmpty()) title = value
+            }
+        }
+        if (src.isEmpty()) return null
+        return ParsedImageToken(
+            alt = alt,
+            src = src,
+            title = title,
+            endIndex = startIndex + match.value.length,
+        )
+    }
+
+    private fun findMatchingLinkDestinationEnd(text: String, openParenIndex: Int): Int {
+        var i = openParenIndex + 1
+        val n = text.length
+        while (i < n && text[i].isWhitespace()) i++
+        if (i >= n) return -1
+
+        // Angle-bracket wrapped destination: (<path with spaces and (parens)>)
+        if (text[i] == '<') {
+            val closeAngle = text.indexOf('>', startIndex = i + 1)
+            if (closeAngle < 0) return -1
+            var j = closeAngle + 1
+            while (j < n && text[j] != ')' && text[j] != '\n') j++
+            return if (j < n && text[j] == ')') j else -1
+        }
+
+        // Standard destination with balanced parentheses support
+        var parenDepth = 0
+        var inQuote: Char? = null
+        while (i < n) {
+            val c = text[i]
+            if (c == '\n') return -1
+            if (inQuote != null) {
+                if (c == '\\' && i + 1 < n) {
+                    i += 2
+                    continue
+                }
+                if (c == inQuote) inQuote = null
+            } else {
+                when (c) {
+                    '\\' -> if (i + 1 < n) {
+                        i += 2
+                        continue
+                    }
+                    '"', '\'' -> inQuote = c
+                    '(' -> parenDepth++
+                    ')' -> {
+                        if (parenDepth == 0) return i
+                        parenDepth--
+                    }
+                }
+            }
+            i++
+        }
+        return -1
+    }
+
+    private fun parseDestinationAndTitle(rawInner: String): Pair<String, String?> {
+        val trimmed = rawInner.trim()
+        if (trimmed.startsWith("<")) {
+            val closeAngle = trimmed.indexOf('>')
+            if (closeAngle > 1) {
+                val dest = trimmed.substring(1, closeAngle).trim()
+                val rest = trimmed.substring(closeAngle + 1).trim()
+                val title = when {
+                    rest.length >= 2 && rest.startsWith("\"") && rest.endsWith("\"") ->
+                        rest.substring(1, rest.length - 1)
+                    rest.length >= 2 && rest.startsWith("'") && rest.endsWith("'") ->
+                        rest.substring(1, rest.length - 1)
+                    else -> null
+                }
+                return dest to title
+            }
+        }
+        val titleMatch = optionalTitleSuffixRegex.matchEntire(trimmed)
+        if (titleMatch != null) {
+            val dest = titleMatch.groupValues[1].trim()
+            val title = titleMatch.groupValues[2].ifEmpty { titleMatch.groupValues[3] }
+            return dest to title
+        }
+        return trimmed to null
+    }
+
+    private fun unwrapAngleBrackets(raw: String): String {
+        val trimmed = raw.trim()
+        return if (trimmed.length >= 2 && trimmed.startsWith("<") && trimmed.endsWith(">")) {
+            trimmed.substring(1, trimmed.length - 1).trim()
+        } else {
+            trimmed
+        }
+    }
+
     private fun findMatchingBracket(text: String, openIndex: Int): Int {
         var depth = 0
-        for (idx in openIndex until text.length) {
-            when (text[idx]) {
+        var idx = openIndex
+        while (idx < text.length) {
+            val c = text[idx]
+            if (c == '\\' && idx + 1 < text.length) {
+                idx += 2
+                continue
+            }
+            when (c) {
                 '[' -> depth++
                 ']' -> {
                     depth--
                     if (depth == 0) return idx
                 }
             }
+            idx++
         }
         return -1
     }

@@ -1,9 +1,12 @@
 package dev.conductor.mobile
 
+import dev.conductor.mobile.data.ClassifiedImageSource
 import dev.conductor.mobile.data.ConductorApiClient
+import dev.conductor.mobile.data.ImageSourceClassifier
 import dev.conductor.mobile.data.SseEvent
 import dev.conductor.mobile.model.ChatAttachment
 import dev.conductor.mobile.model.ConnectionConfig
+import dev.conductor.mobile.ui.components.ConductorImageLoader
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -397,6 +400,92 @@ class ConductorApiClientTest {
             )
             assertTrue(missingRes.isFailure)
             assertTrue(missingRes.exceptionOrNull()?.message?.contains("Attachment not found") == true)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun imageSourceClassifierDistinguishesLocalRemoteDataVideoAndInvalid() {
+        assertEquals(
+            ClassifiedImageSource.LocalPath("/Users/dev/Application Support/shot.png", null),
+            ImageSourceClassifier.classify("/Users/dev/Application Support/shot.png"),
+        )
+        assertEquals(
+            ClassifiedImageSource.LocalPath("file:///tmp/a.png", null),
+            ImageSourceClassifier.classify("file:///tmp/a.png"),
+        )
+        assertEquals(
+            ClassifiedImageSource.LocalPath("shots/ui.png", "/repo/wt"),
+            ImageSourceClassifier.classify("shots/ui.png", "/repo/wt"),
+        )
+        assertTrue(ImageSourceClassifier.classify("shots/ui.png", null) is ClassifiedImageSource.Invalid)
+        assertEquals(
+            ClassifiedImageSource.RemoteUrl("https://example.com/a.png"),
+            ImageSourceClassifier.classify("//example.com/a.png"),
+        )
+        assertTrue(ImageSourceClassifier.classify("data:image/png;base64,iVBORw==") is ClassifiedImageSource.DataUrl)
+        assertTrue(ImageSourceClassifier.classify("/tmp/walkthrough.mp4") is ClassifiedImageSource.VideoMedia)
+        assertTrue(ImageSourceClassifier.classify("javascript:alert(1)") is ClassifiedImageSource.Invalid)
+        assertEquals(1, ConductorImageLoader.computeInSampleSize(1200, 800, 1600))
+        assertEquals(2, ConductorImageLoader.computeInSampleSize(3200, 1800, 1600))
+        assertEquals(4, ConductorImageLoader.computeInSampleSize(6400, 3600, 1600))
+    }
+
+    @Test
+    fun fetchImageBytesAuthenticatesLocalMediaAndDoesNotLeakTokenToRemoteUrls() = runBlocking {
+        val samplePng = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        )
+        val seenRequests = mutableListOf<Pair<String, String?>>()
+
+        server.handler = { reqLine, headers, out, _ ->
+            seenRequests.add(reqLine to headers["authorization"])
+            val head = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: image/png\r\n" +
+                "Content-Length: ${samplePng.size}\r\n" +
+                "Connection: close\r\n\r\n"
+            out.write(head.toByteArray(Charsets.UTF_8))
+            out.write(samplePng)
+            out.flush()
+        }
+
+        val client = ConductorApiClient()
+        val cfg = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token)
+        try {
+            // 1. Local path goes through /api/media/image with Bearer token
+            val localRes = client.fetchImageBytes(
+                config = cfg,
+                rawSrc = "/Users/dev/Application Support/shot.png",
+                basePath = "/Users/dev/repo",
+            )
+            assertTrue(localRes.isSuccess)
+            assertEquals("image/png", localRes.getOrThrow().contentType)
+            assertTrue(samplePng.contentEquals(localRes.getOrThrow().bytes))
+            val (localReqLine, localAuth) = seenRequests[0]
+            assertTrue(localReqLine.startsWith("GET /api/media/image?"))
+            assertTrue(localReqLine.contains("path=%2FUsers%2Fdev%2FApplication%20Support%2Fshot.png"))
+            assertTrue(localReqLine.contains("base=%2FUsers%2Fdev%2Frepo"))
+            assertEquals("Bearer $token", localAuth)
+
+            // 2. Remote HTTP URL does NOT receive Conductor Bearer token
+            val remoteRes = client.fetchImageBytes(
+                config = cfg,
+                rawSrc = "${server.baseUrl}/public/banner.png",
+            )
+            assertTrue(remoteRes.isSuccess)
+            val (remoteReqLine, remoteAuth) = seenRequests[1]
+            assertTrue(remoteReqLine.startsWith("GET /public/banner.png "))
+            assertEquals(null, remoteAuth)
+
+            // 3. Inline base64 data URL decodes directly without HTTP call
+            val dataRes = client.fetchImageBytes(
+                config = null,
+                rawSrc = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            )
+            assertTrue(dataRes.isSuccess)
+            assertTrue(samplePng.contentEquals(dataRes.getOrThrow().bytes))
+            assertEquals(2, seenRequests.size)
         } finally {
             client.close()
         }

@@ -992,6 +992,7 @@ private fun TaskDetailBottomSheet(
                     markdown = task.summary,
                     variant = MarkdownVariant.DEFAULT,
                     textColor = colors.textSecondary,
+                    basePath = task.worktreePath ?: task.projectPath,
                 )
             }
 
@@ -1134,9 +1135,10 @@ private fun TaskDetailBottomSheet(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     ConductorMarkdown(
-                        markdown = task.latestOutput.take(3500),
+                        markdown = task.latestOutput,
                         variant = MarkdownVariant.COMPACT,
                         textColor = colors.textPrimary,
+                        basePath = task.worktreePath ?: task.projectPath,
                         modifier = Modifier.padding(12.dp),
                     )
                 }

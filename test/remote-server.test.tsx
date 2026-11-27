@@ -1483,3 +1483,175 @@ describe("StateStore, ConductorController & SettingsModal Remote Access integrat
     }
   });
 });
+
+describe("RemoteBridgeServer authenticated local image media endpoint (/api/media/image)", () => {
+  // Minimal valid 1x1 PNG bytes
+  const TINY_PNG = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+
+  it("serves local images with Bearer auth, supports spaces, file:// URLs, relative base dir, HEAD, and ETag 304", async () => {
+    const tmpDir = makeTempDir("conductor-remote-img-");
+    const spacedDir = path.join(tmpDir, "Application Support", "shots");
+    fs.mkdirSync(spacedDir, { recursive: true });
+    const imgPath = path.join(spacedDir, "after view.png");
+    fs.writeFileSync(imgPath, TINY_PNG);
+
+    const { controller } = createMockBridgeController([]);
+    const srv = new RemoteBridgeServer(controller, {
+      host: "127.0.0.1",
+      port: 0,
+      token: "media-test-token-123456",
+      detectNetwork: () => ({ tailscaleIp: null, magicDnsName: null, lanIp: "127.0.0.1" }),
+    });
+    activeServers.push(srv);
+    await srv.start();
+    const baseUrl = `http://127.0.0.1:${srv.getPort()}`;
+
+    // 1. Unauthenticated request is rejected with 401
+    const unauth = await fetch(
+      `${baseUrl}/api/media/image?path=${encodeURIComponent(imgPath)}`,
+    );
+    expect(unauth.status).toBe(401);
+
+    // 2. Query-param token is NOT accepted on /api/media/image (Bearer header required)
+    const queryTokenRes = await fetch(
+      `${baseUrl}/api/media/image?path=${encodeURIComponent(imgPath)}&token=media-test-token-123456`,
+    );
+    expect(queryTokenRes.status).toBe(401);
+
+    // 3. Authenticated GET with absolute path containing spaces succeeds
+    const okRes = await fetch(
+      `${baseUrl}/api/media/image?path=${encodeURIComponent(imgPath)}`,
+      { headers: { Authorization: "Bearer media-test-token-123456" } },
+    );
+    expect(okRes.status).toBe(200);
+    expect(okRes.headers.get("content-type")).toBe("image/png");
+    expect(okRes.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(okRes.headers.get("content-security-policy")).toContain("sandbox");
+    const etag = okRes.headers.get("etag");
+    expect(etag).toBeTruthy();
+    const bodyBuf = Buffer.from(await okRes.arrayBuffer());
+    expect(bodyBuf.equals(TINY_PNG)).toBe(true);
+
+    // 4. Conditional GET with matching ETag returns 304
+    const notModRes = await fetch(
+      `${baseUrl}/api/media/image?path=${encodeURIComponent(imgPath)}`,
+      {
+        headers: {
+          Authorization: "Bearer media-test-token-123456",
+          "If-None-Match": etag!,
+        },
+      },
+    );
+    expect(notModRes.status).toBe(304);
+
+    // 5. HEAD request returns headers with empty body
+    const headRes = await fetch(
+      `${baseUrl}/api/media/image?path=${encodeURIComponent(imgPath)}`,
+      {
+        method: "HEAD",
+        headers: { Authorization: "Bearer media-test-token-123456" },
+      },
+    );
+    expect(headRes.status).toBe(200);
+    expect(headRes.headers.get("content-type")).toBe("image/png");
+    expect(Number(headRes.headers.get("content-length"))).toBe(TINY_PNG.length);
+    expect((await headRes.arrayBuffer()).byteLength).toBe(0);
+
+    // 6. file:// URL works
+    const fileUrl = `file://${imgPath.split(path.sep).map(encodeURIComponent).join("/")}`;
+    const fileUrlRes = await fetch(
+      `${baseUrl}/api/media/image?path=${encodeURIComponent(fileUrl)}`,
+      { headers: { Authorization: "Bearer media-test-token-123456" } },
+    );
+    expect(fileUrlRes.status).toBe(200);
+    expect(Buffer.from(await fileUrlRes.arrayBuffer()).equals(TINY_PNG)).toBe(true);
+
+    // 7. Relative path resolved against `base` directory works
+    const relRes = await fetch(
+      `${baseUrl}/api/media/image?path=${encodeURIComponent("shots/after view.png")}&base=${encodeURIComponent(path.join(tmpDir, "Application Support"))}`,
+      { headers: { Authorization: "Bearer media-test-token-123456" } },
+    );
+    expect(relRes.status).toBe(200);
+    expect(Buffer.from(await relRes.arrayBuffer()).equals(TINY_PNG)).toBe(true);
+  });
+
+  it("blocks non-image files, symlinks to non-image files, missing path, and returns 404 for nonexistent images", async () => {
+    const tmpDir = makeTempDir("conductor-remote-img-sec-");
+    const secretFile = path.join(tmpDir, "secret.env");
+    fs.writeFileSync(secretFile, "API_KEY=top-secret");
+    const evilSymlink = path.join(tmpDir, "disguised.png");
+    fs.symlinkSync(secretFile, evilSymlink);
+
+    const { controller } = createMockBridgeController([]);
+    const srv = new RemoteBridgeServer(controller, {
+      host: "127.0.0.1",
+      port: 0,
+      token: "media-sec-token-123456",
+      detectNetwork: () => ({ tailscaleIp: null, magicDnsName: null, lanIp: "127.0.0.1" }),
+    });
+    activeServers.push(srv);
+    await srv.start();
+    const baseUrl = `http://127.0.0.1:${srv.getPort()}`;
+    const headers = { Authorization: "Bearer media-sec-token-123456" };
+
+    // Missing path param -> 400
+    const missingParam = await fetch(`${baseUrl}/api/media/image`, { headers });
+    expect(missingParam.status).toBe(400);
+
+    // Non-image extension -> 400
+    const nonImage = await fetch(
+      `${baseUrl}/api/media/image?path=${encodeURIComponent(secretFile)}`,
+      { headers },
+    );
+    expect(nonImage.status).toBe(400);
+
+    // Symlink with .png extension pointing to non-image file -> 403
+    const symlinkRes = await fetch(
+      `${baseUrl}/api/media/image?path=${encodeURIComponent(evilSymlink)}`,
+      { headers },
+    );
+    expect(symlinkRes.status).toBe(403);
+
+    // Nonexistent .png -> 404
+    const notFound = await fetch(
+      `${baseUrl}/api/media/image?path=${encodeURIComponent(path.join(tmpDir, "missing.png"))}`,
+      { headers },
+    );
+    expect(notFound.status).toBe(404);
+  });
+
+  it("preserves attachment imagePath while omitting base64 imageDataUrl in buildRemoteSnapshot", () => {
+    const snap = makeSnapshot([]);
+    snap.messages = [
+      {
+        id: "m-att",
+        role: "user",
+        text: "Check this screenshot",
+        attachments: [
+          {
+            id: "att-1",
+            kind: "image",
+            label: "ui.png",
+            imagePath: "/tmp/ui.png",
+            imageDataUrl: "data:image/png;base64,AAAA",
+          },
+        ],
+        toolChips: [],
+        isStreaming: false,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const remote = buildRemoteSnapshot(snap) as {
+      messages: Array<{ attachments: Array<Record<string, unknown>> }>;
+    };
+    expect(remote.messages[0]?.attachments[0]).toEqual({
+      id: "att-1",
+      kind: "image",
+      label: "ui.png",
+      imagePath: "/tmp/ui.png",
+    });
+  });
+});

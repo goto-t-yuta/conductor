@@ -68,6 +68,7 @@ fun ConductorMarkdown(
     modifier: Modifier = Modifier,
     variant: MarkdownVariant = MarkdownVariant.DEFAULT,
     textColor: Color = ConductorTheme.colors.textPrimary,
+    basePath: String? = null,
 ) {
     val colors = ConductorTheme.colors
     val blocks = remember(markdown) { MarkdownParser.parseBlocks(markdown) }
@@ -120,7 +121,7 @@ fun ConductorMarkdown(
                 }
 
                 is MarkdownBlock.Paragraph -> {
-                    MarkdownInlineText(
+                    MarkdownRichText(
                         text = block.text,
                         colors = colors,
                         variant = variant,
@@ -129,7 +130,16 @@ fun ConductorMarkdown(
                             fontSize = baseFontSize,
                             lineHeight = baseLineHeight,
                         ),
+                        basePath = basePath,
                         onOpenUrl = { url -> runCatching { uriHandler.openUri(url) } },
+                    )
+                }
+
+                is MarkdownBlock.Image -> {
+                    MarkdownImageBlock(
+                        alt = block.alt,
+                        src = block.src,
+                        basePath = basePath,
                     )
                 }
 
@@ -160,7 +170,7 @@ fun ConductorMarkdown(
                                 .fillMaxHeight()
                                 .background(colors.indigo.copy(alpha = 0.65f)),
                         )
-                        MarkdownInlineText(
+                        MarkdownRichText(
                             text = block.text,
                             colors = colors,
                             variant = variant,
@@ -169,7 +179,10 @@ fun ConductorMarkdown(
                                 fontSize = baseFontSize,
                                 lineHeight = baseLineHeight,
                             ),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                            basePath = basePath,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
                             onOpenUrl = { url -> runCatching { uriHandler.openUri(url) } },
                         )
                     }
@@ -208,7 +221,7 @@ fun ConductorMarkdown(
                                         modifier = Modifier.padding(start = 2.dp),
                                     )
                                 }
-                                MarkdownInlineText(
+                                MarkdownRichText(
                                     text = item.text,
                                     colors = colors,
                                     variant = variant,
@@ -217,6 +230,7 @@ fun ConductorMarkdown(
                                         fontSize = baseFontSize,
                                         lineHeight = baseLineHeight,
                                     ),
+                                    basePath = basePath,
                                     modifier = Modifier.weight(1f),
                                     onOpenUrl = { url -> runCatching { uriHandler.openUri(url) } },
                                 )
@@ -243,7 +257,7 @@ fun ConductorMarkdown(
                                     fontWeight = FontWeight.Medium,
                                     modifier = Modifier.widthIn(min = 18.dp),
                                 )
-                                MarkdownInlineText(
+                                MarkdownRichText(
                                     text = item.text,
                                     colors = colors,
                                     variant = variant,
@@ -252,6 +266,7 @@ fun ConductorMarkdown(
                                         fontSize = baseFontSize,
                                         lineHeight = baseLineHeight,
                                     ),
+                                    basePath = basePath,
                                     modifier = Modifier.weight(1f),
                                     onOpenUrl = { url -> runCatching { uriHandler.openUri(url) } },
                                 )
@@ -467,7 +482,88 @@ private fun MarkdownTable(
     }
 }
 
-@Suppress("DEPRECATION")
+private sealed interface RichSegment {
+    data class InlineNodes(val nodes: List<InlineNode>) : RichSegment
+    data class ImageSegment(val node: InlineNode.Image) : RichSegment
+}
+
+private fun splitInlineSegments(nodes: List<InlineNode>): List<RichSegment> {
+    if (nodes.none { it is InlineNode.Image }) return emptyList()
+    val segments = mutableListOf<RichSegment>()
+    val buf = mutableListOf<InlineNode>()
+    fun flush() {
+        if (buf.isNotEmpty()) {
+            val hasNonBlank = buf.any { it !is InlineNode.Plain || it.text.isNotBlank() }
+            if (hasNonBlank) {
+                segments.add(RichSegment.InlineNodes(buf.toList()))
+            }
+            buf.clear()
+        }
+    }
+    for (node in nodes) {
+        if (node is InlineNode.Image) {
+            flush()
+            segments.add(RichSegment.ImageSegment(node))
+        } else {
+            buf.add(node)
+        }
+    }
+    flush()
+    return segments
+}
+
+@Composable
+private fun MarkdownRichText(
+    text: String,
+    colors: ConductorColors,
+    variant: MarkdownVariant,
+    style: TextStyle,
+    basePath: String?,
+    modifier: Modifier = Modifier,
+    onOpenUrl: (String) -> Unit,
+) {
+    val parsedNodes = remember(text) { MarkdownParser.parseInline(text) }
+    val segments = remember(parsedNodes) { splitInlineSegments(parsedNodes) }
+
+    if (segments.isEmpty()) {
+        MarkdownInlineNodesText(
+            nodes = parsedNodes,
+            colors = colors,
+            variant = variant,
+            style = style,
+            modifier = modifier,
+            onOpenUrl = onOpenUrl,
+        )
+    } else {
+        Column(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            segments.forEach { seg ->
+                when (seg) {
+                    is RichSegment.InlineNodes -> {
+                        MarkdownInlineNodesText(
+                            nodes = seg.nodes,
+                            colors = colors,
+                            variant = variant,
+                            style = style,
+                            onOpenUrl = onOpenUrl,
+                        )
+                    }
+
+                    is RichSegment.ImageSegment -> {
+                        MarkdownImageBlock(
+                            alt = seg.node.alt,
+                            src = seg.node.src,
+                            basePath = basePath,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun MarkdownInlineText(
     text: String,
@@ -477,9 +573,30 @@ private fun MarkdownInlineText(
     modifier: Modifier = Modifier,
     onOpenUrl: (String) -> Unit,
 ) {
-    val annotated = remember(text, colors, variant) {
+    val nodes = remember(text) { MarkdownParser.parseInline(text) }
+    MarkdownInlineNodesText(
+        nodes = nodes,
+        colors = colors,
+        variant = variant,
+        style = style,
+        modifier = modifier,
+        onOpenUrl = onOpenUrl,
+    )
+}
+
+@Suppress("DEPRECATION")
+@Composable
+private fun MarkdownInlineNodesText(
+    nodes: List<InlineNode>,
+    colors: ConductorColors,
+    variant: MarkdownVariant,
+    style: TextStyle,
+    modifier: Modifier = Modifier,
+    onOpenUrl: (String) -> Unit,
+) {
+    val annotated = remember(nodes, colors, variant) {
         buildMarkdownAnnotatedString(
-            nodes = MarkdownParser.parseInline(text),
+            nodes = nodes,
             colors = colors,
             isUserBubble = variant == MarkdownVariant.USER_BUBBLE,
         )
@@ -584,6 +701,11 @@ private fun buildMarkdownAnnotatedString(
                         start = start,
                         end = length,
                     )
+                }
+
+                is InlineNode.Image -> {
+                    val label = node.alt.ifBlank { node.src }
+                    append("[$label]")
                 }
             }
         }

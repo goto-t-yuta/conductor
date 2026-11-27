@@ -89,4 +89,77 @@ class MarkdownParserTest {
             nodes.filterIsInstance<InlineNode.Plain>().any { it.text.contains("snake_case_plain") },
         )
     }
+
+    @Test
+    fun parsesStandaloneSpacedAngleBracketAndHtmlImages() {
+        val md = """
+            修正が完了しました。
+            ![Updated UI](</Users/dev/Library/Application Support/Conductor/shot 1.png>)
+            ![Bare Spaced](/Users/dev/Library/Application Support/Conductor/shot 2.png "After")
+            <img src="/tmp/html-shot.webp" alt="HTML Shot" />
+            ![](/tmp/no-alt.jpg)
+            テストもすべて通っています。
+        """.trimIndent()
+
+        val blocks = MarkdownParser.parseBlocks(md)
+        assertEquals(6, blocks.size)
+        assertEquals(MarkdownBlock.Paragraph("修正が完了しました。"), blocks[0])
+        assertEquals(
+            MarkdownBlock.Image(
+                alt = "Updated UI",
+                src = "/Users/dev/Library/Application Support/Conductor/shot 1.png",
+                title = null,
+            ),
+            blocks[1],
+        )
+        assertEquals(
+            MarkdownBlock.Image(
+                alt = "Bare Spaced",
+                src = "/Users/dev/Library/Application Support/Conductor/shot 2.png",
+                title = "After",
+            ),
+            blocks[2],
+        )
+        assertEquals(
+            MarkdownBlock.Image(
+                alt = "HTML Shot",
+                src = "/tmp/html-shot.webp",
+                title = null,
+            ),
+            blocks[3],
+        )
+        assertEquals(
+            MarkdownBlock.Image(
+                alt = "",
+                src = "/tmp/no-alt.jpg",
+                title = null,
+            ),
+            blocks[4],
+        )
+        assertEquals(MarkdownBlock.Paragraph("テストもすべて通っています。"), blocks[5])
+    }
+
+    @Test
+    fun parsesInlineImagesAndIgnoresImagesInsideCode() {
+        val inline = MarkdownParser.parseInline(
+            "Before ![Preview](/tmp/preview.png) and `![Ignored](/tmp/code.png)` plus [![Linked](https://example.com/a.png)](https://example.com).",
+        )
+        assertEquals(
+            listOf(
+                InlineNode.Image("Preview", "/tmp/preview.png", null),
+                InlineNode.Image("Linked", "https://example.com/a.png", null),
+            ),
+            inline.filterIsInstance<InlineNode.Image>(),
+        )
+        assertTrue(inline.any { it == InlineNode.Code("![Ignored](/tmp/code.png)") })
+
+        val fenced = """
+            ```markdown
+            ![NotAnImage](/tmp/fenced.png)
+            ```
+        """.trimIndent()
+        val blocks = MarkdownParser.parseBlocks(fenced)
+        assertEquals(1, blocks.size)
+        assertTrue(blocks[0] is MarkdownBlock.CodeBlock)
+    }
 }

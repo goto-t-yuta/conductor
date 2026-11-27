@@ -33,6 +33,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
@@ -50,6 +51,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import dev.conductor.mobile.ui.ConductorViewModel
+import dev.conductor.mobile.ui.components.ConductorImageContext
+import dev.conductor.mobile.ui.components.LocalConductorImageContext
 import dev.conductor.mobile.ui.screens.ChatScreen
 import dev.conductor.mobile.ui.screens.QrScannerScreen
 import dev.conductor.mobile.ui.screens.SettingsScreen
@@ -86,8 +89,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            val imageContext = remember(viewModel.imageLoader, state.config) {
+                ConductorImageContext(
+                    loader = viewModel.imageLoader,
+                    config = state.config.takeIf { it.isConfigured },
+                )
+            }
+
             ConductorTheme(themeMode = state.themeMode) {
-                ConductorMobileApp(viewModel = viewModel)
+                CompositionLocalProvider(LocalConductorImageContext provides imageContext) {
+                    ConductorMobileApp(viewModel = viewModel)
+                }
             }
         }
     }

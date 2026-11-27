@@ -5,7 +5,12 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import zlib from "node:zlib";
-import { getMimeTypeForImagePath, MAX_IMAGE_FILE_BYTES } from "./image-viewer.js";
+import {
+  getMimeTypeForImagePath,
+  inspectLocalImageFile,
+  MAX_IMAGE_FILE_BYTES,
+  type LocalImageErrorCode,
+} from "./image-viewer.js";
 import {
   buildConductorConnectUri,
   buildConductorLinkUri,
@@ -511,6 +516,7 @@ export function buildRemoteSnapshot(snapshot: AppSnapshot): Record<string, unkno
       id: att.id,
       kind: att.kind,
       label: att.label,
+      ...(att.imagePath ? { imagePath: att.imagePath } : {}),
       ...(att.url ? { url: att.url } : {}),
     })),
     ...(m.mentions && m.mentions.length > 0 ? { mentions: m.mentions } : {}),
@@ -1123,7 +1129,7 @@ export class RemoteBridgeServer {
       }
 
       try {
-        await this.handleAuthenticatedApi(method, pathname, req, res);
+        await this.handleAuthenticatedApi(method, pathname, parsedUrl, req, res);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (!res.headersSent) {
@@ -1139,6 +1145,7 @@ export class RemoteBridgeServer {
   private async handleAuthenticatedApi(
     method: string,
     pathname: string,
+    parsedUrl: URL,
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): Promise<void> {
@@ -1180,6 +1187,11 @@ export class RemoteBridgeServer {
         "X-Content-Type-Options": "nosniff",
       });
       res.end(resolved.buffer);
+      return;
+    }
+
+    if ((method === "GET" || method === "HEAD") && pathname === "/api/media/image") {
+      this.handleLocalImageMedia(method, parsedUrl, req, res);
       return;
     }
 
@@ -1364,6 +1376,89 @@ export class RemoteBridgeServer {
     }
 
     this.sendJson(res, 404, { ok: false, error: "Not Found" });
+  }
+
+  private mapImageErrorToHttpStatus(errorCode: LocalImageErrorCode): number {
+    switch (errorCode) {
+      case "invalid":
+        return 400;
+      case "forbidden":
+        return 403;
+      case "not_found":
+        return 404;
+      case "too_large":
+        return 413;
+      case "io_error":
+        return 500;
+    }
+  }
+
+  private handleLocalImageMedia(
+    method: string,
+    parsedUrl: URL,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const rawPath = parsedUrl.searchParams.get("path")?.trim() ?? "";
+    const rawBase = parsedUrl.searchParams.get("base")?.trim() || undefined;
+    if (!rawPath) {
+      this.sendJson(res, 400, { ok: false, error: "path query parameter is required" }, req);
+      return;
+    }
+
+    const inspected = inspectLocalImageFile(rawPath, rawBase);
+    if (!inspected.ok) {
+      this.sendJson(
+        res,
+        this.mapImageErrorToHttpStatus(inspected.errorCode),
+        { ok: false, error: inspected.error },
+        req,
+      );
+      return;
+    }
+
+    const etag = `"${inspected.sizeBytes}-${Math.trunc(inspected.mtimeMs)}"`;
+    this.applyCorsHeaders(res);
+
+    const commonHeaders: http.OutgoingHttpHeaders = {
+      "Content-Type": inspected.mimeType,
+      "Content-Disposition": "inline",
+      "Cache-Control": "private, max-age=300",
+      ETag: etag,
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+    };
+
+    if (req.headers["if-none-match"] === etag) {
+      res.writeHead(304, commonHeaders);
+      res.end();
+      return;
+    }
+
+    res.writeHead(200, {
+      ...commonHeaders,
+      "Content-Length": inspected.sizeBytes,
+    });
+
+    if (method === "HEAD") {
+      res.end();
+      return;
+    }
+
+    const stream = fs.createReadStream(inspected.realPath);
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        this.sendJson(res, 500, { ok: false, error: "Failed to stream image file" }, req);
+      } else {
+        res.destroy();
+      }
+    });
+    res.on("close", () => {
+      if (!stream.destroyed) {
+        stream.destroy();
+      }
+    });
+    stream.pipe(res);
   }
 
   private handleSseStream(req: http.IncomingMessage, res: http.ServerResponse): void {
