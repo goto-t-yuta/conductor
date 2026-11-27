@@ -358,8 +358,11 @@ function areRemoteAccessEqual(
     a.magicDnsName === b.magicDnsName &&
     a.lanIp === b.lanIp &&
     a.url === b.url &&
+    a.tailscaleUrl === b.tailscaleUrl &&
     a.magicDnsUrl === b.magicDnsUrl &&
+    a.lanUrl === b.lanUrl &&
     a.connectUri === b.connectUri &&
+    a.linkUri === b.linkUri &&
     a.connectedClients === b.connectedClients &&
     a.error === b.error
   );

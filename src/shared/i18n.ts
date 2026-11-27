@@ -567,14 +567,31 @@ export const UI_STRINGS = {
     "remote.step1Badge": "Step 1",
     "remote.step1Title": "Android アプリをダウンロード",
     "remote.step1Desc":
-      "スマホのカメラで読み取り、GitHub Releases の最新リリースから APK をインストールします。",
+      "スマホのカメラで読み取り、最新リリースの APK ファイルを直接ダウンロードしてインストールします。",
     "remote.step1QrAria": "Android APK ダウンロード用 QR コード",
     "remote.step1CopyUrl": "URL コピー",
+    "remote.step1ReleasesLink": "GitHub Releases ページを開く",
     "remote.step2Badge": "Step 2",
     "remote.step2Title": "デスクトップとリンク（ペアリング）",
     "remote.step2DescActive":
       "Android アプリの「QRコードをスキャンしてリンク」または標準カメラで読み取ると、URL とトークンが自動設定されて即座に接続します。",
     "remote.step2QrAria": "デスクトップ連携用 QR コード",
+    "remote.step2EndpointSelectorAria": "ペアリング接続方式を選択",
+    "remote.step2ModeTailscale": "Tailscale",
+    "remote.step2ModeLan": "LAN",
+    "remote.step2TailscaleVariantAria": "Tailscale アドレス形式を選択",
+    "remote.step2TailscaleIpBtn": "Tailscale IP",
+    "remote.step2MagicDnsBtn": "MagicDNS",
+    "remote.step2CurrentUrlLabel": "現在の接続先 URL",
+    "remote.step2TailscaleUnavailableTitle": "Tailscale が未接続です",
+    "remote.step2TailscaleUnavailableDesc":
+      "Tailscale を起動してログインしたあと「再検出」を押してください。同一 Wi-Fi 内なら LAN 経由でもペアリングできます。",
+    "remote.step2SwitchToLanBtn": "LAN QR を表示",
+    "remote.step2LanUnavailableTitle": "LAN IP が未検出です",
+    "remote.step2LanUnavailableDesc":
+      "ローカルネットワークに接続してから「再検出」を押してください。",
+    "remote.step2TailscaleLanHint":
+      "Tailscale 未接続のため LAN URL を表示中です。外出先からも接続するには Tailscale を起動して「再検出」を押してください。",
     "remote.step2TailscaleWarning":
       "Tailscale IP が未検出です。Mac と Android の両方で Tailscale を ON にして「再検出」を押してください。",
     "remote.step2TokenHint":
@@ -584,7 +601,8 @@ export const UI_STRINGS = {
     "remote.step2EnableBtn": "Remote Bridge を有効化して QR を表示",
     "remote.portLabel": "ポート番号（既定: 4789）",
     "remote.applyBtn": "適用",
-    "remote.tailscaleDetection": "Tailscale 検出結果",
+    "remote.tailscaleDetection": "Tailscale / LAN 検出結果",
+    "remote.lanIpLabel": "LAN IP",
     "remote.notDetected": "未検出",
     "remote.urlLabel": "接続 URL（Android Chrome でもそのまま開けます）",
     "remote.copyBtn": "コピー",
@@ -1221,14 +1239,31 @@ export const UI_STRINGS = {
     "remote.step1Badge": "Step 1",
     "remote.step1Title": "Download Android App",
     "remote.step1Desc":
-      "Scan with your phone camera to open GitHub Releases and install the latest APK.",
+      "Scan with your phone camera to directly download and install the latest Android APK.",
     "remote.step1QrAria": "QR code for downloading the Android APK",
     "remote.step1CopyUrl": "Copy URL",
+    "remote.step1ReleasesLink": "Open GitHub Releases page",
     "remote.step2Badge": "Step 2",
     "remote.step2Title": "Link with Desktop (Pairing)",
     "remote.step2DescActive":
       "Scan using \"Scan QR to Link\" in the Android app or your system camera to auto-save the URL & token and connect immediately.",
     "remote.step2QrAria": "QR code for pairing with desktop Conductor",
+    "remote.step2EndpointSelectorAria": "Select pairing connection mode",
+    "remote.step2ModeTailscale": "Tailscale",
+    "remote.step2ModeLan": "LAN",
+    "remote.step2TailscaleVariantAria": "Select Tailscale address format",
+    "remote.step2TailscaleIpBtn": "Tailscale IP",
+    "remote.step2MagicDnsBtn": "MagicDNS",
+    "remote.step2CurrentUrlLabel": "Endpoint URL",
+    "remote.step2TailscaleUnavailableTitle": "Tailscale is not connected",
+    "remote.step2TailscaleUnavailableDesc":
+      "Start and sign in to Tailscale, then click Redetect. You can also pair over LAN on the same Wi-Fi.",
+    "remote.step2SwitchToLanBtn": "Show LAN QR",
+    "remote.step2LanUnavailableTitle": "LAN IP not detected",
+    "remote.step2LanUnavailableDesc":
+      "Connect to a local network, then click Redetect.",
+    "remote.step2TailscaleLanHint":
+      "Tailscale is not connected — showing LAN URL. Start Tailscale and click Redetect for remote access.",
     "remote.step2TailscaleWarning":
       "Tailscale IP not detected. Turn on Tailscale on both Mac and Android, then click Redetect.",
     "remote.step2TokenHint":
@@ -1238,7 +1273,8 @@ export const UI_STRINGS = {
     "remote.step2EnableBtn": "Enable Remote Bridge & Show QR",
     "remote.portLabel": "Port (Default: 4789)",
     "remote.applyBtn": "Apply",
-    "remote.tailscaleDetection": "Tailscale Detection",
+    "remote.tailscaleDetection": "Tailscale / LAN Detection",
+    "remote.lanIpLabel": "LAN IP",
     "remote.notDetected": "Not detected",
     "remote.urlLabel": "Connection URL (also works in Android Chrome)",
     "remote.copyBtn": "Copy",

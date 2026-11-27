@@ -421,8 +421,11 @@ export interface RemoteAccessStatus {
   magicDnsName: string | null;
   lanIp: string | null;
   url: string | null;
+  tailscaleUrl?: string | null;
   magicDnsUrl: string | null;
+  lanUrl?: string | null;
   connectUri: string | null;
+  linkUri?: string | null;
   connectedClients: number;
   error: string | null;
 }

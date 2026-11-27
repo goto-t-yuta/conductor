@@ -11,6 +11,7 @@ import {
   DEFAULT_REMOTE_ACCESS_PORT,
   RemoteBridgeServer,
   buildConductorConnectUri,
+  buildConductorLinkUri,
   detectTailscaleIpv4FromInterfaces,
   detectTailscaleNetwork,
   isTailscaleIpv4,
@@ -19,8 +20,17 @@ import {
 } from "../src/main/remote-server.js";
 import { StateStore } from "../src/main/state-store.js";
 import { buildQrSvgData } from "../src/renderer/components/QrCodeSvg.js";
-import { SettingsModal } from "../src/renderer/components/SettingsModal.js";
-import { ANDROID_APK_DOWNLOAD_URL } from "../src/shared/remote-access.js";
+import {
+  RemoteAccessSettingsSection,
+  SettingsModal,
+} from "../src/renderer/components/SettingsModal.js";
+import {
+  ANDROID_APK_DOWNLOAD_URL,
+  ANDROID_APK_FILENAME,
+  ANDROID_RELEASES_PAGE_URL,
+  resolvePairingEndpoints,
+  resolvePairingTarget,
+} from "../src/shared/remote-access.js";
 import { validateManualTaskStatusTransition } from "../src/shared/task-status.js";
 import type {
   AgentTask,
@@ -301,6 +311,124 @@ describe("Tailscale IP detection & connect URI helpers", () => {
     });
     expect(cliFallback.tailscaleIp).toBe("100.99.88.77");
     expect(cliFallback.magicDnsName).toBe("studio.ts.net");
+    expect(cliFallback.lanIp).toBe("192.168.1.42");
+
+    // When Tailscale daemon reports BackendState !== "Running", ignore stale cached DNS/IP safely
+    const stoppedDaemon = detectTailscaleNetwork({
+      interfaces: fakeInterfaces,
+      runTailscale: (args) => {
+        if (args[0] === "status") {
+          return JSON.stringify({
+            BackendState: "Stopped",
+            Self: {
+              DNSName: "macbook-pro.tail1234.ts.net.",
+              TailscaleIPs: ["100.121.247.7"],
+            },
+          });
+        }
+        return "100.121.247.7\n";
+      },
+    });
+    expect(stoppedDaemon).toEqual({
+      tailscaleIp: null,
+      magicDnsName: null,
+      lanIp: "192.168.1.42",
+    });
+
+    // When tailscale CLI throws or is missing, safely fall back to LAN without throwing
+    const missingCli = detectTailscaleNetwork({
+      interfaces: { en0: fakeInterfaces.en0 },
+      runTailscale: () => {
+        throw new Error("ENOENT: tailscale not found");
+      },
+    });
+    expect(missingCli).toEqual({
+      tailscaleIp: null,
+      magicDnsName: null,
+      lanIp: "192.168.1.42",
+    });
+  });
+
+  it("resolves Tailscale IP, MagicDNS, and LAN pairing endpoints and builds conductor://link URIs", () => {
+    const token = "secret-token-123";
+    const linkUri = buildConductorLinkUri("http://100.121.247.7:4789", token);
+    expect(linkUri).toBe(
+      "conductor://link?url=http%3A%2F%2F100.121.247.7%3A4789&token=secret-token-123",
+    );
+    expect(parseConductorConnectUri(linkUri)).toEqual({
+      url: "http://100.121.247.7:4789",
+      token,
+    });
+
+    // Both Tailscale IP and MagicDNS + LAN available -> defaults to Tailscale IP
+    const fullStatus = {
+      port: 4789,
+      token,
+      tailscaleIp: "100.121.247.7",
+      magicDnsName: "macbook-pro.taile00453.ts.net",
+      lanIp: "192.168.1.42",
+    };
+    const fullEndpoints = resolvePairingEndpoints(fullStatus);
+    expect(fullEndpoints).toEqual({
+      tailscaleIpUrl: "http://100.121.247.7:4789",
+      magicDnsUrl: "http://macbook-pro.taile00453.ts.net:4789",
+      lanUrl: "http://192.168.1.42:4789",
+      hasTailscale: true,
+      hasBothTailscaleEndpoints: true,
+      defaultTransport: "tailscale",
+      defaultTailscaleAddressKind: "ip",
+    });
+
+    const defaultTarget = resolvePairingTarget(fullStatus);
+    expect(defaultTarget.transport).toBe("tailscale");
+    expect(defaultTarget.endpointKind).toBe("tailscale-ip");
+    expect(defaultTarget.url).toBe("http://100.121.247.7:4789");
+    expect(defaultTarget.linkUri).toBe(linkUri);
+
+    const magicDnsTarget = resolvePairingTarget(fullStatus, {
+      transport: "tailscale",
+      tailscaleAddressKind: "magicdns",
+    });
+    expect(magicDnsTarget.endpointKind).toBe("tailscale-magicdns");
+    expect(magicDnsTarget.url).toBe("http://macbook-pro.taile00453.ts.net:4789");
+    expect(magicDnsTarget.linkUri).toBe(
+      buildConductorLinkUri("http://macbook-pro.taile00453.ts.net:4789", token),
+    );
+
+    const lanTarget = resolvePairingTarget(fullStatus, { transport: "lan" });
+    expect(lanTarget.endpointKind).toBe("lan");
+    expect(lanTarget.url).toBe("http://192.168.1.42:4789");
+    expect(lanTarget.linkUri).toBe(buildConductorLinkUri("http://192.168.1.42:4789", token));
+
+    // Only MagicDNS available -> defaults to Tailscale MagicDNS
+    const magicDnsOnly = resolvePairingTarget({
+      port: 4789,
+      token,
+      tailscaleIp: null,
+      magicDnsName: "macbook-pro.taile00453.ts.net",
+      lanIp: "192.168.1.42",
+    });
+    expect(magicDnsOnly.transport).toBe("tailscale");
+    expect(magicDnsOnly.endpointKind).toBe("tailscale-magicdns");
+    expect(magicDnsOnly.url).toBe("http://macbook-pro.taile00453.ts.net:4789");
+
+    // Tailscale unavailable -> defaults to LAN, while selecting Tailscale yields null linkUri
+    const lanOnlyStatus = {
+      port: 4789,
+      token,
+      tailscaleIp: null,
+      magicDnsName: null,
+      lanIp: "192.168.1.42",
+    };
+    const lanFallback = resolvePairingTarget(lanOnlyStatus);
+    expect(lanFallback.transport).toBe("lan");
+    expect(lanFallback.url).toBe("http://192.168.1.42:4789");
+    expect(lanFallback.linkUri).toBe(buildConductorLinkUri("http://192.168.1.42:4789", token));
+
+    const tailscaleUnavailable = resolvePairingTarget(lanOnlyStatus, { transport: "tailscale" });
+    expect(tailscaleUnavailable.transport).toBe("tailscale");
+    expect(tailscaleUnavailable.url).toBeNull();
+    expect(tailscaleUnavailable.linkUri).toBeNull();
   });
 
   it("round-trips conductor://connect, conductor://link, and JSON pairing payloads cleanly", () => {
@@ -330,6 +458,22 @@ describe("Tailscale IP detection & connect URI helpers", () => {
     expect(parseConductorConnectUri("conductor://other?url=http://100.64.0.1:4789&token=abc")).toBeNull();
     expect(parseConductorConnectUri("conductor://connect?url=http://100.64.0.1:4789")).toBeNull();
     expect(parseConductorConnectUri("{invalid-json}")).toBeNull();
+  });
+
+  it("uses the direct latest Android APK download URL matching release.yml", () => {
+    expect(ANDROID_APK_FILENAME).toBe("conductor-android.apk");
+    expect(ANDROID_APK_DOWNLOAD_URL).toBe(
+      "https://github.com/goto-t-yuta/conductor/releases/latest/download/conductor-android.apk",
+    );
+    expect(ANDROID_RELEASES_PAGE_URL).toBe(
+      "https://github.com/goto-t-yuta/conductor/releases/latest",
+    );
+
+    const releaseWorkflow = fs.readFileSync(
+      path.resolve(process.cwd(), ".github/workflows/release.yml"),
+      "utf8",
+    );
+    expect(releaseWorkflow).toContain(`release/${ANDROID_APK_FILENAME}`);
   });
 
   it("generates deterministic offline SVG QR data for APK download and pairing URIs", () => {
@@ -662,8 +806,11 @@ describe("StateStore, ConductorController & SettingsModal Remote Access integrat
       expect(started.enabled).toBe(true);
       expect(started.running).toBe(true);
       expect(started.url).toBe("http://100.121.247.7:14789");
+      expect(started.tailscaleUrl).toBe("http://100.121.247.7:14789");
       expect(started.magicDnsUrl).toBe("http://mac.tail.ts.net:14789");
+      expect(started.lanUrl).toBe("http://192.168.0.10:14789");
       expect(started.connectUri).toContain("conductor://connect?");
+      expect(started.linkUri).toContain("conductor://link?");
 
       const prevToken = started.token;
       const rotated = controller.regenerateRemoteAccessToken();
@@ -715,7 +862,13 @@ describe("StateStore, ConductorController & SettingsModal Remote Access integrat
     expect(html).toContain('data-testid="remote-access-qr-panel"');
     expect(html).toContain('data-testid="remote-access-qr-download"');
     expect(html).toContain('data-testid="remote-access-qr-pair"');
+    expect(html).toContain(
+      `href="${ANDROID_APK_DOWNLOAD_URL}"`,
+    );
     expect(html).toContain(ANDROID_APK_DOWNLOAD_URL);
+    expect(html).toContain('data-testid="remote-access-releases-link"');
+    expect(html).toContain(`href="${ANDROID_RELEASES_PAGE_URL}"`);
+    expect(html).toContain("GitHub Releases ページを開く");
     expect(html).toContain("100.121.247.7");
     expect(html).toContain("macbook-pro.taile00453.ts.net");
     expect(html).toContain("http://100.121.247.7:4789");
@@ -790,8 +943,95 @@ describe("StateStore, ConductorController & SettingsModal Remote Access integrat
 
     expect(enNoTailscaleHtml).toContain("Android Quick Setup (QR Code)");
     expect(enNoTailscaleHtml).toContain("Download Android App");
+    expect(enNoTailscaleHtml).toContain("Open GitHub Releases page");
+    expect(enNoTailscaleHtml).toContain(`href="${ANDROID_APK_DOWNLOAD_URL}"`);
     expect(enNoTailscaleHtml).toContain("Link with Desktop (Pairing)");
     expect(enNoTailscaleHtml).toContain('data-testid="remote-access-qr-pair"');
     expect(enNoTailscaleHtml).toContain('data-testid="remote-access-qr-tailscale-warning"');
+    expect(enNoTailscaleHtml).toContain('data-testid="remote-access-qr-endpoint-selector"');
+    expect(enNoTailscaleHtml).toContain('data-testid="remote-access-qr-endpoint-url"');
+    expect(enNoTailscaleHtml).toContain("http://192.168.1.5:4789");
+  });
+
+  it("renders Tailscale IP, MagicDNS, LAN, and Tailscale-unavailable states in Step 2 QR pairing", () => {
+    const token = "abcdef0123456789abcdef0123456789";
+    const fullRemoteAccess = {
+      enabled: true,
+      running: true,
+      port: 4789,
+      token,
+      bindHost: "0.0.0.0",
+      tailscaleIp: "100.121.247.7",
+      magicDnsName: "macbook-pro.taile00453.ts.net",
+      lanIp: "192.168.1.5",
+      url: "http://100.121.247.7:4789",
+      tailscaleUrl: "http://100.121.247.7:4789",
+      magicDnsUrl: "http://macbook-pro.taile00453.ts.net:4789",
+      lanUrl: "http://192.168.1.5:4789",
+      connectUri: buildConductorConnectUri("http://100.121.247.7:4789", token),
+      linkUri: buildConductorLinkUri("http://100.121.247.7:4789", token),
+      connectedClients: 1,
+      error: null,
+    };
+
+    // 1. Default selects Tailscale IP and encodes conductor://link?... QR
+    const tsIpHtml = renderToStaticMarkup(
+      <RemoteAccessSettingsSection remoteAccess={fullRemoteAccess} locale="ja" />,
+    );
+    const tsIpQr = buildQrSvgData(buildConductorLinkUri("http://100.121.247.7:4789", token))!;
+    expect(tsIpHtml).toContain('data-testid="remote-access-qr-endpoint-selector"');
+    expect(tsIpHtml).toContain('data-testid="remote-access-qr-tailscale-variant"');
+    expect(tsIpHtml).toContain('data-testid="remote-access-qr-endpoint-url"');
+    expect(tsIpHtml).toContain("http://100.121.247.7:4789");
+    expect(tsIpHtml).toContain(`d="${tsIpQr.pathD}"`);
+
+    // 2. MagicDNS selection encodes MagicDNS URL in conductor://link?... QR
+    const magicDnsHtml = renderToStaticMarkup(
+      <RemoteAccessSettingsSection
+        remoteAccess={fullRemoteAccess}
+        locale="ja"
+        initialPairingTransport="tailscale"
+        initialTailscaleAddressKind="magicdns"
+      />,
+    );
+    const magicDnsQr = buildQrSvgData(
+      buildConductorLinkUri("http://macbook-pro.taile00453.ts.net:4789", token),
+    )!;
+    expect(magicDnsHtml).toContain("http://macbook-pro.taile00453.ts.net:4789");
+    expect(magicDnsHtml).toContain(`d="${magicDnsQr.pathD}"`);
+    expect(magicDnsHtml).not.toContain(`d="${tsIpQr.pathD}"`);
+
+    // 3. LAN selection encodes LAN IP URL in conductor://link?... QR
+    const lanHtml = renderToStaticMarkup(
+      <RemoteAccessSettingsSection
+        remoteAccess={fullRemoteAccess}
+        locale="ja"
+        initialPairingTransport="lan"
+      />,
+    );
+    const lanQr = buildQrSvgData(buildConductorLinkUri("http://192.168.1.5:4789", token))!;
+    expect(lanHtml).toContain("http://192.168.1.5:4789");
+    expect(lanHtml).toContain(`d="${lanQr.pathD}"`);
+
+    // 4. Tailscale tab selected when Tailscale is disconnected shows start hint & LAN switch button
+    const disconnectedTsHtml = renderToStaticMarkup(
+      <RemoteAccessSettingsSection
+        remoteAccess={{
+          ...fullRemoteAccess,
+          tailscaleIp: null,
+          magicDnsName: null,
+          tailscaleUrl: null,
+          magicDnsUrl: null,
+          url: "http://192.168.1.5:4789",
+        }}
+        locale="ja"
+        initialPairingTransport="tailscale"
+      />,
+    );
+    expect(disconnectedTsHtml).toContain('data-testid="remote-access-qr-tailscale-unavailable"');
+    expect(disconnectedTsHtml).toContain("Tailscale が未接続です");
+    expect(disconnectedTsHtml).toContain("Tailscale を起動してログインしたあと");
+    expect(disconnectedTsHtml).toContain('data-testid="remote-access-qr-switch-lan"');
+    expect(disconnectedTsHtml).not.toContain('data-testid="remote-access-qr-pair"');
   });
 });

@@ -2,6 +2,8 @@
 
 **A macOS desktop single-chat multi-agent orchestrator for Codex, AGY, and Claude.**
 
+**[Product Page & Downloads → https://goto-t-yuta.github.io/conductor/](https://goto-t-yuta.github.io/conductor/)**
+
 Manage multiple local repositories from **one non-blocking chat** paired with an **Agent Tasks & Questions sidebar** and a **project-scoped Chromium / Markdown / Image viewer** — backed by parallel **Git worktree** workers with **Auto-Land** and **AI conflict self-resolution**.
 
 ![Conductor 3-pane workspace showing Agent Tasks & Questions on the left, Unified Non-Blocking Chat with @ mention badges in the center, and the In-App Chromium Browser on the right](docs/images/conductor-overview.png)
@@ -91,14 +93,14 @@ flowchart LR
 
 ## Downloads & Releases
 
-Prebuilt desktop binaries for **macOS**, **Windows**, and **Linux** — along with the **Android** companion APK — are automatically built and published to [GitHub Releases](https://github.com/goto-t-yuta/conductor/releases) on every push/merge to `main` (and via manual `workflow_dispatch`):
+Download installers directly from the **[Conductor Product Page](https://goto-t-yuta.github.io/conductor/)** (with automatic OS detection and latest GitHub Release links), or browse all artifacts on [GitHub Releases](https://github.com/goto-t-yuta/conductor/releases). Prebuilt desktop binaries for **macOS**, **Windows**, and **Linux** — along with the **Android** companion APK — are automatically built and published on every push/merge to `main` (and via manual `workflow_dispatch`):
 
 | Platform | Artifacts |
 | --- | --- |
 | **macOS** | `.dmg` / `.zip` (`arm64` Apple Silicon & `x64` Intel) |
 | **Windows** | NSIS installer (`*-setup.exe`) / Portable (`*-portable.exe`) (`x64`) |
 | **Linux** | `.AppImage` / `.deb` (`x64`) |
-| **Android** | Companion app `.apk` (`Conductor-<version>-android.apk`, see [mobile/android/README.md](./mobile/android/README.md)) |
+| **Android** | Companion app `.apk` (`conductor-android.apk`, direct latest download via `releases/latest/download/conductor-android.apk`, see [mobile/android/README.md](./mobile/android/README.md)) |
 
 > **Note**: Unless code-signing secrets (`CSC_LINK` / `WIN_CSC_LINK`) are configured in repository settings, desktop CI releases are unsigned and macOS Gatekeeper or Windows SmartScreen may prompt for confirmation on first launch. The Android APK is built with debug signing so it can be sideloaded directly onto Android devices without a release keystore.
 
@@ -203,7 +205,7 @@ src/
 └── shared/      # Shared types, mention parser, task status guards, language & session helpers
 test/            # Vitest unit & component test suite
 scripts/         # esbuild main bundler & dev runner
-docs/images/     # Sanitized UI screenshots for documentation
+docs/        # Product landing page (GitHub Pages) & sanitized UI screenshots
 ```
 
 ---

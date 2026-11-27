@@ -1307,8 +1307,11 @@ export class ConductorController {
       magicDnsName: null,
       lanIp: null,
       url: null,
+      tailscaleUrl: null,
       magicDnsUrl: null,
+      lanUrl: null,
       connectUri: null,
+      linkUri: null,
       connectedClients: 0,
       error: null,
     };
