@@ -763,14 +763,7 @@ export const TaskInspectorModal: React.FC<TaskInspectorModalProps> = ({
                         }
                       : undefined
                   }
-                  onOpenImage={
-                    onOpenImage
-                      ? (image) => {
-                          onOpenImage(image);
-                          onClose();
-                        }
-                      : undefined
-                  }
+                  onOpenImage={onOpenImage}
                 />
               </div>
             </div>

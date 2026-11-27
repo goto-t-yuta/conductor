@@ -78,6 +78,7 @@ export function extractImageFileName(imagePath?: string): string | null {
   if (!imagePath) return null;
   const trimmed = imagePath.trim();
   if (!trimmed) return null;
+  if (/^(data|blob):/i.test(trimmed)) return null;
   const withoutQuery = trimmed.split(/[?#]/)[0] ?? trimmed;
   const segments = withoutQuery.split(/[/\\]/).filter(Boolean);
   const last = segments[segments.length - 1];
@@ -134,12 +135,34 @@ export function isViewableImageAttachment(
   return Boolean(directSrc || localPathToLoad);
 }
 
+export interface MarkdownImageLike {
+  src: string;
+  alt?: string;
+  filePath?: string;
+}
+
+export function buildAttachmentFromMarkdownImage(image: MarkdownImageLike): ChatAttachment {
+  const fileName = extractImageFileName(image.filePath ?? image.src);
+  const label = image.alt?.trim() || fileName || "Image";
+  const id = image.filePath
+    ? `md-image:${image.filePath}`
+    : `md-image:${image.src.slice(0, 120)}`;
+  return {
+    id,
+    kind: "image",
+    label,
+    imagePath: image.filePath,
+    imageDataUrl: image.src,
+  };
+}
+
 export function buildImageTabFromAttachment(attachment: ChatAttachment): {
   tab: ImageViewerTab;
   localPathToLoad: string | null;
 } {
   const { directSrc, localPathToLoad } = resolveImageSource(attachment);
-  const fileName = extractImageFileName(attachment.imagePath);
+  const fileName =
+    extractImageFileName(attachment.imagePath) ?? extractImageFileName(attachment.imageDataUrl);
   const label = attachment.label?.trim() || fileName || "Image";
 
   return {
@@ -154,6 +177,18 @@ export function buildImageTabFromAttachment(attachment: ChatAttachment): {
       error: !directSrc && !localPathToLoad ? "表示できる画像ソースがありません。" : null,
     },
     localPathToLoad,
+  };
+}
+
+export function mergeLoadedImageIntoAttachment(
+  attachment: ChatAttachment,
+  tab: Pick<ImageViewerTab, "src" | "imagePath" | "label">,
+): ChatAttachment {
+  return {
+    ...attachment,
+    label: tab.label || attachment.label,
+    imageDataUrl: tab.src ?? attachment.imageDataUrl,
+    imagePath: tab.imagePath ?? attachment.imagePath,
   };
 }
 

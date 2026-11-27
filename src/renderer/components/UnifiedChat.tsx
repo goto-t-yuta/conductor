@@ -2117,8 +2117,8 @@ const MessageRow: React.FC<{
                     key={att.id}
                     type="button"
                     onClick={() => onOpenImageAttachment?.(att)}
-                    title={t(locale, "chat.openImageInRightPaneTitle", { label: att.label })}
-                    aria-label={t(locale, "chat.openImageInRightPaneAria", { label: att.label })}
+                    title={t(locale, "chat.openImageTitle", { label: att.label })}
+                    aria-label={t(locale, "chat.openImageAria", { label: att.label })}
                     className="group inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 border border-transparent hover:border-indigo-500/40 text-[11px] text-zinc-600 dark:text-zinc-300 hover:text-indigo-600 dark:hover:text-indigo-300 transition-all cursor-pointer"
                   >
                     {att.imageDataUrl ? (
@@ -2162,6 +2162,7 @@ const MessageRow: React.FC<{
             locale={locale}
             onOpenUrl={onOpenUrl}
             onOpenMarkdownFile={onOpenMarkdownFile}
+            onOpenImage={onOpenMarkdownImage}
             mentionContext={userMentionContext}
           />
         </div>

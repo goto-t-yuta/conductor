@@ -689,10 +689,10 @@ export const ChatComposer: React.FC<ChatComposerProps> = React.memo(({
                           draftMentions: selectedMentions,
                         })
                       }
-                      title={t(locale, "chat.openImageInRightPaneTitle", {
+                      title={t(locale, "chat.openImageTitle", {
                         label: att.label,
                       })}
-                      aria-label={t(locale, "chat.openImageInRightPaneAria", {
+                      aria-label={t(locale, "chat.openImageAria", {
                         label: att.label,
                       })}
                       className="group inline-flex items-center gap-1.5 min-w-0 rounded hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors cursor-pointer"
