@@ -25,7 +25,7 @@ interface ExecResult {
   exitCode: number;
 }
 
-function runGit(cwd: string, args: string[], timeoutMs = 30_000): ExecResult {
+function runGitRaw(cwd: string, args: string[], timeoutMs = 30_000): ExecResult {
   try {
     const stdout = execFileSync("git", ["-C", cwd, ...args], {
       encoding: "utf8",
@@ -33,7 +33,7 @@ function runGit(cwd: string, args: string[], timeoutMs = 30_000): ExecResult {
       env: enrichedEnvironment({ GIT_TERMINAL_PROMPT: "0" }),
       stdio: ["ignore", "pipe", "pipe"],
     });
-    return { ok: true, stdout: stdout.trimEnd(), stderr: "", exitCode: 0 };
+    return { ok: true, stdout, stderr: "", exitCode: 0 };
   } catch (err: unknown) {
     const e = err as {
       stdout?: string | Buffer;
@@ -48,11 +48,19 @@ function runGit(cwd: string, args: string[], timeoutMs = 30_000): ExecResult {
         : e.stderr?.toString("utf8") ?? e.message ?? "git command failed";
     return {
       ok: false,
-      stdout: stdout.trimEnd(),
+      stdout,
       stderr: stderr.trim(),
       exitCode: typeof e.status === "number" ? e.status : 1,
     };
   }
+}
+
+function runGit(cwd: string, args: string[], timeoutMs = 30_000): ExecResult {
+  const res = runGitRaw(cwd, args, timeoutMs);
+  return {
+    ...res,
+    stdout: res.stdout.trimEnd(),
+  };
 }
 
 function runGh(cwd: string, args: string[], timeoutMs = 30_000): ExecResult {
@@ -172,6 +180,260 @@ function getPorcelainStatus(dir: string): string[] {
   const res = runGit(dir, ["status", "--porcelain"]);
   if (!res.ok || !res.stdout.trim()) return [];
   return res.stdout.split("\n").filter((line) => line.trim().length > 0);
+}
+
+export interface ParentDirtyEntry {
+  statusCode: string;
+  untracked: boolean;
+  unmerged: boolean;
+  path: string;
+  originalPath?: string;
+}
+
+export interface ParentOverlapCheckResult {
+  ok: boolean;
+  overlappingPaths: string[];
+  unmergedPaths: string[];
+  error?: string;
+}
+
+function normalizeGitRelPath(rawPath: string): string {
+  return rawPath
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/+$/, "");
+}
+
+export function parsePorcelainStatusZ(rawStdout: string): ParentDirtyEntry[] {
+  if (!rawStdout) return [];
+  const tokens = rawStdout.split("\0");
+  const entries: ParentDirtyEntry[] = [];
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token || token.length < 4) continue;
+    const statusCode = token.slice(0, 2);
+    const filePath = normalizeGitRelPath(token.slice(3));
+    if (!filePath) continue;
+
+    const isRenameOrCopy =
+      statusCode[0] === "R" ||
+      statusCode[0] === "C" ||
+      statusCode[1] === "R" ||
+      statusCode[1] === "C";
+    let originalPath: string | undefined;
+    if (isRenameOrCopy && i + 1 < tokens.length) {
+      const nextToken = normalizeGitRelPath(tokens[i + 1] ?? "");
+      if (nextToken) {
+        originalPath = nextToken;
+      }
+      i += 1;
+    }
+
+    const untracked = statusCode === "??";
+    const unmerged = statusCode.includes("U") || statusCode === "AA" || statusCode === "DD";
+    entries.push({
+      statusCode,
+      untracked,
+      unmerged,
+      path: filePath,
+      ...(originalPath ? { originalPath } : {}),
+    });
+  }
+
+  return entries;
+}
+
+export function pathsOverlap(pathA: string, pathB: string, caseInsensitive = false): boolean {
+  const normA = normalizeGitRelPath(pathA);
+  const normB = normalizeGitRelPath(pathB);
+  if (!normA || !normB) return false;
+  const a = caseInsensitive ? normA.toLowerCase() : normA;
+  const b = caseInsensitive ? normB.toLowerCase() : normB;
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+export function findOverlappingParentDirtyPaths(
+  parentEntries: ParentDirtyEntry[],
+  incomingPaths: string[],
+  options?: { caseInsensitive?: boolean },
+): { overlappingPaths: string[]; unmergedPaths: string[] } {
+  const caseInsensitive = options?.caseInsensitive ?? false;
+  const normalizedIncoming = incomingPaths.map(normalizeGitRelPath).filter(Boolean);
+  const overlappingSet = new Set<string>();
+  const unmergedSet = new Set<string>();
+
+  for (const entry of parentEntries) {
+    const entryPaths = [entry.path, ...(entry.originalPath ? [entry.originalPath] : [])]
+      .map(normalizeGitRelPath)
+      .filter(Boolean);
+
+    if (entry.unmerged) {
+      for (const ep of entryPaths) {
+        unmergedSet.add(ep);
+      }
+    }
+
+    for (const ep of entryPaths) {
+      if (normalizedIncoming.some((inc) => pathsOverlap(ep, inc, caseInsensitive))) {
+        overlappingSet.add(ep);
+      }
+    }
+  }
+
+  return {
+    overlappingPaths: [...overlappingSet].sort(),
+    unmergedPaths: [...unmergedSet].sort(),
+  };
+}
+
+function getParentDirtyEntries(
+  repoRoot: string,
+): { ok: boolean; entries: ParentDirtyEntry[]; error?: string } {
+  const res = runGitRaw(repoRoot, ["status", "--porcelain=v1", "-uall", "-z"]);
+  if (!res.ok) {
+    return {
+      ok: false,
+      entries: [],
+      error: res.stderr || "git status の取得に失敗しました。",
+    };
+  }
+  return {
+    ok: true,
+    entries: parsePorcelainStatusZ(res.stdout),
+  };
+}
+
+function isRepoCaseInsensitive(repoRoot: string): boolean {
+  const res = runGit(repoRoot, ["config", "--bool", "--get", "core.ignorecase"]);
+  return res.ok && res.stdout.trim().toLowerCase() === "true";
+}
+
+function getChangedFilesBetween(
+  dir: string,
+  fromRef: string,
+  toRef: string,
+): { ok: boolean; files: string[]; error?: string } {
+  const res = runGitRaw(dir, ["diff", "--name-only", "--no-renames", "-z", fromRef, toRef]);
+  if (!res.ok) {
+    return {
+      ok: false,
+      files: [],
+      error: res.stderr || "取り込みブランチの変更ファイル一覧の取得に失敗しました。",
+    };
+  }
+  const files = res.stdout.split("\0").map(normalizeGitRelPath).filter(Boolean);
+  return { ok: true, files };
+}
+
+function getAllTrackedFilesAtRef(
+  dir: string,
+  ref: string,
+): { ok: boolean; files: string[]; error?: string } {
+  const res = runGitRaw(dir, ["ls-tree", "-r", "--name-only", "-z", ref]);
+  if (!res.ok) {
+    return {
+      ok: false,
+      files: [],
+      error: res.stderr || "取り込みブランチのファイル一覧の取得に失敗しました。",
+    };
+  }
+  const files = res.stdout.split("\0").map(normalizeGitRelPath).filter(Boolean);
+  return { ok: true, files };
+}
+
+function formatOverlapPathList(paths: string[], maxDisplay = 10): string {
+  const preview = paths.slice(0, maxDisplay).join(", ");
+  if (paths.length <= maxDisplay) return preview;
+  return `${preview} ほか ${paths.length - maxDisplay} 件`;
+}
+
+function checkParentDirtyOverlap(
+  repoRoot: string,
+  incomingFiles: string[],
+): ParentOverlapCheckResult {
+  const dirtyRes = getParentDirtyEntries(repoRoot);
+  if (!dirtyRes.ok) {
+    return {
+      ok: false,
+      overlappingPaths: [],
+      unmergedPaths: [],
+      error: `親リポジトリの状態確認に失敗しました: ${dirtyRes.error}`,
+    };
+  }
+  if (dirtyRes.entries.length === 0) {
+    return { ok: true, overlappingPaths: [], unmergedPaths: [] };
+  }
+
+  const caseInsensitive = isRepoCaseInsensitive(repoRoot);
+  const { overlappingPaths, unmergedPaths } = findOverlappingParentDirtyPaths(
+    dirtyRes.entries,
+    incomingFiles,
+    { caseInsensitive },
+  );
+
+  if (unmergedPaths.length > 0) {
+    return {
+      ok: false,
+      overlappingPaths,
+      unmergedPaths,
+      error: `親リポジトリに未解決のコンフリクト（${unmergedPaths.length}件: ${formatOverlapPathList(unmergedPaths)}）があります。先に解消してから Land してください。`,
+    };
+  }
+
+  if (overlappingPaths.length > 0) {
+    return {
+      ok: false,
+      overlappingPaths,
+      unmergedPaths: [],
+      error: `親リポジトリに取り込み対象と重複する未コミット／未追跡の変更（${overlappingPaths.length}件: ${formatOverlapPathList(overlappingPaths)}）があります。先にコミット・スタッシュまたは退避してから Land してください。`,
+    };
+  }
+
+  return { ok: true, overlappingPaths: [], unmergedPaths: [] };
+}
+
+function getIncomingChangedFilesBeforeRebase(
+  worktreePath: string,
+  parentHead: string,
+  baseCommit: string | null | undefined,
+): {
+  ok: boolean;
+  files: string[];
+  isParentAlreadyAncestor: boolean;
+  hasBaseAncestor: boolean;
+  error?: string;
+} {
+  const isParentAlreadyAncestor = isCommitAncestor(worktreePath, parentHead, "HEAD");
+  const hasBaseAncestor =
+    Boolean(baseCommit) && isCommitAncestor(worktreePath, baseCommit!, "HEAD");
+
+  let diffBase: string | null = null;
+  if (isParentAlreadyAncestor) {
+    diffBase = parentHead;
+  } else {
+    const mergeBaseRes = runGit(worktreePath, ["merge-base", parentHead, "HEAD"]);
+    const mergeBase = mergeBaseRes.ok && mergeBaseRes.stdout.trim() ? mergeBaseRes.stdout.trim() : null;
+    if (mergeBase && (!hasBaseAncestor || isCommitAncestor(worktreePath, baseCommit!, mergeBase))) {
+      diffBase = mergeBase;
+    } else if (hasBaseAncestor && baseCommit) {
+      diffBase = baseCommit;
+    } else if (mergeBase) {
+      diffBase = mergeBase;
+    }
+  }
+
+  const filesRes = diffBase
+    ? getChangedFilesBetween(worktreePath, diffBase, "HEAD")
+    : getAllTrackedFilesAtRef(worktreePath, "HEAD");
+
+  return {
+    ok: filesRes.ok,
+    files: filesRes.files,
+    isParentAlreadyAncestor,
+    hasBaseAncestor,
+    error: filesRes.error,
+  };
 }
 
 function isRepoInProgressOperation(repoRoot: string): string | null {
@@ -977,16 +1239,6 @@ export function landTaskWorktree(options: LandTaskWorktreeOptions): LandTaskResu
     };
   }
 
-  const parentDirtyLines = getPorcelainStatus(repoRoot);
-  if (parentDirtyLines.length > 0) {
-    return {
-      ok: false,
-      mode,
-      action: "error",
-      message: `親リポジトリに未コミットの変更（${parentDirtyLines.length}件）があります。先にコミットまたはスタッシュしてから Land してください。`,
-    };
-  }
-
   const parentBranch = getCurrentBranch(repoRoot);
   const parentHead = getHeadCommit(repoRoot);
   if (!parentHead) {
@@ -1033,21 +1285,42 @@ export function landTaskWorktree(options: LandTaskWorktreeOptions): LandTaskResu
     };
   }
 
+  // 4.5. Check parent repo dirty/untracked files ONLY for overlap with incoming branch changes.
+  //      Disjoint untracked or uncommitted files in the parent repo are safely preserved.
+  const preRebaseIncoming = getIncomingChangedFilesBeforeRebase(
+    worktreePath,
+    parentHead,
+    baseCommit,
+  );
+  if (!preRebaseIncoming.ok) {
+    return {
+      ok: false,
+      mode,
+      action: "error",
+      targetBranch,
+      message: preRebaseIncoming.error ?? "取り込みブランチの変更ファイル一覧の取得に失敗しました。",
+    };
+  }
+
+  const preRebaseOverlap = checkParentDirtyOverlap(repoRoot, preRebaseIncoming.files);
+  if (!preRebaseOverlap.ok) {
+    return {
+      ok: false,
+      mode,
+      action: "error",
+      targetBranch,
+      message:
+        preRebaseOverlap.error ??
+        "親リポジトリに取り込み対象と重複する未コミット／未追跡の変更があります。",
+    };
+  }
+
   // 5. Rebase task branch inside the isolated worktree onto parentHead BEFORE modifying parent repo.
   //    If parentHead is ALREADY an ancestor of worktree HEAD (e.g. after AI/manual rebase or merge resolution),
   //    skip rebase and proceed straight to fast-forward in Step 6.
-  const isParentAlreadyAncestor = runGit(worktreePath, [
-    "merge-base",
-    "--is-ancestor",
-    parentHead,
-    "HEAD",
-  ]).ok;
+  const { isParentAlreadyAncestor, hasBaseAncestor } = preRebaseIncoming;
 
   if (!isParentAlreadyAncestor) {
-    const hasBaseAncestor =
-      Boolean(baseCommit) &&
-      runGit(worktreePath, ["merge-base", "--is-ancestor", baseCommit!, "HEAD"]).ok;
-
     const rebaseArgs = hasBaseAncestor
       ? ["rebase", "--onto", parentHead, baseCommit!]
       : ["rebase", parentHead];
@@ -1070,6 +1343,33 @@ export function landTaskWorktree(options: LandTaskWorktreeOptions): LandTaskResu
     }
   }
 
+  // 5.5. Re-verify exact fast-forward file overlap right before touching the parent repo.
+  const ffTarget = getHeadCommit(worktreePath) ?? worktreeBranch;
+  const postRebaseIncoming = getChangedFilesBetween(repoRoot, parentHead, ffTarget);
+  if (!postRebaseIncoming.ok) {
+    return {
+      ok: false,
+      mode,
+      action: "error",
+      targetBranch,
+      message:
+        postRebaseIncoming.error ?? "マージ対象の変更ファイル一覧の取得に失敗しました。",
+    };
+  }
+
+  const postRebaseOverlap = checkParentDirtyOverlap(repoRoot, postRebaseIncoming.files);
+  if (!postRebaseOverlap.ok) {
+    return {
+      ok: false,
+      mode,
+      action: "error",
+      targetBranch,
+      message:
+        postRebaseOverlap.error ??
+        "親リポジトリに取り込み対象と重複する未コミット／未追跡の変更があります。",
+    };
+  }
+
   // 6. Now parent repo can cleanly switch/create feature branch and fast-forward
   if (needsCreateFeatureBranch) {
     const checkoutRes = runGit(repoRoot, ["checkout", "-b", targetBranch]);
@@ -1084,7 +1384,6 @@ export function landTaskWorktree(options: LandTaskWorktreeOptions): LandTaskResu
     }
   }
 
-  const ffTarget = getHeadCommit(worktreePath) ?? worktreeBranch;
   const ffRes = runGit(repoRoot, ["merge", "--ff-only", ffTarget]);
   if (!ffRes.ok) {
     // Roll back newly created feature branch if ff somehow failed

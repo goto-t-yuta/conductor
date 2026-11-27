@@ -835,7 +835,7 @@ describe("Auto-Land on worker completion & AI conflict self-resolution", () => {
     expect(failEvent?.text).toContain("Worker CLI crashed");
   });
 
-  it("does NOT trigger AI conflict self-resolution and never touches dirty parent repo on non-conflict errors", async () => {
+  it("does NOT trigger AI conflict self-resolution and blocks when parent repo has overlapping uncommitted/untracked changes", async () => {
     const repo = initGitRepo();
     const storeDir = makeTempDir("conductor-store-dirty-");
     const store = new StateStore(storeDir);
@@ -871,9 +871,9 @@ describe("Auto-Land on worker completion & AI conflict self-resolution", () => {
     const prov = ctrl.provisionWorktreeForTask(task.id, project);
     fs.writeFileSync(path.join(prov.worktreePath!, "feature.ts"), "export const ok = 1;\n");
 
-    // User has uncommitted WIP changes in the parent repo
-    const userDirtyFile = path.join(repo, "user-wip.txt");
-    fs.writeFileSync(userDirtyFile, "do not touch my wip\n", "utf8");
+    // User has an OVERLAPPING untracked WIP file in the parent repo at the exact same path
+    const userDirtyFile = path.join(repo, "feature.ts");
+    fs.writeFileSync(userDirtyFile, "// do not touch my local wip\n", "utf8");
 
     await ctrl.sendToTaskWorker(task.id, "Add feature");
     expect(agyRuns).toHaveLength(1);
@@ -891,15 +891,77 @@ describe("Auto-Land on worker completion & AI conflict self-resolution", () => {
     expect(finalTask.status).toBe("needs_review");
     expect(finalTask.landStatus).toBe("error");
     expect(finalTask.landError).toContain("未コミット");
-    // Parent repo and user's dirty file remain 100% untouched
-    expect(fs.readFileSync(userDirtyFile, "utf8")).toBe("do not touch my wip\n");
-    expect(fs.existsSync(path.join(repo, "feature.ts"))).toBe(false);
+    expect(finalTask.landError).toContain("feature.ts");
+    // Parent repo and user's overlapping file remain 100% untouched
+    expect(fs.readFileSync(userDirtyFile, "utf8")).toBe("// do not touch my local wip\n");
     expect(fs.existsSync(prov.worktreePath!)).toBe(true);
 
     const errEvent = ctrl
       .getSnapshot()
       .messages.find((m) => m.role === "taskEvent" && m.relatedTaskId === task.id);
-    expect(errEvent?.text).toContain("未コミット");
+    expect(errEvent?.text).toContain("feature.ts");
+  });
+
+  it("auto-lands cleanly when parent repo has non-overlapping untracked and modified files, preserving both intact", async () => {
+    const repo = initGitRepo();
+    const storeDir = makeTempDir("conductor-store-disjoint-auto-");
+    const store = new StateStore(storeDir);
+
+    const agyRuns: Array<{ callbacks: CliTurnCallbacks }> = [];
+
+    const setupCtrl = new ConductorController({
+      store,
+      browser: makeFakeBrowser(),
+      onSnapshot: () => {},
+    });
+    const project = setupCtrl.registerProject(repo, "disjoint-auto-repo")!;
+    const task = makeTaskFixture(project, {
+      id: "disjoint-auto-task-1",
+      taskNumber: 1,
+      title: "Add Disjoint Feature",
+      provider: "agy",
+      status: "queued",
+    });
+    store.save({ ...store.load(), tasks: [task] });
+
+    const ctrl = new ConductorController({
+      store,
+      browser: makeFakeBrowser(),
+      onSnapshot: () => {},
+      cliWorkerRunner: {
+        runAgyTurn: (_opts, callbacks): RunningCliTurn => {
+          agyRuns.push({ callbacks });
+          return { cancel: () => {} };
+        },
+      },
+    });
+    const prov = ctrl.provisionWorktreeForTask(task.id, project);
+    fs.writeFileSync(path.join(prov.worktreePath!, "feature.ts"), "export const ok = 1;\n");
+
+    // Parent has BOTH a non-overlapping untracked file and a non-overlapping modified tracked file
+    const untrackedWip = path.join(repo, "user-wip.txt");
+    fs.writeFileSync(untrackedWip, "do not touch my untracked wip\n", "utf8");
+    const modifiedTracked = path.join(repo, "shared.txt");
+    fs.writeFileSync(modifiedTracked, "local uncommitted edit to shared.txt\n", "utf8");
+
+    await ctrl.sendToTaskWorker(task.id, "Add feature");
+    expect(agyRuns).toHaveLength(1);
+    agyRuns[0]!.callbacks.onComplete?.({ ok: true, finalText: "Feature done." });
+
+    await waitFor(
+      () => ctrl.getSnapshot().tasks.find((t) => t.id === task.id)?.landStatus === "landed",
+    );
+
+    const finalTask = ctrl.getSnapshot().tasks.find((t) => t.id === task.id)!;
+    expect(finalTask.status).toBe("needs_review");
+    expect(finalTask.landStatus).toBe("landed");
+    expect(finalTask.landedBranch).toBe("conductor/add-disjoint-feature");
+    expect(fs.existsSync(prov.worktreePath!)).toBe(false);
+
+    // Worker's change landed while parent's non-overlapping untracked & modified files stayed 100% intact
+    expect(fs.readFileSync(path.join(repo, "feature.ts"), "utf8")).toBe("export const ok = 1;\n");
+    expect(fs.readFileSync(untrackedWip, "utf8")).toBe("do not touch my untracked wip\n");
+    expect(fs.readFileSync(modifiedTracked, "utf8")).toBe("local uncommitted edit to shared.txt\n");
   });
 
   it("formats buildConflictResolutionPrompt with targetBranch, parentHead, conflictFiles, and language policy", () => {
