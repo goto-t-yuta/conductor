@@ -1,5 +1,6 @@
 package dev.conductor.mobile
 
+import dev.conductor.mobile.data.ApiHttpException
 import dev.conductor.mobile.data.ClassifiedImageSource
 import dev.conductor.mobile.data.ConductorApiClient
 import dev.conductor.mobile.data.ImageSourceClassifier
@@ -555,6 +556,94 @@ class ConductorApiClientTest {
             )
             assertTrue(conflictRes.isFailure)
             assertTrue(conflictRes.exceptionOrNull()?.message?.contains("実行中のタスク") == true)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun staleChatSessionOnSendAndSelectReturnsApiHttpExceptionWithServerSnapshot() = runBlocking {
+        server.handler = { reqLine, _, out, _ ->
+            val path = reqLine.split(" ").getOrNull(1).orEmpty()
+            val (statusLine, bodyText) = when (path) {
+                "/api/chat/send" -> "HTTP/1.1 409 Conflict" to """
+                    {
+                      "ok": false,
+                      "reason": "session_mismatch",
+                      "error": "アクティブなチャットセッションが切り替わっています。",
+                      "activeChatSessionId": "sess-latest",
+                      "snapshot": {
+                        "snapshotEpoch": "ep-2",
+                        "snapshotVersion": 5,
+                        "activeChatSessionId": "sess-latest",
+                        "chatSessions": [
+                          {"id": "sess-latest", "title": "Latest Chat", "messageCount": 2}
+                        ],
+                        "isConnected": true,
+                        "messages": [{"id": "m-new", "role": "user", "text": "fresh", "isStreaming": false}]
+                      }
+                    }
+                """.trimIndent()
+
+                "/api/chat/session" -> "HTTP/1.1 404 Not Found" to """
+                    {
+                      "ok": false,
+                      "reason": "session_not_found",
+                      "error": "指定されたチャットセッションは存在しません。",
+                      "activeChatSessionId": "sess-latest",
+                      "snapshot": {
+                        "snapshotEpoch": "ep-2",
+                        "snapshotVersion": 6,
+                        "activeChatSessionId": "sess-latest",
+                        "chatSessions": [
+                          {"id": "sess-latest", "title": "Latest Chat", "messageCount": 2}
+                        ],
+                        "isConnected": true
+                      }
+                    }
+                """.trimIndent()
+
+                else -> "HTTP/1.1 404 Not Found" to """{"ok":false,"error":"Not Found"}"""
+            }
+            val body = bodyText.toByteArray(Charsets.UTF_8)
+            val head = "$statusLine\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                "Content-Length: ${body.size}\r\n" +
+                "Connection: close\r\n\r\n"
+            out.write(head.toByteArray(Charsets.UTF_8))
+            out.write(body)
+            out.flush()
+        }
+
+        val client = ConductorApiClient()
+        try {
+            val sendRes = client.sendMessage(
+                config = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token),
+                text = "hello stale",
+                mentions = emptyList(),
+                chatSessionId = "sess-old-1707",
+            )
+            assertTrue(sendRes.isFailure)
+            assertTrue(server.lastRequestBody.contains("\"chatSessionId\":\"sess-old-1707\""))
+            val sendErr = sendRes.exceptionOrNull() as? ApiHttpException
+            assertNotNull(sendErr)
+            assertEquals(409, sendErr?.statusCode)
+            assertEquals("session_mismatch", sendErr?.response?.reason)
+            assertEquals("sess-latest", sendErr?.response?.snapshot?.activeChatSessionId)
+            assertEquals(1, sendErr?.response?.snapshot?.chatSessions?.size)
+
+            val selectRes = client.selectChatSession(
+                config = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token),
+                sessionId = "sess-deleted",
+            )
+            assertTrue(selectRes.isFailure)
+            assertTrue(server.lastRequestBody.contains("\"sessionId\":\"sess-deleted\""))
+            val selectErr = selectRes.exceptionOrNull() as? ApiHttpException
+            assertNotNull(selectErr)
+            assertEquals(404, selectErr?.statusCode)
+            assertEquals("session_not_found", selectErr?.response?.reason)
+            assertEquals("sess-latest", selectErr?.response?.snapshot?.activeChatSessionId)
+            assertEquals("Latest Chat", selectErr?.response?.snapshot?.chatSessions?.firstOrNull()?.title)
         } finally {
             client.close()
         }

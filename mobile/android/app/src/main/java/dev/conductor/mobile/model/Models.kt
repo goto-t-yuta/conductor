@@ -99,6 +99,7 @@ data class ApiActionResponse(
     val error: String? = null,
     val action: String? = null,
     val reason: String? = null,
+    val activeChatSessionId: String? = null,
     val prUrl: String? = null,
     val task: AgentTask? = null,
     val snapshot: AppSnapshot? = null,
@@ -222,6 +223,17 @@ data class ChatMessage(
 )
 
 @Serializable
+data class ChatSessionSummary(
+    val id: String,
+    val title: String = "",
+    val preview: String = "",
+    val messageCount: Int = 0,
+    val createdAt: String = "",
+    val updatedAt: String = "",
+    val provider: String? = null,
+)
+
+@Serializable
 data class AppSnapshot(
     val snapshotEpoch: String? = null,
     val snapshotVersion: Long? = null,
@@ -229,6 +241,7 @@ data class AppSnapshot(
     val tasks: List<AgentTask> = emptyList(),
     val messages: List<ChatMessage> = emptyList(),
     val activeChatSessionId: String = "",
+    val chatSessions: List<ChatSessionSummary> = emptyList(),
     val isConnected: Boolean = false,
     val connectionStatus: String = "",
     val activeResponderCount: Int = 0,
@@ -244,6 +257,12 @@ data class ChatSendRequest(
     val text: String,
     val explicitMentions: List<ExplicitMentionTarget> = emptyList(),
     val attachments: List<ChatAttachment> = emptyList(),
+    val chatSessionId: String? = null,
+)
+
+@Serializable
+data class ChatSessionSelectRequest(
+    val sessionId: String,
 )
 
 @Serializable

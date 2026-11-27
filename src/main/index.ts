@@ -31,6 +31,11 @@ import {
   writeLocalMarkdownFile,
 } from "./markdown-viewer.js";
 import { installMainWindowNavigationGuard } from "./main-window-guard.js";
+import {
+  DataDirectoryLock,
+  formatDataDirectoryLockConflictMessage,
+  resolveConductorUserDataPath,
+} from "./instance-lock.js";
 import { registerProjectFileTreeIpcHandlers } from "./project-files.js";
 import { QuitGuard, buildUpdateRestartConfirmationDialog } from "./quit-guard.js";
 import { StateStore } from "./state-store.js";
@@ -43,6 +48,7 @@ let markdownWatcher: MarkdownFileWatcher | null = null;
 let terminalManager: TerminalManager | null = null;
 let controller: ConductorController | null = null;
 let stateStore: StateStore | null = null;
+let dataDirectoryLock: DataDirectoryLock | null = null;
 let createWindowPromise: Promise<void> | null = null;
 let appUpdater: AppUpdater | null = null;
 let startupUpdateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -117,6 +123,7 @@ const quitGuard = new QuitGuard({
     // (either via "Restart & Update Now" or "Apply automatically on quit").
     appUpdater?.launchPendingApplyHelperOnShutdown();
     appUpdater?.dispose();
+    dataDirectoryLock?.release();
   },
   quitApp: () => {
     app.quit();
@@ -305,9 +312,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle("conductor:stopMessage", (_e, messageId: string) => controller?.stopMessage(messageId));
   ipcMain.handle("conductor:stopAllResponders", () => controller?.stopAllResponders());
   ipcMain.handle("conductor:startFreshChat", () => controller?.startFreshChat());
-  ipcMain.handle("conductor:selectChatSession", (_e, sessionId: string) =>
-    controller?.selectChatSession(sessionId),
-  );
+  ipcMain.handle("conductor:selectChatSession", async (_e, sessionId: string) => {
+    await controller?.selectChatSession(sessionId);
+  });
   ipcMain.handle("conductor:deleteChatSession", (_e, sessionId: string) =>
     controller?.deleteChatSession(sessionId),
   );
@@ -732,31 +739,99 @@ protocol.registerSchemesAsPrivileged([
 
 app.setName("Conductor");
 
-app.whenReady().then(async () => {
-  if (process.platform === "darwin" && app.dock) {
-    const dockIcon = loadAppIcon();
-    if (dockIcon) {
-      app.dock.setIcon(dockIcon);
-    }
-  }
-  protocol.handle(CONDUCTOR_MEDIA_PROTOCOL, (request) => handleConductorMediaRequest(request));
-  createApplicationMenu();
-  registerIpcHandlers();
-  await createWindow();
+const resolvedUserData = resolveConductorUserDataPath({
+  appDataDir: app.getPath("appData"),
+  isPackaged: app.isPackaged,
+  env: process.env,
+});
+app.setPath("userData", resolvedUserData.userDataDir);
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      void createWindow();
+function focusOrRecreateMainWindow(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+  if (app.isReady()) {
+    void createWindow();
+  }
+}
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  console.error(
+    `[Conductor] Another instance is already running for userData=${resolvedUserData.userDataDir} (mode=${resolvedUserData.mode}). Exiting secondary instance.`,
+  );
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    focusOrRecreateMainWindow();
+  });
+
+  app.whenReady().then(async () => {
+    const conductorDataDir = path.join(app.getPath("userData"), "conductor-data");
+    const lock = new DataDirectoryLock(conductorDataDir, {
+      isPackaged: app.isPackaged,
+      execPath: process.execPath,
+      appVersion: app.getVersion(),
+      mode: resolvedUserData.mode,
+    });
+    const lockResult = lock.acquire({ retryMs: 800, retryIntervalMs: 80 });
+    if (!lockResult.ok) {
+      const conflictMessage = formatDataDirectoryLockConflictMessage(
+        conductorDataDir,
+        lockResult.existingOwner,
+      );
+      console.error(`[Conductor] Data directory lock conflict:\n${conflictMessage}`);
+      try {
+        dialog.showErrorBox("Conductor の多重起動を検出しました", conflictMessage);
+      } catch {
+        // best-effort dialog in headless environments
+      }
+      app.exit(0);
+      return;
+    }
+    dataDirectoryLock = lock;
+
+    if (process.platform === "darwin" && app.dock) {
+      const dockIcon = loadAppIcon();
+      if (dockIcon) {
+        app.dock.setIcon(dockIcon);
+      }
+    }
+    protocol.handle(CONDUCTOR_MEDIA_PROTOCOL, (request) => handleConductorMediaRequest(request));
+    createApplicationMenu();
+    registerIpcHandlers();
+    await createWindow();
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        void createWindow();
+      } else {
+        focusOrRecreateMainWindow();
+      }
+    });
+  });
+
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") {
+      app.quit();
     }
   });
-});
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
-});
+  app.on("before-quit", (event) => {
+    void quitGuard.handleBeforeQuit(event);
+  });
 
-app.on("before-quit", (event) => {
-  void quitGuard.handleBeforeQuit(event);
-});
+  app.on("will-quit", () => {
+    dataDirectoryLock?.release();
+  });
+
+  process.on("exit", () => {
+    dataDirectoryLock?.release();
+  });
+}

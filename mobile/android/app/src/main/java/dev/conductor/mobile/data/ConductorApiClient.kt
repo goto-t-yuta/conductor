@@ -4,6 +4,7 @@ import dev.conductor.mobile.model.ApiActionResponse
 import dev.conductor.mobile.model.AppSnapshot
 import dev.conductor.mobile.model.ChatAttachment
 import dev.conductor.mobile.model.ChatSendRequest
+import dev.conductor.mobile.model.ChatSessionSelectRequest
 import dev.conductor.mobile.model.ChatStopRequest
 import dev.conductor.mobile.model.ConnectUriParser
 import dev.conductor.mobile.model.ConnectionConfig
@@ -127,6 +128,12 @@ data class ConnectionTestResult(
     val snapshot: AppSnapshot? = null,
     val message: String,
 )
+
+class ApiHttpException(
+    val statusCode: Int,
+    val response: ApiActionResponse?,
+    message: String,
+) : IOException(message)
 
 class ConductorApiClient(
     restConnectTimeoutMs: Long = 8_000L,
@@ -417,6 +424,7 @@ class ConductorApiClient(
         text: String,
         mentions: List<ExplicitMentionTarget>,
         attachments: List<ChatAttachment> = emptyList(),
+        chatSessionId: String? = null,
     ): Result<ApiActionResponse> = postAction(
         config = config,
         path = "/api/chat/send",
@@ -425,6 +433,7 @@ class ConductorApiClient(
                 text = text,
                 explicitMentions = mentions,
                 attachments = attachments,
+                chatSessionId = chatSessionId?.trim()?.takeIf { it.isNotEmpty() },
             ),
         ),
         client = if (attachments.isNotEmpty()) uploadClient else restClient,
@@ -463,6 +472,15 @@ class ConductorApiClient(
 
     suspend fun newChat(config: ConnectionConfig): Result<ApiActionResponse> =
         postAction(config = config, path = "/api/chat/new", payload = "{}")
+
+    suspend fun selectChatSession(
+        config: ConnectionConfig,
+        sessionId: String,
+    ): Result<ApiActionResponse> = postAction(
+        config = config,
+        path = "/api/chat/session",
+        payload = json.encodeToString(ChatSessionSelectRequest(sessionId = sessionId.trim())),
+    )
 
     suspend fun getTaskDetail(config: ConnectionConfig, taskId: String): Result<TaskDetailResponse> =
         withContext(Dispatchers.IO) {
@@ -531,7 +549,7 @@ class ConductorApiClient(
                 val parsed = runCatching { json.decodeFromString<ApiActionResponse>(body) }.getOrNull()
                 if (!res.isSuccessful) {
                     val errMsg = parsed?.error ?: parsed?.message ?: "HTTP ${res.code}"
-                    throw IOException(errMsg)
+                    throw ApiHttpException(statusCode = res.code, response = parsed, message = errMsg)
                 }
                 parsed ?: ApiActionResponse(ok = true)
             }

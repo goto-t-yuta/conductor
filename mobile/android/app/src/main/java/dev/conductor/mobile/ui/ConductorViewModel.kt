@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.conductor.mobile.BuildConfig
 import dev.conductor.mobile.data.AndroidImageAttachmentProcessor
+import dev.conductor.mobile.data.ApiHttpException
 import dev.conductor.mobile.data.ApkInstallLaunchResult
 import dev.conductor.mobile.data.ApkInstaller
 import dev.conductor.mobile.data.AppUpdateClient
@@ -314,7 +315,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         if (!cfg.isConfigured) return
         val transport = _uiState.value.transportState
         val staleMs = System.currentTimeMillis() - lastSnapshotReceivedAtMs
-        if (transport != StreamTransportState.CONNECTED_SSE || staleMs > 25_000L) {
+        if (transport != StreamTransportState.CONNECTED_SSE || staleMs > 5_000L) {
             viewModelScope.launch {
                 api.fetchSnapshot(cfg).onSuccess { snap ->
                     applyIncomingSnapshot(snap, fromSse = false)
@@ -623,6 +624,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
         val mentions = state.selectedMentions
         val cfg = state.config
+        val expectedSessionId = state.snapshot?.activeChatSessionId?.trim()?.takeIf { it.isNotEmpty() }
         val chatAttachments = pendingImages.map { att ->
             attachmentImageCache.put(att.id, att.previewBytes)
             att.toChatAttachment()
@@ -636,7 +638,13 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
             )
         }
         viewModelScope.launch {
-            api.sendMessage(cfg, text, mentions, chatAttachments)
+            api.sendMessage(
+                config = cfg,
+                text = text,
+                mentions = mentions,
+                attachments = chatAttachments,
+                chatSessionId = expectedSessionId,
+            )
                 .onSuccess { res ->
                     if (res.snapshot != null) {
                         applyIncomingSnapshot(res.snapshot, fromSse = false)
@@ -658,7 +666,27 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                             pendingAttachments = pendingImages,
                         )
                     }
-                    showBanner("送信エラー: ${err.message}")
+                    if (err is ApiHttpException) {
+                        val serverSnap = err.response?.snapshot
+                        val reason = err.response?.reason
+                        if (serverSnap != null) {
+                            applyIncomingSnapshot(serverSnap, fromSse = false)
+                        } else if (reason == "session_not_found" || reason == "session_mismatch") {
+                            api.fetchSnapshot(cfg).onSuccess { snap ->
+                                applyIncomingSnapshot(snap, fromSse = false)
+                            }
+                        }
+                        if (reason == "session_not_found" || reason == "session_mismatch") {
+                            showBanner("チャットセッションが更新されたため最新状態に同期しました。内容を確認して再送信してください。")
+                            if (_uiState.value.transportState != StreamTransportState.CONNECTED_SSE) {
+                                nudgeRealtimeSync(cfg)
+                            }
+                        } else {
+                            showBanner("送信エラー: ${err.message}")
+                        }
+                    } else {
+                        showBanner("送信エラー: ${err.message}")
+                    }
                 }
             _uiState.update { it.copy(isSending = false) }
         }
@@ -695,6 +723,43 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 .onFailure { err ->
                     showBanner("新規チャット作成エラー: ${err.message}")
+                }
+        }
+    }
+
+    fun selectChatSession(sessionId: String) {
+        val cfg = _uiState.value.config
+        val cleanId = sessionId.trim()
+        if (!cfg.isConfigured || cleanId.isEmpty()) return
+        viewModelScope.launch {
+            api.selectChatSession(cfg, cleanId)
+                .onSuccess { res ->
+                    if (res.snapshot != null) {
+                        applyIncomingSnapshot(res.snapshot, fromSse = false)
+                    } else {
+                        api.fetchSnapshot(cfg).onSuccess { snap ->
+                            applyIncomingSnapshot(snap, fromSse = false)
+                        }
+                    }
+                }
+                .onFailure { err ->
+                    if (err is ApiHttpException) {
+                        val serverSnap = err.response?.snapshot
+                        if (serverSnap != null) {
+                            applyIncomingSnapshot(serverSnap, fromSse = false)
+                        } else {
+                            api.fetchSnapshot(cfg).onSuccess { snap ->
+                                applyIncomingSnapshot(snap, fromSse = false)
+                            }
+                        }
+                        if (err.response?.reason == "session_not_found") {
+                            showBanner("選択したチャットセッションは既に存在しないため、最新セッションに同期しました")
+                        } else {
+                            showBanner("セッション切替エラー: ${err.message}")
+                        }
+                    } else {
+                        showBanner("セッション切替エラー: ${err.message}")
+                    }
                 }
         }
     }

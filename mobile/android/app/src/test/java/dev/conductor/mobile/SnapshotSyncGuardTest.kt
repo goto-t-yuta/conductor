@@ -2,6 +2,7 @@ package dev.conductor.mobile
 
 import dev.conductor.mobile.model.AppSnapshot
 import dev.conductor.mobile.model.ChatMessage
+import dev.conductor.mobile.model.ChatSessionSummary
 import dev.conductor.mobile.model.SnapshotSyncGuard
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -76,5 +77,20 @@ class SnapshotSyncGuardTest {
         )
         assertFalse(SnapshotSyncGuard.shouldAccept(current, laggingPoll, fromSse = false))
         assertTrue(SnapshotSyncGuard.shouldAccept(current, laggingPoll, fromSse = true))
+    }
+
+    @Test
+    fun detectsKnownAndStaleChatSessionsFromSnapshot() {
+        val snap = AppSnapshot(
+            activeChatSessionId = "sess-new",
+            chatSessions = listOf(
+                ChatSessionSummary(id = "sess-new", title = "Latest"),
+                ChatSessionSummary(id = "sess-prev", title = "Previous"),
+            ),
+        )
+        assertTrue(SnapshotSyncGuard.isKnownSession(snap, "sess-new"))
+        assertTrue(SnapshotSyncGuard.isKnownSession(snap, "sess-prev"))
+        assertFalse(SnapshotSyncGuard.isKnownSession(snap, "sess-deleted"))
+        assertFalse(SnapshotSyncGuard.isKnownSession(null, "sess-new"))
     }
 }

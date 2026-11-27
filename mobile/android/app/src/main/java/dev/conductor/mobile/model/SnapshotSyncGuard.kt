@@ -43,6 +43,13 @@ object SnapshotSyncGuard {
         return true
     }
 
+    fun isKnownSession(snapshot: AppSnapshot?, sessionId: String?): Boolean {
+        val clean = sessionId?.trim().orEmpty()
+        if (snapshot == null || clean.isEmpty()) return false
+        if (snapshot.activeChatSessionId == clean) return true
+        return snapshot.chatSessions.any { it.id == clean }
+    }
+
     private fun isPrefixById(shorter: List<ChatMessage>, longer: List<ChatMessage>): Boolean {
         for (i in shorter.indices) {
             if (shorter[i].id != longer[i].id) return false

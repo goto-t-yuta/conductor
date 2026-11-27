@@ -69,11 +69,12 @@ export interface TailscaleNetworkInfo {
 
 export interface RemoteBridgeController {
   getSnapshot(): AppSnapshot;
+  syncExternalState?(): boolean;
   sendMessage(payload: SendMessagePayload): Promise<void>;
   stopMessage(messageId: string): Promise<void>;
   stopAllResponders(): Promise<void>;
   startFreshChat(): Promise<void>;
-  selectChatSession?(sessionId: string): Promise<void>;
+  selectChatSession?(sessionId: string): Promise<boolean | void>;
   saveRemoteImageAttachment?(args: {
     buffer: Buffer;
     mimeType: string;
@@ -564,7 +565,7 @@ export function buildRemoteSnapshot(snapshot: AppSnapshot): Record<string, unkno
     tasks,
     messages,
     activeChatSessionId: snapshot.activeChatSessionId,
-    chatSessions: (snapshot.chatSessions ?? []).slice(0, 20),
+    chatSessions: snapshot.chatSessions ?? [],
     isConnected: snapshot.isConnected,
     connectionStatus: snapshot.connectionStatus,
     activeResponderCount: snapshot.activeResponderCount,
@@ -587,6 +588,9 @@ function computeSnapshotPriorityKey(snapshot: AppSnapshot): string {
   const taskSig = (snapshot.tasks ?? [])
     .map((t) => `${t.id}:${t.status}:${t.landStatus ?? ""}:${t.title}`)
     .join("|");
+  const sessionSig = (snapshot.chatSessions ?? [])
+    .map((s) => `${s.id}:${s.messageCount}`)
+    .join("|");
   return [
     snapshot.activeChatSessionId ?? "",
     String(msgs.length),
@@ -595,6 +599,7 @@ function computeSnapshotPriorityKey(snapshot: AppSnapshot): string {
     snapshot.isConnected ? "1" : "0",
     snapshot.lastErrorBanner ?? "",
     taskSig,
+    sessionSig,
   ].join("\0");
 }
 
@@ -1195,6 +1200,7 @@ export class RemoteBridgeServer {
     res: http.ServerResponse,
   ): Promise<void> {
     if (method === "GET" && pathname === "/api/snapshot") {
+      this.controller.syncExternalState?.();
       this.sendJson(res, 200, buildRemoteSnapshot(this.controller.getSnapshot()), req);
       return;
     }
@@ -1241,6 +1247,7 @@ export class RemoteBridgeServer {
     }
 
     if (method === "POST" && pathname === "/api/chat/send") {
+      this.controller.syncExternalState?.();
       const parsed = await this.readJsonBody(req);
       if (!parsed.ok) {
         this.sendJson(res, parsed.status, { ok: false, error: parsed.error }, req);
@@ -1270,6 +1277,38 @@ export class RemoteBridgeServer {
         this.sendJson(res, 400, { ok: false, error: "text or attachments is required" }, req);
         return;
       }
+
+      const requestedSessionId =
+        typeof parsed.data.chatSessionId === "string"
+          ? parsed.data.chatSessionId.trim()
+          : typeof parsed.data.sessionId === "string"
+            ? parsed.data.sessionId.trim()
+            : "";
+      if (requestedSessionId) {
+        const currentSnap = this.controller.getSnapshot();
+        const serverActiveId = currentSnap.activeChatSessionId?.trim() ?? "";
+        if (serverActiveId && requestedSessionId !== serverActiveId) {
+          const existsOnServer = (currentSnap.chatSessions ?? []).some(
+            (s) => s.id === requestedSessionId,
+          );
+          this.sendJson(
+            res,
+            409,
+            {
+              ok: false,
+              reason: existsOnServer ? "session_mismatch" : "session_not_found",
+              error: existsOnServer
+                ? "アクティブなチャットセッションが切り替わっています。最新セッションに同期してから再送信してください。"
+                : "指定されたチャットセッションは存在しません。最新のセッション一覧に同期しました。",
+              activeChatSessionId: serverActiveId,
+              snapshot: buildRemoteSnapshot(currentSnap),
+            },
+            req,
+          );
+          return;
+        }
+      }
+
       await this.controller.sendMessage({
         text,
         attachments,
@@ -1307,6 +1346,7 @@ export class RemoteBridgeServer {
     }
 
     if (method === "POST" && pathname === "/api/chat/new") {
+      this.controller.syncExternalState?.();
       await this.controller.startFreshChat();
       this.sendJson(
         res,
@@ -1318,6 +1358,7 @@ export class RemoteBridgeServer {
     }
 
     if (method === "POST" && pathname === "/api/chat/session") {
+      this.controller.syncExternalState?.();
       const parsed = await this.readJsonBody(req);
       if (!parsed.ok) {
         this.sendJson(res, parsed.status, { ok: false, error: parsed.error }, req);
@@ -1329,13 +1370,57 @@ export class RemoteBridgeServer {
         this.sendJson(res, 400, { ok: false, error: "sessionId is required" }, req);
         return;
       }
-      if (this.controller.selectChatSession) {
-        await this.controller.selectChatSession(sessionId);
+
+      const beforeSnap = this.controller.getSnapshot();
+      const knownSessions = beforeSnap.chatSessions ?? [];
+      if (
+        knownSessions.length > 0 &&
+        beforeSnap.activeChatSessionId !== sessionId &&
+        !knownSessions.some((s) => s.id === sessionId)
+      ) {
+        this.sendJson(
+          res,
+          404,
+          {
+            ok: false,
+            reason: "session_not_found",
+            error: "指定されたチャットセッションは存在しません。最新のセッション一覧に同期しました。",
+            activeChatSessionId: beforeSnap.activeChatSessionId,
+            snapshot: buildRemoteSnapshot(beforeSnap),
+          },
+          req,
+        );
+        return;
       }
+
+      const selected = this.controller.selectChatSession
+        ? await this.controller.selectChatSession(sessionId)
+        : true;
+      const afterSnap = this.controller.getSnapshot();
+      if (selected === false) {
+        this.sendJson(
+          res,
+          404,
+          {
+            ok: false,
+            reason: "session_not_found",
+            error: "指定されたチャットセッションは存在しません。最新のセッション一覧に同期しました。",
+            activeChatSessionId: afterSnap.activeChatSessionId,
+            snapshot: buildRemoteSnapshot(afterSnap),
+          },
+          req,
+        );
+        return;
+      }
+
       this.sendJson(
         res,
         200,
-        { ok: true, snapshot: buildRemoteSnapshot(this.controller.getSnapshot()) },
+        {
+          ok: true,
+          activeChatSessionId: afterSnap.activeChatSessionId,
+          snapshot: buildRemoteSnapshot(afterSnap),
+        },
         req,
       );
       return;
@@ -1345,6 +1430,7 @@ export class RemoteBridgeServer {
     const taskActionMatch =
       /^\/api\/tasks\/([^/]+)(?:\/(status|stop|land|sync-land))?$/.exec(pathname);
     if (taskActionMatch) {
+      this.controller.syncExternalState?.();
       const rawTaskId = decodeURIComponent(taskActionMatch[1]);
       const action = taskActionMatch[2] ?? null;
       const snapshot = this.controller.getSnapshot();
@@ -1717,6 +1803,7 @@ export class RemoteBridgeServer {
     // Send initial snapshot immediately before notifying onClientsChanged,
     // so the subsequent desktop broadcast deduplicates against client.lastSentJson.
     try {
+      this.controller.syncExternalState?.();
       const snapshot = this.controller.getSnapshot();
       const json = JSON.stringify(buildRemoteSnapshot(snapshot));
       const frame = `event: snapshot\ndata: ${json}\n\n`;
@@ -2267,7 +2354,10 @@ export function renderMobileFallbackHtml(): string {
       const res = await fetch(path, Object.assign({}, options, { headers }));
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || data.message || ("HTTP " + res.status));
+        const err = new Error(data.error || data.message || ("HTTP " + res.status));
+        err.status = res.status;
+        err.data = data;
+        throw err;
       }
       return data;
     }
@@ -2457,12 +2547,22 @@ export function renderMobileFallbackHtml(): string {
       selectedMentions = [];
       renderSelectedMentions();
       try {
+        const payload = { text, explicitMentions: mentionsToSend, attachments: [] };
+        if (snapshot && snapshot.activeChatSessionId) {
+          payload.chatSessionId = snapshot.activeChatSessionId;
+        }
         const res = await apiFetch("/api/chat/send", {
           method: "POST",
-          body: JSON.stringify({ text, explicitMentions: mentionsToSend, attachments: [] }),
+          body: JSON.stringify(payload),
         });
         if (res && res.snapshot) applySnapshot(res.snapshot);
       } catch (err) {
+        input.value = text;
+        selectedMentions = mentionsToSend;
+        renderSelectedMentions();
+        if (err && err.data && err.data.snapshot) {
+          applySnapshot(err.data.snapshot);
+        }
         showToast("送信エラー: " + err.message);
       }
     }

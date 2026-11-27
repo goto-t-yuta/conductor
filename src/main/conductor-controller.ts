@@ -15,6 +15,7 @@ import type {
   IntegrationMode,
   LandTaskResult,
   ModelOption,
+  PersistedState,
   PreferredLanguage,
   Project,
   ProviderQuotaSnapshot,
@@ -140,7 +141,7 @@ import {
   resolveClaudeExecutable,
   resolveCodexExecutable,
 } from "./shell-env.js";
-import type { StateStore } from "./state-store.js";
+import { mergePersistedStates, type StateStore } from "./state-store.js";
 import {
   buildFallbackRerunPrompt,
   buildSessionResumePrompt,
@@ -1830,9 +1831,12 @@ export class ConductorController {
     );
   }
 
-  private withChatSessionLock(action: () => Promise<void>): Promise<void> {
+  private withChatSessionLock<T>(action: () => Promise<T>): Promise<T> {
     const next = this.chatSessionTransitionQueue.then(action, action);
-    this.chatSessionTransitionQueue = next.catch(() => {});
+    this.chatSessionTransitionQueue = next.then(
+      () => {},
+      () => {},
+    );
     return next;
   }
 
@@ -1931,6 +1935,7 @@ export class ConductorController {
   }
 
   public async sendMessage(payload: SendMessagePayload): Promise<void> {
+    this.syncExternalState();
     const trimmed = payload.text.trim();
     const rawAttachments = payload.attachments ?? [];
     const attachments: ChatAttachment[] = rawAttachments.map((att) => {
@@ -2125,11 +2130,13 @@ export class ConductorController {
     });
   }
 
-  public async selectChatSession(sessionId: string): Promise<void> {
+  public async selectChatSession(sessionId: string): Promise<boolean> {
     return this.withChatSessionLock(async () => {
-      if (!sessionId || sessionId === this.activeChatSessionId) return;
+      this.syncExternalState();
+      if (!sessionId) return false;
       const target = this.chatSessions.find((s) => s.id === sessionId);
-      if (!target) return;
+      if (!target) return false;
+      if (sessionId === this.activeChatSessionId) return true;
 
       await this.stopAllResponders();
       this.syncActiveChatSession(false);
@@ -2144,7 +2151,7 @@ export class ConductorController {
       }
 
       const latestTarget = this.chatSessions.find((s) => s.id === sessionId);
-      if (!latestTarget) return;
+      if (!latestTarget) return false;
 
       this.activeChatSessionId = latestTarget.id;
       this.messages = latestTarget.messages;
@@ -2167,6 +2174,7 @@ export class ConductorController {
       if (this.chatProvider === "agy" && this.providers.agy.available) {
         void this.ensureAgyReadyAndPrewarm();
       }
+      return true;
     });
   }
 
@@ -7336,10 +7344,8 @@ export class ConductorController {
     }
   }
 
-  private persist(): void {
-    this.syncActiveChatSession(false);
-    this.lastPersistedBrowserKey = this.computePersistedBrowserKey();
-    this.store.save({
+  private buildPersistedState(): PersistedState {
+    return {
       projects: this.projects,
       scanRoots: this.scanRoots,
       tasks: this.tasks,
@@ -7371,7 +7377,54 @@ export class ConductorController {
       remoteAccessToken: this.remoteAccessToken,
       usageRecords: this.usageRecords,
       usageBudgets: this.usageBudgets,
+    };
+  }
+
+  private applyMergedExternalState(merged: PersistedState): void {
+    this.projects = merged.projects;
+    this.scanRoots = merged.scanRoots ?? [];
+    const normalized = normalizeTaskNumbers(merged.tasks, merged.nextTaskNumber);
+    this.tasks = normalized.tasks;
+    this.nextTaskNumber = normalized.nextTaskNumber;
+    const normalizedChats = normalizeChatSessions({
+      chatSessions: merged.chatSessions,
+      activeChatSessionId: merged.activeChatSessionId,
+      legacyMessages: merged.messages,
+      chatProvider: merged.chatProvider ?? this.chatProvider,
     });
+    this.chatSessions = normalizedChats.chatSessions;
+    this.activeChatSessionId = normalizedChats.activeChatSessionId;
+    const activeChat = this.chatSessions.find((s) => s.id === this.activeChatSessionId);
+    this.messages = activeChat ? activeChat.messages : [];
+    this.usageRecords = normalizeUsageRecords(merged.usageRecords);
+  }
+
+  /**
+   * Reconciles in-memory state if `state.json` on disk was updated externally by
+   * another process. Fast O(1) stat check on the common unchanged path.
+   */
+  public syncExternalState(): boolean {
+    const externalDiskState = this.store.loadIfExternallyChanged();
+    if (!externalDiskState) {
+      return false;
+    }
+    this.syncActiveChatSession(false);
+    const merged = mergePersistedStates(externalDiskState, this.buildPersistedState(), {
+      preferDiskScalars: true,
+    });
+    this.applyMergedExternalState(merged);
+    this.broadcastSnapshot();
+    return true;
+  }
+
+  private persist(): void {
+    this.syncActiveChatSession(false);
+    this.lastPersistedBrowserKey = this.computePersistedBrowserKey();
+    const result = this.store.save(this.buildPersistedState());
+    if (result.ok && result.mergedExternalChanges) {
+      this.applyMergedExternalState(result.state);
+      this.scheduleBroadcast();
+    }
   }
 
   private scheduleBroadcast(): void {

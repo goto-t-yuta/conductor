@@ -489,6 +489,9 @@ export interface AppSnapshot {
 }
 
 export interface PersistedState {
+  stateRevision?: number;
+  stateUpdatedAt?: string;
+  stateWriterId?: string;
   projects: Project[];
   scanRoots: string[];
   tasks: AgentTask[];
