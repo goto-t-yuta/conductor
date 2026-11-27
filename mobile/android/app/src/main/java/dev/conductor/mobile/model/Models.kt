@@ -159,8 +159,48 @@ data class ChatAttachment(
     val id: String = "",
     val kind: String = "browserURL",
     val label: String = "",
+    val imagePath: String? = null,
+    val imageDataUrl: String? = null,
     val url: String? = null,
+    val metadataText: String? = null,
 )
+
+data class PendingImageAttachment(
+    val id: String,
+    val label: String,
+    val mimeType: String,
+    val imageDataUrl: String,
+    val byteSize: Int,
+    val previewBytes: ByteArray,
+) {
+    fun toChatAttachment(): ChatAttachment = ChatAttachment(
+        id = id,
+        kind = "image",
+        label = label,
+        imageDataUrl = imageDataUrl,
+    )
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PendingImageAttachment) return false
+        return id == other.id &&
+            label == other.label &&
+            mimeType == other.mimeType &&
+            imageDataUrl == other.imageDataUrl &&
+            byteSize == other.byteSize &&
+            previewBytes.contentEquals(other.previewBytes)
+    }
+
+    override fun hashCode(): Int {
+        var result = id.hashCode()
+        result = 31 * result + label.hashCode()
+        result = 31 * result + mimeType.hashCode()
+        result = 31 * result + imageDataUrl.hashCode()
+        result = 31 * result + byteSize
+        result = 31 * result + previewBytes.contentHashCode()
+        return result
+    }
+}
 
 @Serializable
 data class ChatMessage(

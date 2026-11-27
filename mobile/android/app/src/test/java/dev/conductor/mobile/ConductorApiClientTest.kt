@@ -2,12 +2,14 @@ package dev.conductor.mobile
 
 import dev.conductor.mobile.data.ConductorApiClient
 import dev.conductor.mobile.data.SseEvent
+import dev.conductor.mobile.model.ChatAttachment
 import dev.conductor.mobile.model.ConnectionConfig
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -37,6 +39,9 @@ private class MiniHttpTestServer {
             out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
             out.flush()
         }
+
+    @Volatile
+    var lastRequestBody: String = ""
 
     val baseUrl: String
         get() = "http://127.0.0.1:${serverSocket.localPort}"
@@ -73,6 +78,9 @@ private class MiniHttpTestServer {
                                     if (n <= 0) break
                                     read += n
                                 }
+                                lastRequestBody = String(buf, 0, read)
+                            } else {
+                                lastRequestBody = ""
                             }
                             handler(requestLine, headers, sock.getOutputStream(), sock)
                         }
@@ -272,6 +280,123 @@ class ConductorApiClientTest {
             val disconnect = events.filterIsInstance<SseEvent.Disconnected>().firstOrNull()
             assertNotNull(disconnect)
             assertTrue(disconnect!!.reason.contains("スナップショット解析エラー"))
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun sendMessageSerializesImageAttachmentsEvenWithEmptyText() = runBlocking {
+        server.handler = { _, _, out, _ ->
+            val body = """
+                {
+                  "ok": true,
+                  "snapshot": {
+                    "activeChatSessionId": "sess-img",
+                    "isConnected": true,
+                    "messages": [
+                      {
+                        "id": "u-img",
+                        "role": "user",
+                        "text": "(添付を参照してください)",
+                        "attachments": [
+                          {"id": "img-1", "kind": "image", "label": "shot.png"},
+                          {"id": "img-2", "kind": "image", "label": "photo.jpg"}
+                        ],
+                        "isStreaming": false
+                      }
+                    ]
+                  }
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            val head = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                "Content-Length: ${body.size}\r\n" +
+                "Connection: close\r\n\r\n"
+            out.write(head.toByteArray(Charsets.UTF_8))
+            out.write(body)
+            out.flush()
+        }
+
+        val client = ConductorApiClient()
+        try {
+            val res = client.sendMessage(
+                config = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token),
+                text = "",
+                mentions = emptyList(),
+                attachments = listOf(
+                    ChatAttachment(
+                        id = "img-1",
+                        kind = "image",
+                        label = "shot.png",
+                        imageDataUrl = "data:image/png;base64,iVBORw0KGgo=",
+                    ),
+                    ChatAttachment(
+                        id = "img-2",
+                        kind = "image",
+                        label = "photo.jpg",
+                        imageDataUrl = "data:image/jpeg;base64,/9j/4AAQ=",
+                    ),
+                ),
+            )
+            assertTrue(res.isSuccess)
+            val sentBody = server.lastRequestBody
+            assertTrue(sentBody.contains("\"kind\":\"image\""))
+            assertTrue(sentBody.contains("\"label\":\"shot.png\""))
+            assertTrue(sentBody.contains("\"imageDataUrl\":\"data:image/png;base64,iVBORw0KGgo=\""))
+            assertTrue(sentBody.contains("\"label\":\"photo.jpg\""))
+            assertEquals(2, res.getOrThrow().snapshot?.messages?.first()?.attachments?.size)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun fetchAttachmentImageDownloadsAuthorizedBinaryPayloadAndHandles404() = runBlocking {
+        val sampleBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+        var seenAuth: String? = null
+        var seenPath: String? = null
+
+        server.handler = { reqLine, headers, out, _ ->
+            seenPath = reqLine.split(" ").getOrNull(1)
+            seenAuth = headers["authorization"]
+            if (seenPath == "/api/attachments/att-42") {
+                val head = "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: image/png\r\n" +
+                    "Content-Length: ${sampleBytes.size}\r\n" +
+                    "Connection: close\r\n\r\n"
+                out.write(head.toByteArray(Charsets.UTF_8))
+                out.write(sampleBytes)
+                out.flush()
+            } else {
+                val err = """{"ok":false,"error":"Attachment not found"}""".toByteArray(Charsets.UTF_8)
+                val head = "HTTP/1.1 404 Not Found\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${err.size}\r\n" +
+                    "Connection: close\r\n\r\n"
+                out.write(head.toByteArray(Charsets.UTF_8))
+                out.write(err)
+                out.flush()
+            }
+        }
+
+        val client = ConductorApiClient()
+        try {
+            val okRes = client.fetchAttachmentImage(
+                config = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token),
+                attachmentId = "att-42",
+            )
+            assertTrue(okRes.isSuccess)
+            assertEquals("Bearer $token", seenAuth)
+            assertEquals("/api/attachments/att-42", seenPath)
+            assertArrayEquals(sampleBytes, okRes.getOrThrow())
+
+            val missingRes = client.fetchAttachmentImage(
+                config = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token),
+                attachmentId = "missing",
+            )
+            assertTrue(missingRes.isFailure)
+            assertTrue(missingRes.exceptionOrNull()?.message?.contains("Attachment not found") == true)
         } finally {
             client.close()
         }

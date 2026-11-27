@@ -1,16 +1,22 @@
 package dev.conductor.mobile.ui
 
 import android.app.Application
+import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.conductor.mobile.data.AndroidImageAttachmentProcessor
+import dev.conductor.mobile.data.AttachmentByteCache
 import dev.conductor.mobile.data.ConductorApiClient
 import dev.conductor.mobile.data.ConnectionStore
 import dev.conductor.mobile.data.ConnectionTestResult
+import dev.conductor.mobile.data.ImageAttachmentLogic
 import dev.conductor.mobile.data.SseEvent
 import dev.conductor.mobile.model.AppSnapshot
 import dev.conductor.mobile.model.ConnectUriParser
 import dev.conductor.mobile.model.ConnectionConfig
 import dev.conductor.mobile.model.ExplicitMentionTarget
+import dev.conductor.mobile.model.PendingImageAttachment
 import dev.conductor.mobile.model.StreamTransportState
 import dev.conductor.mobile.model.TaskDetailResponse
 import dev.conductor.mobile.model.ThemeMode
@@ -37,6 +43,8 @@ data class ConductorUiState(
     val snapshot: AppSnapshot? = null,
     val composerText: String = "",
     val selectedMentions: List<ExplicitMentionTarget> = emptyList(),
+    val pendingAttachments: List<PendingImageAttachment> = emptyList(),
+    val isProcessingImages: Boolean = false,
     val isSending: Boolean = false,
     val selectedTaskId: String? = null,
     val selectedTaskDetail: TaskDetailResponse? = null,
@@ -51,6 +59,8 @@ data class ConductorUiState(
 class ConductorViewModel(application: Application) : AndroidViewModel(application) {
     private val store = ConnectionStore(application.applicationContext)
     private val api = ConductorApiClient()
+    private val imageProcessor = AndroidImageAttachmentProcessor(application.applicationContext)
+    private val attachmentImageCache = AttachmentByteCache()
 
     private val _uiState = MutableStateFlow(ConductorUiState())
     val uiState: StateFlow<ConductorUiState> = _uiState.asStateFlow()
@@ -209,6 +219,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun disconnect() {
         stopRealtimeSync()
+        attachmentImageCache.clear()
         viewModelScope.launch {
             store.clear()
             _uiState.update {
@@ -217,6 +228,8 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                     selectedTaskId = null,
                     selectedTaskDetail = null,
                     selectedMentions = emptyList(),
+                    pendingAttachments = emptyList(),
+                    isProcessingImages = false,
                     transportState = StreamTransportState.DISCONNECTED,
                     transportDetail = "切断済み",
                     bannerMessage = "接続を解除しました",
@@ -400,15 +413,104 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun addImageUris(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        val existingCount = _uiState.value.pendingAttachments.size
+        val remaining = ImageAttachmentLogic.MAX_ATTACHMENTS - existingCount
+        if (remaining <= 0) {
+            _uiState.update {
+                it.copy(bannerMessage = "画像は最大 ${ImageAttachmentLogic.MAX_ATTACHMENTS} 枚まで添付できます")
+            }
+            return
+        }
+        val toProcess = uris.take(remaining)
+        val truncated = uris.size > remaining
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isProcessingImages = true) }
+            val added = mutableListOf<PendingImageAttachment>()
+            var failureCount = 0
+            toProcess.forEachIndexed { idx, uri ->
+                val result = imageProcessor.processUri(
+                    uri = uri,
+                    fallbackIndex = existingCount + idx + 1,
+                )
+                result
+                    .onSuccess { attachment ->
+                        attachmentImageCache.put(attachment.id, attachment.previewBytes)
+                        added.add(attachment)
+                    }
+                    .onFailure { err ->
+                        Log.w("ConductorImage", "Failed to process image URI: $uri", err)
+                        failureCount += 1
+                    }
+            }
+            _uiState.update { state ->
+                val banner = when {
+                    failureCount > 0 && added.isEmpty() -> "画像の読み込みに失敗しました"
+                    failureCount > 0 -> "${added.size}枚の画像を添付しました（${failureCount}枚は読み込み失敗）"
+                    truncated -> "画像は最大 ${ImageAttachmentLogic.MAX_ATTACHMENTS} 枚まで添付できます（先頭${added.size}枚を追加）"
+                    else -> state.bannerMessage
+                }
+                state.copy(
+                    pendingAttachments = state.pendingAttachments + added,
+                    isProcessingImages = false,
+                    bannerMessage = banner,
+                )
+            }
+        }
+    }
+
+    fun removePendingAttachment(attachmentId: String) {
+        _uiState.update { state ->
+            state.copy(
+                pendingAttachments = state.pendingAttachments.filterNot { it.id == attachmentId },
+            )
+        }
+    }
+
+    fun getCachedAttachmentImageBytes(attachmentId: String): ByteArray? =
+        attachmentImageCache.get(attachmentId)
+
+    suspend fun loadAttachmentImageBytes(attachmentId: String): ByteArray? {
+        if (attachmentId.isBlank()) return null
+        attachmentImageCache.get(attachmentId)?.let { return it }
+        val cfg = _uiState.value.config
+        if (!cfg.isConfigured) return null
+        return api.fetchAttachmentImage(cfg, attachmentId)
+            .onSuccess { bytes ->
+                attachmentImageCache.put(attachmentId, bytes)
+            }
+            .getOrNull()
+    }
+
     fun sendChatMessage() {
         val state = _uiState.value
         val text = state.composerText.trim()
-        if (text.isBlank() || !state.config.isConfigured || state.isSending) return
+        val pendingImages = state.pendingAttachments
+        if ((text.isBlank() && pendingImages.isEmpty()) ||
+            !state.config.isConfigured ||
+            state.isSending ||
+            state.isProcessingImages
+        ) {
+            return
+        }
         val mentions = state.selectedMentions
         val cfg = state.config
-        _uiState.update { it.copy(composerText = "", selectedMentions = emptyList(), isSending = true) }
+        val chatAttachments = pendingImages.map { att ->
+            attachmentImageCache.put(att.id, att.previewBytes)
+            att.toChatAttachment()
+        }
+        _uiState.update {
+            it.copy(
+                composerText = "",
+                selectedMentions = emptyList(),
+                pendingAttachments = emptyList(),
+                isSending = true,
+            )
+        }
         viewModelScope.launch {
-            api.sendMessage(cfg, text, mentions)
+            api.sendMessage(cfg, text, mentions, chatAttachments)
                 .onSuccess { res ->
                     if (res.snapshot != null) {
                         applyIncomingSnapshot(res.snapshot, fromSse = false)
@@ -427,6 +529,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         it.copy(
                             composerText = text,
                             selectedMentions = mentions,
+                            pendingAttachments = pendingImages,
                             bannerMessage = "送信エラー: ${err.message}",
                         )
                     }
@@ -457,7 +560,11 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                 .onSuccess { res ->
                     res.snapshot?.let { applyIncomingSnapshot(it, fromSse = false) }
                     _uiState.update {
-                        it.copy(selectedMentions = emptyList(), bannerMessage = "新しいチャットを開始しました")
+                        it.copy(
+                            selectedMentions = emptyList(),
+                            pendingAttachments = emptyList(),
+                            bannerMessage = "新しいチャットを開始しました",
+                        )
                     }
                 }
                 .onFailure { err ->

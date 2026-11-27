@@ -2,6 +2,7 @@ package dev.conductor.mobile.data
 
 import dev.conductor.mobile.model.ApiActionResponse
 import dev.conductor.mobile.model.AppSnapshot
+import dev.conductor.mobile.model.ChatAttachment
 import dev.conductor.mobile.model.ChatSendRequest
 import dev.conductor.mobile.model.ChatStopRequest
 import dev.conductor.mobile.model.ConnectUriParser
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -30,6 +32,7 @@ import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import java.io.IOException
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 sealed interface SseEvent {
@@ -52,10 +55,13 @@ class ConductorApiClient(
     landReadTimeoutMs: Long = 60_000L,
     sseReadTimeoutMs: Long = 40_000L,
 ) {
+    @OptIn(ExperimentalSerializationApi::class)
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
         coerceInputValues = true
+        encodeDefaults = true
+        explicitNulls = false
     }
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -67,6 +73,12 @@ class ConductorApiClient(
         .callTimeout(restReadTimeoutMs + restConnectTimeoutMs, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(true)
         .protocols(listOf(Protocol.HTTP_1_1))
+        .build()
+
+    private val uploadClient: OkHttpClient = restClient.newBuilder()
+        .writeTimeout(60_000L, TimeUnit.MILLISECONDS)
+        .readTimeout(45_000L, TimeUnit.MILLISECONDS)
+        .callTimeout(110_000L, TimeUnit.MILLISECONDS)
         .build()
 
     private val landClient: OkHttpClient = restClient.newBuilder()
@@ -213,11 +225,43 @@ class ConductorApiClient(
         config: ConnectionConfig,
         text: String,
         mentions: List<ExplicitMentionTarget>,
+        attachments: List<ChatAttachment> = emptyList(),
     ): Result<ApiActionResponse> = postAction(
         config = config,
         path = "/api/chat/send",
-        payload = json.encodeToString(ChatSendRequest(text = text, explicitMentions = mentions)),
+        payload = json.encodeToString(
+            ChatSendRequest(
+                text = text,
+                explicitMentions = mentions,
+                attachments = attachments,
+            ),
+        ),
+        client = if (attachments.isNotEmpty()) uploadClient else restClient,
     )
+
+    suspend fun fetchAttachmentImage(
+        config: ConnectionConfig,
+        attachmentId: String,
+    ): Result<ByteArray> = withContext(Dispatchers.IO) {
+        runCatching {
+            val encodedId = URLEncoder.encode(attachmentId.trim(), "UTF-8").replace("+", "%20")
+            val req = authRequestBuilder(config, "/api/attachments/$encodedId")
+                .header("Accept", "image/*")
+                .get()
+                .build()
+            restClient.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) {
+                    val errBody = res.body?.string().orEmpty()
+                    throw IOException(extractError(errBody, "HTTP ${res.code}"))
+                }
+                val bytes = res.body?.bytes() ?: throw IOException("画像データが空です")
+                if (bytes.isEmpty()) {
+                    throw IOException("画像データが空です")
+                }
+                bytes
+            }
+        }
+    }
 
     suspend fun stopChat(config: ConnectionConfig, messageId: String? = null): Result<ApiActionResponse> =
         postAction(
