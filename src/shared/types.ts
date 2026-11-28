@@ -223,6 +223,25 @@ export interface LandTaskResult {
   conflictFiles?: string[];
 }
 
+export interface TaskStatusUpdateOptions {
+  force?: boolean;
+}
+
+export interface SyncTaskLandStatusResult {
+  ok: boolean;
+  updated: boolean;
+  landStatus?: TaskLandStatus;
+  reason?:
+    | "merged_into_parent"
+    | "merged_into_base"
+    | "no_changes"
+    | "worktree_removed"
+    | "already_landed"
+    | "unlanded"
+    | "error";
+  message: string;
+}
+
 export type ChatAttachmentKind = "image" | "browserElement" | "browserURL" | "taskRef" | "consoleErrors";
 
 export interface ChatAttachment {
@@ -431,6 +450,8 @@ export interface RemoteAccessStatus {
 }
 
 export interface AppSnapshot {
+  snapshotEpoch?: string;
+  snapshotVersion?: number;
   projects: Project[];
   scanRoots: string[];
   tasks: AgentTask[];
@@ -468,6 +489,9 @@ export interface AppSnapshot {
 }
 
 export interface PersistedState {
+  stateRevision?: number;
+  stateUpdatedAt?: string;
+  stateWriterId?: string;
   projects: Project[];
   scanRoots: string[];
   tasks: AgentTask[];
@@ -581,12 +605,17 @@ export interface ConductorAPI {
   voiceRequestMicPermission(): Promise<VoiceMicPermissionResult>;
 
   // Tasks
-  updateTaskStatus(taskId: string, status: AgentTaskStatus): Promise<TaskStatusUpdateResult>;
+  updateTaskStatus(
+    taskId: string,
+    status: AgentTaskStatus,
+    options?: TaskStatusUpdateOptions,
+  ): Promise<TaskStatusUpdateResult>;
   stopTaskWorker(taskId: string): Promise<void>;
   deleteTask(taskId: string): Promise<void>;
   getTaskGitStatus(taskId: string): Promise<string | null>;
   getTaskWorktreeStatus(taskId: string): Promise<TaskWorktreeStatus | null>;
   landTask(taskId: string, options?: { createPr?: boolean }): Promise<LandTaskResult>;
+  syncTaskLandStatus(taskId: string): Promise<SyncTaskLandStatusResult>;
   resolveTaskConflictWithAI(taskId: string): Promise<{ ok: boolean; error?: string }>;
   cleanupTaskWorktree(taskId: string): Promise<{ ok: boolean; error?: string }>;
 

@@ -156,10 +156,62 @@ class MarkdownParserTest {
         val fenced = """
             ```markdown
             ![NotAnImage](/tmp/fenced.png)
+            <video src="/tmp/fenced.mp4" controls></video>
             ```
         """.trimIndent()
         val blocks = MarkdownParser.parseBlocks(fenced)
         assertEquals(1, blocks.size)
         assertTrue(blocks[0] is MarkdownBlock.CodeBlock)
+    }
+
+    @Test
+    fun parsesHtmlVideoTagsSingleLineMultiLineAndInline() {
+        val md = """
+            デモ動画を確認してください。
+            <video src="/Users/dev/Application Support/demo.mp4" title="操作デモ" controls></video>
+            <video controls poster="/tmp/poster.png">
+              <source src="./walkthrough.webm" type="video/webm" />
+            </video>
+            ![Spaced Mov](</Users/dev/Application Support/screen cap.mov>)
+        """.trimIndent()
+
+        val blocks = MarkdownParser.parseBlocks(md)
+        assertEquals(4, blocks.size)
+        assertEquals(MarkdownBlock.Paragraph("デモ動画を確認してください。"), blocks[0])
+        assertEquals(
+            MarkdownBlock.Video(
+                alt = "操作デモ",
+                src = "/Users/dev/Application Support/demo.mp4",
+                title = "操作デモ",
+                poster = null,
+            ),
+            blocks[1],
+        )
+        assertEquals(
+            MarkdownBlock.Video(
+                alt = "",
+                src = "./walkthrough.webm",
+                title = null,
+                poster = "/tmp/poster.png",
+            ),
+            blocks[2],
+        )
+        assertEquals(
+            MarkdownBlock.Image(
+                alt = "Spaced Mov",
+                src = "/Users/dev/Application Support/screen cap.mov",
+                title = null,
+            ),
+            blocks[3],
+        )
+
+        val inline = MarkdownParser.parseInline(
+            "Inline <video src=\"https://example.com/demo.mp4\" aria-label=\"Demo\"></video> and `<video src=\"/tmp/ignored.mp4\"></video>`.",
+        )
+        assertEquals(
+            listOf(InlineNode.Video(alt = "Demo", src = "https://example.com/demo.mp4", title = null, poster = null)),
+            inline.filterIsInstance<InlineNode.Video>(),
+        )
+        assertTrue(inline.any { it == InlineNode.Code("<video src=\"/tmp/ignored.mp4\"></video>") })
     }
 }

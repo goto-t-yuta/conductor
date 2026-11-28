@@ -15,6 +15,7 @@ import type {
   IntegrationMode,
   LandTaskResult,
   ModelOption,
+  PersistedState,
   PreferredLanguage,
   Project,
   ProviderQuotaSnapshot,
@@ -23,6 +24,8 @@ import type {
   ProviderStatus,
   RemoteAccessStatus,
   SendMessagePayload,
+  SyncTaskLandStatusResult,
+  TaskStatusUpdateOptions,
   TaskStatusUpdateResult,
   TaskWorktreeStatus,
   TokenUsage,
@@ -57,11 +60,11 @@ import {
 import {
   MAX_CHAT_SESSIONS,
   MAX_MESSAGES_PER_SESSION,
+  capChatSessionsPreservingActive,
   createEmptyChatSession,
   deriveChatSessionPreview,
   deriveChatSessionTitle,
   normalizeChatSessions,
-  sortChatSessionsByRecency,
   toChatSessionSummary,
 } from "../shared/chat-sessions.js";
 import {
@@ -75,6 +78,7 @@ import {
 } from "../shared/mentions.js";
 import {
   RUNNING_TASK_DONE_BLOCKED_REASON,
+  requiresLandBeforeDone,
   validateManualTaskStatusTransition,
 } from "../shared/task-status.js";
 import type { BrowserManager } from "./browser-manager.js";
@@ -105,12 +109,14 @@ import {
 } from "./codex-client.js";
 import {
   createTaskWorktree,
+  evaluateWorktreeLandState,
   getGitHeadCommit,
   inspectTaskWorktree,
   isValidIntegrationMode,
   landTaskWorktree,
   removeTaskWorktree,
   resolveEffectiveIntegrationMode,
+  type WorktreeLandEvaluation,
 } from "./git-worktree.js";
 import {
   LocalMCPServer,
@@ -135,7 +141,7 @@ import {
   resolveClaudeExecutable,
   resolveCodexExecutable,
 } from "./shell-env.js";
-import type { StateStore } from "./state-store.js";
+import { mergePersistedStates, type StateStore } from "./state-store.js";
 import {
   buildFallbackRerunPrompt,
   buildSessionResumePrompt,
@@ -151,16 +157,39 @@ import {
   resolveTaskWorkingDir,
   truncateTaskText,
 } from "./task-inspection.js";
+import {
+  DEFAULT_DELTA_TRANSCRIPT_LIMIT,
+  DEFAULT_DISCOVERED_PROJECTS_LIMIT,
+  DEFAULT_INITIAL_TRANSCRIPT_LIMIT,
+  DEFAULT_REBIND_TRANSCRIPT_LIMIT,
+  OrchestratorMetricsLogger,
+  computeProjectsHash,
+  createInitialLaneState,
+  partitionIdleLanesForAcquire,
+  resolveLaneRotationPolicy,
+  searchChatHistoryMessages,
+  selectCompactTasksForPrompt,
+  selectConversationWindowForTurn,
+  trimIdleLanesByMru,
+  type LaneMode,
+  type LaneRotationPolicy,
+  type LaneRotationReason,
+  type OrchestratorLaneState,
+} from "./orchestrator-lanes.js";
 
-interface ResponderLane {
+interface ResponderLane extends OrchestratorLaneState {
   threadId: string;
   activeTurnId: string | null;
   activeAssistantMessageId: string | null;
   activeModel?: string | null;
   pendingUsage?: TokenUsage | null;
+  streamedItemIds?: Set<string>;
+  lastAgentMessageItemId?: string | null;
+  pendingSyncProjectsHash?: string | null;
+  pendingPromptChars?: number;
 }
 
-interface AgyResponderLane {
+interface AgyResponderLane extends OrchestratorLaneState {
   laneId?: string;
   sessionId: string;
   activeAssistantMessageId: string | null;
@@ -171,6 +200,39 @@ interface AgyResponderLane {
   syncPromise: Promise<void> | null;
   pendingTools: Map<string, string>;
   pendingUsage?: NormalizedRawUsage | null;
+  pendingSyncProjectsHash?: string | null;
+  pendingPromptChars?: number;
+}
+
+interface ClaudeResponderLane extends OrchestratorLaneState {
+  laneId: string;
+  sessionId: string | null;
+  activeAssistantMessageId: string | null;
+  pendingSyncProjectsHash?: string | null;
+  pendingPromptChars?: number;
+}
+
+interface ActiveTurnMetrics {
+  provider: AgentProvider;
+  laneId: string;
+  laneMode: LaneMode;
+  rotationReason: LaneRotationReason | null;
+  turnCount: number;
+  injectedChars: number;
+  injectedTranscriptCount: number;
+  projectsInjected: boolean;
+  tasksInjectedCount: number;
+  sentAtMs: number;
+  firstTokenAtMs: number | null;
+  usedSearchChatHistory: boolean;
+}
+
+interface BuiltOrchestratorPrompt {
+  prompt: string;
+  projectsHash: string;
+  projectsInjected: boolean;
+  injectedTranscriptCount: number;
+  tasksInjectedCount: number;
 }
 
 interface InFlightMcpToolCall {
@@ -272,7 +334,8 @@ export function buildOrchestratorDeveloperInstructions(
     "5. **Project discovery & memory**: If the user mentions a project not in the top list, call `search_projects` first. If you locate a new project directory via filesystem or the user asks to add a parent directory's repos, call `register_project` or `scan_directory_projects` so Conductor permanently remembers it in its project list.",
     "6. **Explicit target mentions**: Users may explicitly attach project/task mention chips (without repeating `@...` in the message text) or type `@<projectName>`, `@T<number>`, or `@<projectName>/T<number>` inline (e.g., `@agent_terminal_2`, `@T1`, `@agent_terminal_2/T1`). When an `[Explicitly Mentioned Context]` section is provided, treat those resolved projects and tasks as authoritative targets—operate directly on their exact path, project name, `task_id` (UUID), or `T#` code without guessing.",
     "7. **Answer quick questions directly**: For quick questions, status checks, or browser inspection, reply directly without creating unnecessary tasks.",
-    `8. **Language (STRICT)**: ${buildOrchestratorLanguageInstruction(preferredLanguage)}`,
+    "8. **Past chat history lookup**: When you need earlier conversation details, prior decisions, file paths, or messages beyond the recent transcript window, call `search_chat_history` (read-only keyword/time/offset search over Unified Chat history).",
+    `9. **Language (STRICT)**: ${buildOrchestratorLanguageInstruction(preferredLanguage)}`,
   ].join("\n");
 }
 
@@ -623,6 +686,12 @@ export class ConductorController {
   private activeChatSessionId = "";
   private messages: ChatMessage[] = [];
   private chatSessionEpoch = 0;
+  private chatSessionTransitionQueue: Promise<void> = Promise.resolve();
+  private readonly snapshotEpoch = crypto.randomUUID();
+  private snapshotVersion = 0;
+  private readonly cancelledCodexTurns = new Set<string>();
+  private readonly interruptingCodexThreadIds = new Set<string>();
+  private codexPrewarmPromise: Promise<void> | null = null;
   private readonly rebindContextNeeded = new Set<string>();
   private readonly failedResumeIds = new Set<string>();
   private showTaskSidebar = true;
@@ -661,15 +730,21 @@ export class ConductorController {
   private readonly detectRemoteNetwork?: () => TailscaleNetworkInfo;
   private claudeMcpConfigPath: string | null = null;
   private agyMcpConfig: AgyAcpMcpServerConfig | null = null;
-  private readonly orchestratorClient = new CodexAppServerClient("orchestrator");
+  private readonly orchestratorClient: CodexAppServerClient;
   private readonly workerClient: CodexAppServerClient;
   private readonly agyOrchestratorClient: AgyAcpClient;
+  private readonly runClaudeOrchestratorTurn: typeof runClaudeTurn;
   private readonly cliWorkerRunner: {
     runAgyTurn: typeof runAgyTurn;
     runClaudeTurn: typeof runClaudeTurn;
   };
   private responderLanes: ResponderLane[] = [];
   private agyResponderLanes: AgyResponderLane[] = [];
+  private claudeResponderLanes: ClaudeResponderLane[] = [];
+  private readonly activeTurnMetrics = new Map<string, ActiveTurnMetrics>();
+  private readonly laneRotationPolicy: LaneRotationPolicy;
+  private readonly now: () => number;
+  private readonly orchestratorMetricsLogger: OrchestratorMetricsLogger;
   private agyPrewarmPromise: Promise<void> | null = null;
   private isShuttingDown = false;
   private pendingAutoResumeTaskIds: string[] = [];
@@ -688,24 +763,37 @@ export class ConductorController {
     store: StateStore;
     browser: BrowserManager;
     onSnapshot: (snapshot: AppSnapshot) => void;
+    orchestratorClient?: CodexAppServerClient;
     agyOrchestratorClient?: AgyAcpClient;
     workerClient?: CodexAppServerClient;
+    claudeOrchestratorRunner?: typeof runClaudeTurn;
     cliWorkerRunner?: {
       runAgyTurn?: typeof runAgyTurn;
       runClaudeTurn?: typeof runClaudeTurn;
     };
+    laneRotationPolicy?: Partial<LaneRotationPolicy>;
+    now?: () => number;
+    metricsLogMaxBytes?: number;
     agyBrainBaseDir?: string;
     detectRemoteNetwork?: () => TailscaleNetworkInfo;
   }) {
     this.store = options.store;
     this.browser = options.browser;
     this.emitSnapshot = options.onSnapshot;
+    this.orchestratorClient = options.orchestratorClient ?? new CodexAppServerClient("orchestrator");
     this.agyOrchestratorClient = options.agyOrchestratorClient ?? new AgyAcpClient("orchestrator");
     this.workerClient = options.workerClient ?? new CodexAppServerClient("worker");
+    this.runClaudeOrchestratorTurn = options.claudeOrchestratorRunner ?? runClaudeTurn;
     this.cliWorkerRunner = {
       runAgyTurn: options.cliWorkerRunner?.runAgyTurn ?? runAgyTurn,
       runClaudeTurn: options.cliWorkerRunner?.runClaudeTurn ?? runClaudeTurn,
     };
+    this.laneRotationPolicy = resolveLaneRotationPolicy(options.laneRotationPolicy);
+    this.now = options.now ?? (() => Date.now());
+    this.orchestratorMetricsLogger = new OrchestratorMetricsLogger(
+      path.join(this.store.baseDir, "logs", "orchestrator-metrics.jsonl"),
+      options.metricsLogMaxBytes !== undefined ? { maxBytes: options.metricsLogMaxBytes } : {},
+    );
     this.agyBrainBaseDir =
       options.agyBrainBaseDir ?? path.join(os.homedir(), ".gemini", "antigravity-cli", "brain");
     this.detectRemoteNetwork = options.detectRemoteNetwork;
@@ -721,7 +809,16 @@ export class ConductorController {
     this.orchestratorClient.onNotification((n) => this.handleOrchestratorNotification(n));
     this.orchestratorClient.onDisconnect((reason) => {
       this.isConnected = false;
+      const interruptedMessageIds = this.responderLanes
+        .map((l) => l.activeAssistantMessageId)
+        .filter((id): id is string => Boolean(id));
       this.responderLanes = [];
+      for (const msgId of interruptedMessageIds) {
+        this.finishAssistantMessage(msgId, "接続が切断されました。");
+      }
+      if (interruptedMessageIds.length > 0) {
+        this.persist();
+      }
       this.connectionStatus = "切断されました";
       this.lastErrorBanner = reason;
       this.broadcastSnapshot();
@@ -746,6 +843,8 @@ export class ConductorController {
     const activeCodexLanes = this.responderLanes.filter((l) => l.activeAssistantMessageId !== null).length;
     const activeAgyLanes = this.agyResponderLanes.filter((l) => l.activeAssistantMessageId !== null).length;
     return {
+      snapshotEpoch: this.snapshotEpoch,
+      snapshotVersion: this.snapshotVersion,
       projects: this.projects,
       scanRoots: this.scanRoots,
       tasks: this.tasks,
@@ -812,6 +911,7 @@ export class ConductorController {
     this.connectionStatus = "ローカルMCP & エージェント接続中...";
     this.lastErrorBanner = null;
     this.discoverLocalWorkspaceProjects();
+    this.reconcileAllUnlandedTasks({ allowNoChanges: false });
     this.broadcastSnapshot();
 
     try {
@@ -1119,6 +1219,7 @@ export class ConductorController {
 
   public async rescanAllProjects(): Promise<void> {
     this.discoverLocalWorkspaceProjects();
+    this.reconcileAllUnlandedTasks({ allowNoChanges: false });
     this.broadcastSnapshot();
     if (this.isConnected) {
       await this.discoverCodexHistoryProjects();
@@ -1176,6 +1277,8 @@ export class ConductorController {
       }
     }
     this.agyResponderLanes = [];
+    this.claudeResponderLanes = [];
+    this.activeTurnMetrics.clear();
     this.agyPrewarmPromise = null;
     this.agyOrchestratorClient.stop();
     this.orchestratorClient.stop();
@@ -1186,6 +1289,7 @@ export class ConductorController {
     if (this.mcpServer) {
       await this.mcpServer.stop();
     }
+    await this.orchestratorMetricsLogger.flush();
   }
 
   // MARK: - Settings & Layout
@@ -1587,6 +1691,9 @@ export class ConductorController {
 
   private refreshIdleOrchestratorLanes(): void {
     this.responderLanes = this.responderLanes.filter((l) => l.activeAssistantMessageId !== null);
+    this.claudeResponderLanes = this.claudeResponderLanes.filter(
+      (l) => l.activeAssistantMessageId !== null,
+    );
 
     const idleAgyLanes = this.agyResponderLanes.filter(
       (l) => l.activeAssistantMessageId === null && !l.cancelled,
@@ -1717,12 +1824,45 @@ export class ConductorController {
       backendSessionIds: { ...(active.backendSessionIds ?? {}) },
     };
     const nextSessions = this.chatSessions.map((s) => (s.id === active.id ? updated : s));
-    this.chatSessions = sortChatSessionsByRecency(nextSessions).slice(0, MAX_CHAT_SESSIONS);
+    this.chatSessions = capChatSessionsPreservingActive(
+      nextSessions,
+      active.id,
+      MAX_CHAT_SESSIONS,
+    );
+  }
+
+  private withChatSessionLock<T>(action: () => Promise<T>): Promise<T> {
+    const next = this.chatSessionTransitionQueue.then(action, action);
+    this.chatSessionTransitionQueue = next.then(
+      () => {},
+      () => {},
+    );
+    return next;
+  }
+
+  private markCancelledCodexTurn(threadId: string, turnId: string | null): void {
+    if (!threadId || !turnId) return;
+    if (this.cancelledCodexTurns.size >= 200) {
+      const oldest = this.cancelledCodexTurns.values().next().value;
+      if (oldest) this.cancelledCodexTurns.delete(oldest);
+    }
+    this.cancelledCodexTurns.add(`${threadId}:${turnId}`);
+  }
+
+  private isMessageStreaming(messageId: string): boolean {
+    const active = this.messages.find((m) => m.id === messageId);
+    if (active) return active.isStreaming;
+    for (const session of this.chatSessions) {
+      const found = session.messages.find((m) => m.id === messageId);
+      if (found) return found.isStreaming;
+    }
+    return false;
   }
 
   private appendMessagesToActiveChat(newMessages: ChatMessage[]): void {
     if (newMessages.length === 0) return;
     this.messages = [...this.messages, ...newMessages];
+    this.snapshotVersion += 1;
     this.syncActiveChatSession(true);
   }
 
@@ -1765,13 +1905,27 @@ export class ConductorController {
     const session = this.chatSessions.find((s) => s.id === sessionId);
     const savedId = session?.backendSessionIds?.codex ?? null;
     if (!savedId || this.failedResumeIds.has(`codex:${savedId}`)) return null;
+    if (this.interruptingCodexThreadIds.has(savedId)) return null;
     if (this.responderLanes.some((l) => l.threadId === savedId)) return null;
+    return savedId;
+  }
+
+  private getPreferredResumableClaudeSessionId(
+    sessionId = this.activeChatSessionId,
+  ): string | null {
+    const session = this.chatSessions.find((s) => s.id === sessionId);
+    const savedId = session?.backendSessionIds?.claude ?? null;
+    if (!savedId || this.failedResumeIds.has(`claude:${savedId}`)) return null;
+    if (this.claudeResponderLanes.some((l) => l.sessionId === savedId)) return null;
     return savedId;
   }
 
   private detachOrchestratorLanes(): void {
     this.chatSessionEpoch += 1;
     this.responderLanes = [];
+    this.codexPrewarmPromise = null;
+    this.claudeResponderLanes = [];
+    this.activeTurnMetrics.clear();
     const oldAgyLanes = this.agyResponderLanes;
     this.agyResponderLanes = [];
     this.agyPrewarmPromise = null;
@@ -1781,6 +1935,7 @@ export class ConductorController {
   }
 
   public async sendMessage(payload: SendMessagePayload): Promise<void> {
+    this.syncExternalState();
     const trimmed = payload.text.trim();
     const rawAttachments = payload.attachments ?? [];
     const attachments: ChatAttachment[] = rawAttachments.map((att) => {
@@ -1809,8 +1964,7 @@ export class ConductorController {
     const activeSession = this.getActiveChatSession();
     const sessionId = activeSession.id;
     const selectedProvider = this.chatProvider;
-    const recentHistoryWindow = this.buildRecentConversationWindow(10);
-    const fullHistoryWindow = this.buildRecentConversationWindow(24);
+    const sentAtMs = this.now();
 
     const mentionRefs = extractMentionRefsForMessage(
       displayUserText,
@@ -1827,7 +1981,7 @@ export class ConductorController {
       ...(mentionRefs.length > 0 ? { mentions: mentionRefs } : {}),
       toolChips: [],
       isStreaming: false,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(sentAtMs).toISOString(),
     };
 
     const snippet = displayUserText.replace(/\s+/g, " ").slice(0, 44);
@@ -1841,7 +1995,7 @@ export class ConductorController {
       replyToMessageId: userMsg.id,
       replyToSnippet: hadOtherActive ? snippet : undefined,
       isStreaming: true,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(sentAtMs).toISOString(),
     };
 
     this.appendMessagesToActiveChat([userMsg, assistantMsg]);
@@ -1851,20 +2005,24 @@ export class ConductorController {
     void this.dispatchParallelResponderTurn({
       chatSessionId: sessionId,
       provider: selectedProvider,
+      userMessageId: userMsg.id,
       assistantMessageId: assistantMsg.id,
       userText: displayUserText,
       attachments,
       explicitMentions,
-      recentHistoryWindow,
-      fullHistoryWindow,
       hadOtherActive,
+      sentAtMs,
     });
   }
 
   public async stopMessage(messageId: string): Promise<void> {
+    this.activeTurnMetrics.delete(messageId);
     const cliHandle = this.activeCliResponders.get(messageId);
     if (cliHandle) {
       this.activeCliResponders.delete(messageId);
+      this.claudeResponderLanes = this.claudeResponderLanes.filter(
+        (l) => l.activeAssistantMessageId !== messageId,
+      );
       cliHandle.cancel();
       this.finishAssistantMessage(messageId, "停止しました。");
       this.persist();
@@ -1889,14 +2047,34 @@ export class ConductorController {
     const laneIdx = this.responderLanes.findIndex((l) => l.activeAssistantMessageId === messageId);
     if (laneIdx === -1) {
       this.finishAssistantMessage(messageId, "停止しました。");
+      this.persist();
       this.broadcastSnapshot();
       return;
     }
-    const { threadId, activeTurnId } = this.responderLanes[laneIdx];
-    this.releaseLane(laneIdx, "停止しました。");
-    if (activeTurnId) {
-      await this.orchestratorClient.interruptTurn(threadId, activeTurnId).catch(() => {});
+    // Discard the interrupted lane from the pool so subsequent rapid-fire sends cannot reuse
+    // the same thread while an interrupt / late turn/completed is still in flight.
+    const [lane] = this.responderLanes.splice(laneIdx, 1);
+    lane.activeAssistantMessageId = null;
+    const interruptedTurnId = lane.activeTurnId;
+    lane.activeTurnId = null;
+    lane.pendingUsage = null;
+    lane.pendingSyncProjectsHash = undefined;
+    lane.pendingPromptChars = undefined;
+    lane.streamedItemIds?.clear();
+    lane.lastAgentMessageItemId = null;
+    this.markCancelledCodexTurn(lane.threadId, interruptedTurnId);
+    this.interruptingCodexThreadIds.add(lane.threadId);
+    this.finishAssistantMessage(messageId, "停止しました。");
+    this.persist();
+    this.broadcastSnapshot();
+    try {
+      if (interruptedTurnId) {
+        await this.orchestratorClient.interruptTurn(lane.threadId, interruptedTurnId).catch(() => {});
+      }
+    } finally {
+      this.interruptingCodexThreadIds.delete(lane.threadId);
     }
+    void this.prewarmIdleLane();
   }
 
   public async stopAllResponders(): Promise<void> {
@@ -1913,109 +2091,34 @@ export class ConductorController {
   }
 
   public async startFreshChat(): Promise<void> {
-    await this.stopAllResponders();
-    this.syncActiveChatSession(false);
-
-    const current = this.getActiveChatSession();
-    this.detachOrchestratorLanes();
-
-    if (current.messages.length === 0) {
-      // Already on an empty chat — keep it clean without creating duplicate empty entries
-      const now = new Date().toISOString();
-      this.chatSessions = this.chatSessions.map((s) =>
-        s.id === current.id
-          ? { ...s, updatedAt: now, provider: this.chatProvider, backendSessionIds: {} }
-          : s,
-      );
-      this.messages = [];
-    } else {
-      // Preserve the previous chat in history and create a fresh active session
-      const fresh = createEmptyChatSession(this.chatProvider);
-      this.chatSessions = sortChatSessionsByRecency([fresh, ...this.chatSessions]).slice(
-        0,
-        MAX_CHAT_SESSIONS,
-      );
-      this.activeChatSessionId = fresh.id;
-      this.messages = [];
-    }
-
-    this.persist();
-    this.broadcastSnapshot();
-    if (this.providers.codex.available) {
-      void this.prewarmIdleLane();
-    }
-    if (this.chatProvider === "agy" && this.providers.agy.available) {
-      void this.ensureAgyReadyAndPrewarm();
-    }
-  }
-
-  public async selectChatSession(sessionId: string): Promise<void> {
-    if (!sessionId || sessionId === this.activeChatSessionId) return;
-    const target = this.chatSessions.find((s) => s.id === sessionId);
-    if (!target) return;
-
-    await this.stopAllResponders();
-    this.syncActiveChatSession(false);
-
-    const outgoingId = this.activeChatSessionId;
-    const outgoing = this.chatSessions.find((s) => s.id === outgoingId);
-    this.detachOrchestratorLanes();
-
-    // Prune abandoned empty draft when switching back to a historical chat
-    if (outgoing && outgoing.id !== sessionId && outgoing.messages.length === 0) {
-      this.chatSessions = this.chatSessions.filter((s) => s.id !== outgoing.id);
-    }
-
-    const latestTarget = this.chatSessions.find((s) => s.id === sessionId);
-    if (!latestTarget) return;
-
-    this.activeChatSessionId = latestTarget.id;
-    this.messages = latestTarget.messages;
-
-    // Mark providers without a saved backend session ID as needing context rebind on next turn
-    if (latestTarget.messages.length > 0) {
-      for (const prov of ["codex", "agy", "claude"] as AgentProvider[]) {
-        if (!latestTarget.backendSessionIds?.[prov]) {
-          this.rebindContextNeeded.add(`${latestTarget.id}:${prov}`);
-        }
-      }
-    }
-
-    this.persist();
-    this.broadcastSnapshot();
-
-    if (this.providers.codex.available) {
-      void this.prewarmIdleLane();
-    }
-    if (this.chatProvider === "agy" && this.providers.agy.available) {
-      void this.ensureAgyReadyAndPrewarm();
-    }
-  }
-
-  public async deleteChatSession(sessionId: string): Promise<void> {
-    if (!sessionId) return;
-    const exists = this.chatSessions.some((s) => s.id === sessionId);
-    if (!exists) return;
-
-    const deletingActive = sessionId === this.activeChatSessionId;
-    if (deletingActive) {
+    return this.withChatSessionLock(async () => {
       await this.stopAllResponders();
+      this.syncActiveChatSession(false);
+
+      const current = this.getActiveChatSession();
       this.detachOrchestratorLanes();
-    }
 
-    this.chatSessions = this.chatSessions.filter((s) => s.id !== sessionId);
-    for (const prov of ["codex", "agy", "claude"] as AgentProvider[]) {
-      this.rebindContextNeeded.delete(`${sessionId}:${prov}`);
-    }
-
-    if (deletingActive) {
-      if (this.chatSessions.length === 0) {
+      if (current.messages.length === 0) {
+        // Already on an empty chat — keep it clean without creating duplicate empty entries
+        const now = new Date().toISOString();
+        this.chatSessions = this.chatSessions.map((s) =>
+          s.id === current.id
+            ? { ...s, updatedAt: now, provider: this.chatProvider, backendSessionIds: {} }
+            : s,
+        );
+        this.messages = [];
+      } else {
+        // Preserve the previous chat in history and create a fresh active session
         const fresh = createEmptyChatSession(this.chatProvider);
-        this.chatSessions = [fresh];
+        this.chatSessions = capChatSessionsPreservingActive(
+          [fresh, ...this.chatSessions],
+          fresh.id,
+          MAX_CHAT_SESSIONS,
+        );
+        this.activeChatSessionId = fresh.id;
+        this.messages = [];
       }
-      const nextActive = this.chatSessions[0]!;
-      this.activeChatSessionId = nextActive.id;
-      this.messages = nextActive.messages;
+
       this.persist();
       this.broadcastSnapshot();
       if (this.providers.codex.available) {
@@ -2024,23 +2127,199 @@ export class ConductorController {
       if (this.chatProvider === "agy" && this.providers.agy.available) {
         void this.ensureAgyReadyAndPrewarm();
       }
-      return;
-    }
+    });
+  }
 
-    this.persist();
-    this.broadcastSnapshot();
+  public async selectChatSession(sessionId: string): Promise<boolean> {
+    return this.withChatSessionLock(async () => {
+      this.syncExternalState();
+      if (!sessionId) return false;
+      const target = this.chatSessions.find((s) => s.id === sessionId);
+      if (!target) return false;
+      if (sessionId === this.activeChatSessionId) return true;
+
+      await this.stopAllResponders();
+      this.syncActiveChatSession(false);
+
+      const outgoingId = this.activeChatSessionId;
+      const outgoing = this.chatSessions.find((s) => s.id === outgoingId);
+      this.detachOrchestratorLanes();
+
+      // Prune abandoned empty draft when switching back to a historical chat
+      if (outgoing && outgoing.id !== sessionId && outgoing.messages.length === 0) {
+        this.chatSessions = this.chatSessions.filter((s) => s.id !== outgoing.id);
+      }
+
+      const latestTarget = this.chatSessions.find((s) => s.id === sessionId);
+      if (!latestTarget) return false;
+
+      this.activeChatSessionId = latestTarget.id;
+      this.messages = latestTarget.messages;
+
+      // Mark providers without a saved backend session ID as needing context rebind on next turn
+      if (latestTarget.messages.length > 0) {
+        for (const prov of ["codex", "agy", "claude"] as AgentProvider[]) {
+          if (!latestTarget.backendSessionIds?.[prov]) {
+            this.rebindContextNeeded.add(`${latestTarget.id}:${prov}`);
+          }
+        }
+      }
+
+      this.persist();
+      this.broadcastSnapshot();
+
+      if (this.providers.codex.available) {
+        void this.prewarmIdleLane();
+      }
+      if (this.chatProvider === "agy" && this.providers.agy.available) {
+        void this.ensureAgyReadyAndPrewarm();
+      }
+      return true;
+    });
+  }
+
+  public async deleteChatSession(sessionId: string): Promise<void> {
+    return this.withChatSessionLock(async () => {
+      if (!sessionId) return;
+      const exists = this.chatSessions.some((s) => s.id === sessionId);
+      if (!exists) return;
+
+      const deletingActive = sessionId === this.activeChatSessionId;
+      if (deletingActive) {
+        await this.stopAllResponders();
+        this.detachOrchestratorLanes();
+      }
+
+      this.chatSessions = this.chatSessions.filter((s) => s.id !== sessionId);
+      for (const prov of ["codex", "agy", "claude"] as AgentProvider[]) {
+        this.rebindContextNeeded.delete(`${sessionId}:${prov}`);
+      }
+
+      if (deletingActive) {
+        if (this.chatSessions.length === 0) {
+          const fresh = createEmptyChatSession(this.chatProvider);
+          this.chatSessions = [fresh];
+        }
+        const nextActive = this.chatSessions[0]!;
+        this.activeChatSessionId = nextActive.id;
+        this.messages = nextActive.messages;
+        this.persist();
+        this.broadcastSnapshot();
+        if (this.providers.codex.available) {
+          void this.prewarmIdleLane();
+        }
+        if (this.chatProvider === "agy" && this.providers.agy.available) {
+          void this.ensureAgyReadyAndPrewarm();
+        }
+        return;
+      }
+
+      this.persist();
+      this.broadcastSnapshot();
+    });
+  }
+
+  private beginTurnMetrics(
+    assistantMessageId: string,
+    args: {
+      provider: AgentProvider;
+      laneId: string;
+      laneMode: LaneMode;
+      rotationReason: LaneRotationReason | null;
+      turnCount: number;
+      built: BuiltOrchestratorPrompt;
+      sentAtMs: number;
+    },
+  ): void {
+    this.activeTurnMetrics.set(assistantMessageId, {
+      provider: args.provider,
+      laneId: args.laneId,
+      laneMode: args.laneMode,
+      rotationReason: args.rotationReason,
+      turnCount: args.turnCount,
+      injectedChars: args.built.prompt.length,
+      injectedTranscriptCount: args.built.injectedTranscriptCount,
+      projectsInjected: args.built.projectsInjected,
+      tasksInjectedCount: args.built.tasksInjectedCount,
+      sentAtMs: args.sentAtMs,
+      firstTokenAtMs: null,
+      usedSearchChatHistory: false,
+    });
+  }
+
+  private markTurnFirstToken(assistantMessageId: string): void {
+    const entry = this.activeTurnMetrics.get(assistantMessageId);
+    if (entry && entry.firstTokenAtMs === null) {
+      entry.firstTokenAtMs = this.now();
+    }
+  }
+
+  private markTurnUsedSearchChatHistory(assistantMessageId: string | null | undefined): void {
+    if (!assistantMessageId) return;
+    const entry = this.activeTurnMetrics.get(assistantMessageId);
+    if (entry) {
+      entry.usedSearchChatHistory = true;
+    }
+  }
+
+  private finalizeTurnMetrics(assistantMessageId: string | null | undefined): void {
+    if (!assistantMessageId) return;
+    const entry = this.activeTurnMetrics.get(assistantMessageId);
+    if (!entry) return;
+    this.activeTurnMetrics.delete(assistantMessageId);
+    const completedAtMs = this.now();
+    this.orchestratorMetricsLogger.record({
+      timestamp: new Date(completedAtMs).toISOString(),
+      provider: entry.provider,
+      laneId: entry.laneId,
+      laneMode: entry.laneMode,
+      rotationReason: entry.rotationReason,
+      turnCount: entry.turnCount,
+      injectedChars: entry.injectedChars,
+      injectedTranscriptCount: entry.injectedTranscriptCount,
+      projectsInjected: entry.projectsInjected,
+      tasksInjectedCount: entry.tasksInjectedCount,
+      ttftMs:
+        entry.firstTokenAtMs !== null ? Math.max(0, entry.firstTokenAtMs - entry.sentAtMs) : null,
+      totalMs: Math.max(0, completedAtMs - entry.sentAtMs),
+      usedSearchChatHistory: entry.usedSearchChatHistory,
+    });
+  }
+
+  private commitLaneSyncState(
+    lane: OrchestratorLaneState & {
+      pendingSyncProjectsHash?: string | null;
+      pendingPromptChars?: number;
+    },
+    assistantMessageId: string | null,
+  ): void {
+    const replyLength = assistantMessageId
+      ? (this.findMessageById(assistantMessageId)?.text.length ?? 0)
+      : 0;
+    lane.turnCount = (lane.turnCount ?? 0) + 1;
+    lane.lastUsedAt = this.now();
+    if (assistantMessageId) {
+      lane.lastSyncedMessageId = assistantMessageId;
+    }
+    if (lane.pendingSyncProjectsHash !== undefined) {
+      lane.lastProjectsHash = lane.pendingSyncProjectsHash;
+      lane.pendingSyncProjectsHash = undefined;
+    }
+    lane.cumulativeChars =
+      (lane.cumulativeChars ?? 0) + (lane.pendingPromptChars ?? 0) + replyLength;
+    lane.pendingPromptChars = undefined;
   }
 
   private async dispatchParallelResponderTurn(args: {
     chatSessionId: string;
     provider: AgentProvider;
+    userMessageId: string;
     assistantMessageId: string;
     userText: string;
     attachments: ChatAttachment[];
     explicitMentions?: readonly ExplicitMentionTarget[];
-    recentHistoryWindow: string;
-    fullHistoryWindow: string;
     hadOtherActive: boolean;
+    sentAtMs: number;
   }): Promise<void> {
     try {
       if (!this.isConnected) {
@@ -2048,16 +2327,17 @@ export class ConductorController {
       }
 
       const rebindKey = `${args.chatSessionId}:${args.provider}`;
-      const buildPromptForTurn = (isRestoredRebind: boolean): string =>
-        this.buildOrchestratorPrompt(
-          args.userText,
-          args.attachments,
-          isRestoredRebind ? args.fullHistoryWindow : args.recentHistoryWindow,
-          {
-            isRestoredContextRebind: isRestoredRebind,
-            explicitMentions: args.explicitMentions,
-          },
-        );
+      const buildPromptForTurn = (
+        lane: OrchestratorLaneState | null,
+        isRestoredRebind: boolean,
+      ): BuiltOrchestratorPrompt =>
+        this.buildOrchestratorPromptWithMeta(args.userText, args.attachments, {
+          lane,
+          userMessageId: args.userMessageId,
+          assistantMessageId: args.assistantMessageId,
+          isRestoredContextRebind: isRestoredRebind,
+          explicitMentions: args.explicitMentions,
+        });
 
       const imagePaths = args.attachments
         .map((a) => a.imagePath)
@@ -2071,6 +2351,7 @@ export class ConductorController {
           imagePaths,
           model: this.chatModel,
           effort: this.chatEffort,
+          sentAtMs: args.sentAtMs,
         });
         return;
       }
@@ -2082,6 +2363,7 @@ export class ConductorController {
           buildPrompt: buildPromptForTurn,
           imagePaths,
           hadOtherActive: args.hadOtherActive,
+          sentAtMs: args.sentAtMs,
         });
         return;
       }
@@ -2091,12 +2373,23 @@ export class ConductorController {
         throw new Error("Codex に接続できませんでした。");
       }
 
-      const { threadId, resumed, replacedStale } = await this.acquireResponderLane(
+      const dispatchEpoch = this.chatSessionEpoch;
+      const acquired = await this.acquireResponderLane(
         args.assistantMessageId,
         args.chatSessionId,
+        dispatchEpoch,
       );
-      const needsRebind =
-        !resumed && this.rebindContextNeeded.has(rebindKey);
+      if (!acquired) {
+        return;
+      }
+      const { lane, threadId, resumed, replacedStale, laneMode, rotationReason } = acquired;
+      if (dispatchEpoch !== this.chatSessionEpoch || !this.isMessageStreaming(args.assistantMessageId)) {
+        this.responderLanes = this.responderLanes.filter(
+          (l) => !(l.threadId === threadId && l.activeAssistantMessageId === args.assistantMessageId),
+        );
+        return;
+      }
+      const needsRebind = !resumed && this.rebindContextNeeded.has(rebindKey);
       if (resumed || needsRebind) {
         this.rebindContextNeeded.delete(rebindKey);
       }
@@ -2108,38 +2401,66 @@ export class ConductorController {
         overwrite: replacedStale,
       });
 
-      const promptPayload = buildPromptForTurn(needsRebind);
+      const built = buildPromptForTurn(lane, needsRebind);
       const selectedModel = this.chatModel;
-      const laneBeforeStart = this.responderLanes.find((l) => l.threadId === threadId);
-      if (laneBeforeStart) {
-        laneBeforeStart.activeModel = selectedModel;
-        laneBeforeStart.pendingUsage = null;
+      const laneBeforeStart = this.responderLanes.find(
+        (l) => l.threadId === threadId && l.activeAssistantMessageId === args.assistantMessageId,
+      );
+      if (!laneBeforeStart) {
+        return;
       }
+      laneBeforeStart.activeModel = selectedModel;
+      laneBeforeStart.pendingUsage = null;
+      laneBeforeStart.lastUsedAt = this.now();
+      laneBeforeStart.pendingSyncProjectsHash = built.projectsHash;
+      laneBeforeStart.pendingPromptChars = built.prompt.length;
+
+      this.beginTurnMetrics(args.assistantMessageId, {
+        provider: "codex",
+        laneId: threadId,
+        laneMode,
+        rotationReason,
+        turnCount: (laneBeforeStart.turnCount ?? 0) + 1,
+        built,
+        sentAtMs: args.sentAtMs,
+      });
       const turnId = await this.orchestratorClient.startTurn({
         threadId,
-        text: promptPayload,
+        text: built.prompt,
         imagePaths,
         model: selectedModel,
         effort: this.chatEffort,
       });
 
-      const lane = this.responderLanes.find((l) => l.threadId === threadId);
-      if (lane) {
-        lane.activeTurnId = turnId;
-        lane.activeModel = selectedModel;
+      const activeLane = this.responderLanes.find(
+        (l) => l.threadId === threadId && l.activeAssistantMessageId === args.assistantMessageId,
+      );
+      if (!activeLane || dispatchEpoch !== this.chatSessionEpoch || !this.isMessageStreaming(args.assistantMessageId)) {
+        this.activeTurnMetrics.delete(args.assistantMessageId);
+        this.markCancelledCodexTurn(threadId, turnId);
+        void this.orchestratorClient.interruptTurn(threadId, turnId).catch(() => {});
+        return;
       }
+      activeLane.activeTurnId = turnId;
+      activeLane.activeModel = selectedModel;
       this.updateMessage(args.assistantMessageId, (m) => {
         m.responderTurnId = turnId;
       });
       this.broadcastSnapshot();
     } catch (err) {
+      this.activeTurnMetrics.delete(args.assistantMessageId);
       this.activeCliResponders.delete(args.assistantMessageId);
+      this.claudeResponderLanes = this.claudeResponderLanes.filter(
+        (l) => l.activeAssistantMessageId !== args.assistantMessageId,
+      );
       const laneIdx = this.responderLanes.findIndex(
         (l) => l.activeAssistantMessageId === args.assistantMessageId,
       );
       if (laneIdx !== -1) {
         this.responderLanes[laneIdx].activeAssistantMessageId = null;
         this.responderLanes[laneIdx].activeTurnId = null;
+        this.responderLanes[laneIdx].pendingSyncProjectsHash = undefined;
+        this.responderLanes[laneIdx].pendingPromptChars = undefined;
       }
       const agyLaneIdx = this.agyResponderLanes.findIndex(
         (l) => l.activeAssistantMessageId === args.assistantMessageId,
@@ -2161,49 +2482,178 @@ export class ConductorController {
     }
   }
 
+  private acquireClaudeResponderLane(
+    assistantMessageId: string,
+    chatSessionId: string,
+    options: { retriedWithoutResume?: boolean } = {},
+  ): {
+    lane: ClaudeResponderLane;
+    resumed: boolean;
+    replacedStale: boolean;
+    laneMode: LaneMode;
+    rotationReason: LaneRotationReason | null;
+  } {
+    const now = this.now();
+    const savedId =
+      this.chatSessions.find((s) => s.id === chatSessionId)?.backendSessionIds?.claude ?? null;
+
+    if (!options.retriedWithoutResume) {
+      const { selected, expired, rotationReason } = partitionIdleLanesForAcquire(
+        this.claudeResponderLanes,
+        (l) =>
+          l.activeAssistantMessageId === null &&
+          Boolean(l.sessionId) &&
+          !this.failedResumeIds.has(`claude:${l.sessionId}`),
+        now,
+        this.laneRotationPolicy,
+      );
+
+      if (expired.length > 0) {
+        const expiredSet = new Set(expired);
+        this.claudeResponderLanes = this.claudeResponderLanes.filter((l) => !expiredSet.has(l));
+      }
+
+      if (selected) {
+        selected.activeAssistantMessageId = assistantMessageId;
+        const isContinuation = (selected.turnCount ?? 0) > 0;
+        const laneMode: LaneMode = isContinuation
+          ? "reused"
+          : rotationReason
+            ? "rotated"
+            : "new";
+        return {
+          lane: selected,
+          resumed: Boolean(selected.sessionId),
+          replacedStale: false,
+          laneMode,
+          rotationReason: laneMode === "rotated" ? rotationReason : null,
+        };
+      }
+
+      if (rotationReason) {
+        const rotatedLane: ClaudeResponderLane = {
+          laneId: crypto.randomUUID(),
+          sessionId: null,
+          activeAssistantMessageId: assistantMessageId,
+          ...createInitialLaneState(now),
+        };
+        this.claudeResponderLanes.push(rotatedLane);
+        return {
+          lane: rotatedLane,
+          resumed: false,
+          replacedStale: true,
+          laneMode: "rotated",
+          rotationReason,
+        };
+      }
+    }
+
+    const preferredSessionId = options.retriedWithoutResume
+      ? null
+      : this.getPreferredResumableClaudeSessionId(chatSessionId);
+    const freshLane: ClaudeResponderLane = {
+      laneId: crypto.randomUUID(),
+      sessionId: preferredSessionId,
+      activeAssistantMessageId: assistantMessageId,
+      ...createInitialLaneState(now),
+    };
+    this.claudeResponderLanes.push(freshLane);
+    return {
+      lane: freshLane,
+      resumed: Boolean(preferredSessionId && savedId && preferredSessionId === savedId),
+      replacedStale: Boolean(options.retriedWithoutResume),
+      laneMode: "new",
+      rotationReason: null,
+    };
+  }
+
+  private releaseClaudeLane(
+    lane: ClaudeResponderLane,
+    options: { discard?: boolean } = {},
+  ): void {
+    lane.activeAssistantMessageId = null;
+    if (options.discard || !lane.sessionId) {
+      this.claudeResponderLanes = this.claudeResponderLanes.filter((l) => l !== lane);
+      return;
+    }
+    const { kept } = trimIdleLanesByMru(
+      this.claudeResponderLanes,
+      (l) => l.activeAssistantMessageId === null,
+      this.maxIdleLanes,
+    );
+    this.claudeResponderLanes = kept;
+  }
+
   private dispatchClaudeOrchestratorTurn(args: {
     chatSessionId: string;
     assistantMessageId: string;
-    buildPrompt: (isRestoredRebind: boolean) => string;
+    buildPrompt: (
+      lane: OrchestratorLaneState | null,
+      isRestoredRebind: boolean,
+    ) => BuiltOrchestratorPrompt;
     imagePaths: string[];
     hadOtherActive: boolean;
+    sentAtMs: number;
     retriedWithoutResume?: boolean;
   }): void {
     const instructions = this.buildOrchestratorDeveloperInstructions();
-    const session = this.chatSessions.find((s) => s.id === args.chatSessionId);
-    const savedClaudeId =
-      !args.hadOtherActive && !args.retriedWithoutResume
-        ? session?.backendSessionIds?.claude ?? null
-        : null;
-    const resumeId =
-      savedClaudeId && !this.failedResumeIds.has(`claude:${savedClaudeId}`)
-        ? savedClaudeId
-        : null;
+    const acquired = this.acquireClaudeResponderLane(args.assistantMessageId, args.chatSessionId, {
+      retriedWithoutResume: args.retriedWithoutResume,
+    });
+    const { lane, laneMode, rotationReason } = acquired;
+    const resumeId = lane.sessionId;
     const rebindKey = `${args.chatSessionId}:claude`;
     const needsRebind =
       !resumeId &&
       (Boolean(args.retriedWithoutResume) || this.rebindContextNeeded.has(rebindKey));
-    const promptPayload = args.buildPrompt(needsRebind);
+    const built = args.buildPrompt(lane, needsRebind);
+    lane.lastUsedAt = this.now();
+    lane.pendingSyncProjectsHash = built.projectsHash;
+    lane.pendingPromptChars = built.prompt.length;
+
+    this.beginTurnMetrics(args.assistantMessageId, {
+      provider: "claude",
+      laneId: lane.sessionId ?? lane.laneId,
+      laneMode,
+      rotationReason,
+      turnCount: (lane.turnCount ?? 0) + 1,
+      built,
+      sentAtMs: args.sentAtMs,
+    });
+
     let sawOutput = false;
+    let runningHandle: RunningCliTurn | null = null;
+    const isStaleClaudeCallback = (): boolean =>
+      runningHandle !== null && this.activeCliResponders.get(args.assistantMessageId) !== runningHandle;
 
     const callbacks = {
       onSessionId: (sid: string) => {
+        if (isStaleClaudeCallback()) return;
+        lane.sessionId = sid;
+        const metric = this.activeTurnMetrics.get(args.assistantMessageId);
+        if (metric) {
+          metric.laneId = sid;
+        }
         this.updateMessage(args.assistantMessageId, (m) => {
           m.responderThreadId = sid;
         });
         this.recordBackendSessionId(args.chatSessionId, "claude", sid, {
-          overwrite: Boolean(args.retriedWithoutResume),
+          overwrite: acquired.replacedStale || Boolean(args.retriedWithoutResume),
         });
       },
       onTextDelta: (delta: string) => {
+        if (isStaleClaudeCallback()) return;
         sawOutput = true;
+        this.markTurnFirstToken(args.assistantMessageId);
         this.updateMessage(args.assistantMessageId, (m) => {
           m.text += delta;
         });
         this.scheduleBroadcast();
       },
       onReasoningDelta: (delta: string) => {
+        if (isStaleClaudeCallback()) return;
         sawOutput = true;
+        this.markTurnFirstToken(args.assistantMessageId);
         this.updateMessage(args.assistantMessageId, (m) => {
           m.reasoningSummary = (m.reasoningSummary ?? "") + delta;
         });
@@ -2216,8 +2666,12 @@ export class ConductorController {
         completed: boolean;
         isError?: boolean;
       }) => {
+        if (isStaleClaudeCallback()) return;
         sawOutput = true;
         const cleanName = ev.name.replace(/^mcp_+conductor_+/, "");
+        if (cleanName === "search_chat_history") {
+          this.markTurnUsedSearchChatHistory(args.assistantMessageId);
+        }
         this.upsertToolChip(
           args.assistantMessageId,
           ev.id,
@@ -2239,9 +2693,21 @@ export class ConductorController {
         interrupted?: boolean;
         usage?: CliTurnUsage;
       }) => {
+        if (isStaleClaudeCallback()) {
+          this.cleanupClaudeTurnMcpConfig(args.assistantMessageId);
+          return;
+        }
         this.activeCliResponders.delete(args.assistantMessageId);
         // If --resume failed before streaming anything, fall back cleanly with re-bound context
-        if (!outcome.ok && !outcome.interrupted && !sawOutput && resumeId && !args.retriedWithoutResume) {
+        if (
+          !outcome.ok &&
+          !outcome.interrupted &&
+          !sawOutput &&
+          resumeId &&
+          !args.retriedWithoutResume
+        ) {
+          this.activeTurnMetrics.delete(args.assistantMessageId);
+          this.releaseClaudeLane(lane, { discard: true });
           this.failedResumeIds.add(`claude:${resumeId}`);
           this.rebindContextNeeded.add(rebindKey);
           this.dispatchClaudeOrchestratorTurn({
@@ -2265,6 +2731,8 @@ export class ConductorController {
           });
         }
         if (!outcome.ok && outcome.errorMessage && !outcome.interrupted) {
+          this.activeTurnMetrics.delete(args.assistantMessageId);
+          this.releaseClaudeLane(lane, { discard: true });
           this.updateMessage(args.assistantMessageId, (m) => {
             m.text = m.text
               ? `${m.text}\n\nエラー: ${outcome.errorMessage}`
@@ -2277,6 +2745,14 @@ export class ConductorController {
             args.assistantMessageId,
             outcome.interrupted ? "停止しました。" : undefined,
           );
+          if (outcome.ok && !outcome.interrupted) {
+            this.commitLaneSyncState(lane, args.assistantMessageId);
+            this.finalizeTurnMetrics(args.assistantMessageId);
+            this.releaseClaudeLane(lane);
+          } else {
+            this.activeTurnMetrics.delete(args.assistantMessageId);
+            this.releaseClaudeLane(lane, { discard: true });
+          }
         }
         this.persist();
         this.broadcastSnapshot();
@@ -2301,10 +2777,10 @@ export class ConductorController {
       }
     }
 
-    const running = runClaudeTurn(
+    const running = this.runClaudeOrchestratorTurn(
       {
         cwd: this.store.baseDir,
-        prompt: promptPayload,
+        prompt: built.prompt,
         systemPrompt: instructions,
         model: this.chatModel,
         effort: this.chatEffort,
@@ -2315,6 +2791,7 @@ export class ConductorController {
       callbacks,
     );
 
+    runningHandle = running;
     this.activeCliResponders.set(args.assistantMessageId, running);
     this.broadcastSnapshot();
   }
@@ -2409,6 +2886,7 @@ export class ConductorController {
       hasStreamedText: false,
       syncPromise: null,
       pendingTools: new Map(),
+      ...createInitialLaneState(this.now()),
     };
 
     await this.syncAgyLaneConfig(lane, targetModel, targetEffort);
@@ -2453,11 +2931,31 @@ export class ConductorController {
     targetModel: string | null,
     targetEffort: string | null,
     chatSessionId: string,
-  ): Promise<{ lane: AgyResponderLane; resumed: boolean; replacedStale: boolean }> {
+    expectedEpoch = this.chatSessionEpoch,
+  ): Promise<{
+    lane: AgyResponderLane;
+    resumed: boolean;
+    replacedStale: boolean;
+    laneMode: LaneMode;
+    rotationReason: LaneRotationReason | null;
+  } | null> {
+    const now = this.now();
     const savedId = this.chatSessions.find((s) => s.id === chatSessionId)?.backendSessionIds?.agy ?? null;
-    const idle = this.agyResponderLanes.find(
+    const { selected: idle, expired, rotationReason } = partitionIdleLanesForAcquire(
+      this.agyResponderLanes,
       (l) => l.activeAssistantMessageId === null && !l.cancelled,
+      now,
+      this.laneRotationPolicy,
     );
+
+    if (expired.length > 0) {
+      const expiredSet = new Set(expired);
+      this.agyResponderLanes = this.agyResponderLanes.filter((l) => !expiredSet.has(l));
+      for (const stale of expired) {
+        void this.agyOrchestratorClient.closeSession(stale.sessionId);
+      }
+    }
+
     if (idle) {
       idle.activeAssistantMessageId = assistantMessageId;
       idle.cancelled = false;
@@ -2467,15 +2965,33 @@ export class ConductorController {
       if (idle.syncPromise) {
         await idle.syncPromise.catch(() => {});
       }
+      if (expectedEpoch !== this.chatSessionEpoch || idle.cancelled || !this.isMessageStreaming(assistantMessageId)) {
+        idle.activeAssistantMessageId = null;
+        return null;
+      }
       await this.syncAgyLaneConfig(idle, targetModel, targetEffort);
+      if (expectedEpoch !== this.chatSessionEpoch || idle.cancelled || !this.isMessageStreaming(assistantMessageId)) {
+        idle.activeAssistantMessageId = null;
+        return null;
+      }
+      const isContinuation = (idle.turnCount ?? 0) > 0;
+      const laneMode: LaneMode = isContinuation
+        ? "reused"
+        : rotationReason
+          ? "rotated"
+          : "new";
       return {
         lane: idle,
         resumed: Boolean(savedId && idle.sessionId === savedId),
         replacedStale: false,
+        laneMode,
+        rotationReason: laneMode === "rotated" ? rotationReason : null,
       };
     }
 
-    const preferredSessionId = this.getPreferredResumableAgySessionId(chatSessionId);
+    const preferredSessionId = rotationReason
+      ? null
+      : this.getPreferredResumableAgySessionId(chatSessionId);
     const created = await this.createOrResumeAgyLane(
       assistantMessageId,
       targetModel,
@@ -2483,9 +2999,18 @@ export class ConductorController {
       preferredSessionId,
       chatSessionId,
     );
+    if (expectedEpoch !== this.chatSessionEpoch || !this.isMessageStreaming(assistantMessageId)) {
+      void this.agyOrchestratorClient.closeSession(created.lane.sessionId);
+      return null;
+    }
     this.agyResponderLanes.push(created.lane);
     this.broadcastSnapshot();
-    return created;
+    return {
+      ...created,
+      replacedStale: created.replacedStale || Boolean(rotationReason),
+      laneMode: rotationReason ? "rotated" : "new",
+      rotationReason,
+    };
   }
 
   private async prewarmAgyIdleLane(): Promise<void> {
@@ -2560,22 +3085,16 @@ export class ConductorController {
       this.agyResponderLanes = this.agyResponderLanes.filter((l) => l !== lane);
       void this.agyOrchestratorClient.closeSession(lane.sessionId);
     } else {
-      // Trim extra idle lanes and close their ACP sessions cleanly
-      let idleSeen = 0;
-      const kept: AgyResponderLane[] = [];
-      for (const candidate of this.agyResponderLanes) {
-        if (candidate.activeAssistantMessageId !== null) {
-          kept.push(candidate);
-          continue;
-        }
-        idleSeen += 1;
-        if (idleSeen <= this.maxIdleLanes) {
-          kept.push(candidate);
-        } else {
-          void this.agyOrchestratorClient.closeSession(candidate.sessionId);
-        }
-      }
+      // Trim extra idle lanes keeping MRU lanes and close evicted ACP sessions cleanly
+      const { kept, evicted } = trimIdleLanesByMru(
+        this.agyResponderLanes,
+        (candidate) => candidate.activeAssistantMessageId === null,
+        this.maxIdleLanes,
+      );
       this.agyResponderLanes = kept;
+      for (const stale of evicted) {
+        void this.agyOrchestratorClient.closeSession(stale.sessionId);
+      }
     }
 
     this.persist();
@@ -2618,27 +3137,39 @@ export class ConductorController {
   private async dispatchAgyOrchestratorTurn(args: {
     chatSessionId: string;
     assistantMessageId: string;
-    buildPrompt: (isRestoredRebind: boolean) => string;
+    buildPrompt: (
+      lane: OrchestratorLaneState | null,
+      isRestoredRebind: boolean,
+    ) => BuiltOrchestratorPrompt;
     imagePaths: string[];
     model: string | null;
     effort: string | null;
+    sentAtMs: number;
   }): Promise<void> {
     if (!this.providers.agy.available && !this.agyOrchestratorClient.isAvailable()) {
       throw new Error("agy CLI が見つかりませんでした。`~/.local/bin/agy` を確認してください。");
     }
 
     const rebindKey = `${args.chatSessionId}:agy`;
+    const dispatchEpoch = this.chatSessionEpoch;
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let lane: AgyResponderLane | null = null;
       try {
         await this.ensureAgyOrchestratorConnected();
+        if (dispatchEpoch !== this.chatSessionEpoch || !this.isMessageStreaming(args.assistantMessageId)) {
+          return;
+        }
         const acquired = await this.acquireAgyResponderLane(
           args.assistantMessageId,
           args.model,
           args.effort,
           args.chatSessionId,
+          dispatchEpoch,
         );
+        if (!acquired) {
+          return;
+        }
         lane = acquired.lane;
         const needsRebind =
           !acquired.resumed && this.rebindContextNeeded.has(rebindKey);
@@ -2654,11 +3185,25 @@ export class ConductorController {
         });
         this.broadcastSnapshot();
 
-        const promptPayload = args.buildPrompt(needsRebind);
+        const built = args.buildPrompt(lane, needsRebind);
         lane.pendingUsage = null;
+        lane.lastUsedAt = this.now();
+        lane.pendingSyncProjectsHash = built.projectsHash;
+        lane.pendingPromptChars = built.prompt.length;
+
+        this.beginTurnMetrics(args.assistantMessageId, {
+          provider: "agy",
+          laneId: lane.laneId ?? lane.sessionId,
+          laneMode: acquired.laneMode,
+          rotationReason: acquired.rotationReason,
+          turnCount: (lane.turnCount ?? 0) + 1,
+          built,
+          sentAtMs: args.sentAtMs,
+        });
+
         const result = await this.agyOrchestratorClient.prompt({
           sessionId: lane.sessionId,
-          text: promptPayload,
+          text: built.prompt,
           imagePaths: args.imagePaths,
         });
 
@@ -2680,6 +3225,7 @@ export class ConductorController {
         }
 
         if (lane.cancelled) {
+          this.activeTurnMetrics.delete(args.assistantMessageId);
           void this.agyOrchestratorClient.closeSession(lane.sessionId);
           if (this.chatProvider !== "agy") {
             void this.shutdownAgyOrchestratorIfIdle();
@@ -2690,12 +3236,19 @@ export class ConductorController {
         }
 
         const wasCancelled = result.stopReason === "cancelled";
+        if (!wasCancelled) {
+          this.commitLaneSyncState(lane, args.assistantMessageId);
+          this.finalizeTurnMetrics(args.assistantMessageId);
+        } else {
+          this.activeTurnMetrics.delete(args.assistantMessageId);
+        }
         this.releaseAgyLane(lane, {
           fallbackText: wasCancelled ? "停止しました。" : undefined,
           discard: wasCancelled,
         });
         return;
       } catch (err) {
+        this.activeTurnMetrics.delete(args.assistantMessageId);
         if (lane?.cancelled) {
           void this.agyOrchestratorClient.closeSession(lane.sessionId);
           return;
@@ -2728,6 +3281,7 @@ export class ConductorController {
     switch (parsed.kind) {
       case "textDelta":
         lane.hasStreamedText = true;
+        this.markTurnFirstToken(messageId);
         this.updateMessage(messageId, (m) => {
           m.text += parsed.text;
         });
@@ -2735,6 +3289,7 @@ export class ConductorController {
         break;
 
       case "reasoningDelta":
+        this.markTurnFirstToken(messageId);
         this.updateMessage(messageId, (m) => {
           m.reasoningSummary = (m.reasoningSummary ?? "") + parsed.text;
         });
@@ -2748,6 +3303,9 @@ export class ConductorController {
         }
         const resolvedName = parsed.name ?? lane.pendingTools.get(toolId) ?? null;
         const cleanName = resolvedName ? resolvedName.replace(/^mcp_+conductor_+/, "") : null;
+        if (cleanName === "search_chat_history") {
+          this.markTurnUsedSearchChatHistory(messageId);
+        }
         this.upsertToolChip(
           messageId,
           toolId,
@@ -2833,70 +3391,196 @@ export class ConductorController {
   private async acquireResponderLane(
     assistantMessageId: string,
     chatSessionId: string,
-  ): Promise<{ threadId: string; resumed: boolean; replacedStale: boolean }> {
+    expectedEpoch = this.chatSessionEpoch,
+  ): Promise<{
+    lane: ResponderLane;
+    threadId: string;
+    resumed: boolean;
+    replacedStale: boolean;
+    laneMode: LaneMode;
+    rotationReason: LaneRotationReason | null;
+  } | null> {
+    const now = this.now();
     const savedId =
       this.chatSessions.find((s) => s.id === chatSessionId)?.backendSessionIds?.codex ?? null;
-    const idle = this.responderLanes.find((l) => l.activeAssistantMessageId === null);
+    const { selected: idle, expired, rotationReason } = partitionIdleLanesForAcquire(
+      this.responderLanes,
+      (l) => l.activeAssistantMessageId === null,
+      now,
+      this.laneRotationPolicy,
+    );
+
+    if (expired.length > 0) {
+      const expiredSet = new Set(expired);
+      this.responderLanes = this.responderLanes.filter((l) => !expiredSet.has(l));
+    }
+
     if (idle) {
       idle.activeAssistantMessageId = assistantMessageId;
       idle.activeTurnId = null;
+      idle.streamedItemIds = new Set();
+      idle.lastAgentMessageItemId = null;
       this.broadcastSnapshot();
+      const isContinuation = (idle.turnCount ?? 0) > 0;
+      const laneMode: LaneMode = isContinuation
+        ? "reused"
+        : rotationReason
+          ? "rotated"
+          : "new";
       return {
+        lane: idle,
         threadId: idle.threadId,
         resumed: Boolean(savedId && idle.threadId === savedId),
         replacedStale: false,
+        laneMode,
+        rotationReason: laneMode === "rotated" ? rotationReason : null,
       };
     }
 
-    const preferredThreadId = this.getPreferredResumableCodexThreadId(chatSessionId);
+    const preferredThreadId = rotationReason
+      ? null
+      : this.getPreferredResumableCodexThreadId(chatSessionId);
     const created = await this.startOrResumeCodexThread(preferredThreadId, chatSessionId);
-    this.responderLanes.push({
+    if (expectedEpoch !== this.chatSessionEpoch || !this.isMessageStreaming(assistantMessageId)) {
+      return null;
+    }
+    const existingSameThread = this.responderLanes.find((l) => l.threadId === created.threadId);
+    if (existingSameThread) {
+      if (existingSameThread.activeAssistantMessageId === null) {
+        existingSameThread.activeAssistantMessageId = assistantMessageId;
+        existingSameThread.activeTurnId = null;
+        existingSameThread.streamedItemIds = new Set();
+        existingSameThread.lastAgentMessageItemId = null;
+        this.broadcastSnapshot();
+        const isContinuation = (existingSameThread.turnCount ?? 0) > 0;
+        const laneMode: LaneMode = isContinuation
+          ? "reused"
+          : rotationReason
+            ? "rotated"
+            : "new";
+        return {
+          ...created,
+          lane: existingSameThread,
+          replacedStale: created.replacedStale || Boolean(rotationReason),
+          laneMode,
+          rotationReason: laneMode === "rotated" ? rotationReason : null,
+        };
+      }
+      // Thread is already active on another lane; allocate a fresh thread so lanes never collide
+      const freshThreadId = await this.orchestratorClient.startThread({
+        cwd: this.store.baseDir,
+        model: this.chatModel,
+        developerInstructions: this.buildOrchestratorDeveloperInstructions(),
+      });
+      if (expectedEpoch !== this.chatSessionEpoch || !this.isMessageStreaming(assistantMessageId)) {
+        return null;
+      }
+      const freshLane: ResponderLane = {
+        threadId: freshThreadId,
+        activeTurnId: null,
+        activeAssistantMessageId: assistantMessageId,
+        streamedItemIds: new Set(),
+        lastAgentMessageItemId: null,
+        ...createInitialLaneState(now),
+      };
+      this.responderLanes.push(freshLane);
+      this.broadcastSnapshot();
+      return {
+        lane: freshLane,
+        threadId: freshThreadId,
+        resumed: false,
+        replacedStale: Boolean(rotationReason),
+        laneMode: rotationReason ? "rotated" : "new",
+        rotationReason,
+      };
+    }
+    const newLane: ResponderLane = {
       threadId: created.threadId,
       activeTurnId: null,
       activeAssistantMessageId: assistantMessageId,
-    });
+      streamedItemIds: new Set(),
+      lastAgentMessageItemId: null,
+      ...createInitialLaneState(now),
+    };
+    this.responderLanes.push(newLane);
     this.broadcastSnapshot();
-    return created;
+    return {
+      ...created,
+      lane: newLane,
+      replacedStale: created.replacedStale || Boolean(rotationReason),
+      laneMode: rotationReason ? "rotated" : "new",
+      rotationReason,
+    };
   }
 
   private async prewarmIdleLane(): Promise<void> {
     if (!this.isConnected) return;
     const idleCount = this.responderLanes.filter((l) => l.activeAssistantMessageId === null).length;
     if (idleCount >= 1) return;
+    if (this.codexPrewarmPromise) return this.codexPrewarmPromise;
     const epoch = this.chatSessionEpoch;
     const targetSessionId = this.activeChatSessionId;
     const preferredThreadId = this.getPreferredResumableCodexThreadId(targetSessionId);
+    const promise = (async () => {
+      try {
+        const { threadId } = await this.startOrResumeCodexThread(preferredThreadId, targetSessionId);
+        if (epoch !== this.chatSessionEpoch || !this.isConnected) return;
+        if (this.responderLanes.some((l) => l.threadId === threadId)) return;
+        this.responderLanes.push({
+          threadId,
+          activeTurnId: null,
+          activeAssistantMessageId: null,
+          streamedItemIds: new Set(),
+          lastAgentMessageItemId: null,
+          ...createInitialLaneState(this.now()),
+        });
+      } catch {
+        // non-fatal
+      }
+    })();
+    this.codexPrewarmPromise = promise;
     try {
-      const { threadId } = await this.startOrResumeCodexThread(preferredThreadId, targetSessionId);
-      if (epoch !== this.chatSessionEpoch) return;
-      this.responderLanes.push({
-        threadId,
-        activeTurnId: null,
-        activeAssistantMessageId: null,
-      });
-    } catch {
-      // non-fatal
+      await promise;
+    } finally {
+      if (this.codexPrewarmPromise === promise) {
+        this.codexPrewarmPromise = null;
+      }
     }
   }
 
-  private releaseLane(laneIdx: number, fallbackText?: string): void {
+  private releaseLane(
+    laneIdx: number,
+    fallbackText?: string,
+    options: { completed?: boolean } = {},
+  ): void {
     const lane = this.responderLanes[laneIdx];
     if (!lane) return;
     const msgId = lane.activeAssistantMessageId;
     lane.activeAssistantMessageId = null;
     lane.activeTurnId = null;
     lane.pendingUsage = null;
+    lane.streamedItemIds?.clear();
+    lane.lastAgentMessageItemId = null;
     if (msgId) {
       this.finishAssistantMessage(msgId, fallbackText);
     }
 
-    // Trim extra idle lanes
-    let idleSeen = 0;
-    this.responderLanes = this.responderLanes.filter((l) => {
-      if (l.activeAssistantMessageId !== null) return true;
-      idleSeen += 1;
-      return idleSeen <= this.maxIdleLanes;
-    });
+    if (options.completed !== false) {
+      this.commitLaneSyncState(lane, msgId);
+      this.finalizeTurnMetrics(msgId);
+    } else {
+      lane.pendingSyncProjectsHash = undefined;
+      lane.pendingPromptChars = undefined;
+      if (msgId) this.activeTurnMetrics.delete(msgId);
+    }
+
+    // Trim extra idle lanes keeping MRU lanes
+    const { kept } = trimIdleLanesByMru(
+      this.responderLanes,
+      (l) => l.activeAssistantMessageId === null,
+      this.maxIdleLanes,
+    );
+    this.responderLanes = kept;
 
     this.persist();
     this.broadcastSnapshot();
@@ -2921,66 +3605,51 @@ export class ConductorController {
     });
   }
 
-  private buildRecentConversationWindow(maxMessages: number): string {
-    const slice = this.messages
-      .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "taskEvent")
-      .slice(-maxMessages);
-    if (slice.length === 0) return "";
-    return slice
-      .map((m) => {
-        const who =
-          m.role === "user"
-            ? "User"
-            : m.role === "taskEvent"
-              ? "TaskEvent"
-              : m.isStreaming
-                ? "Conductor (in-progress)"
-                : "Conductor";
-        const mentionPrefix =
-          m.role === "user" && Array.isArray(m.mentions) && m.mentions.length > 0
-            ? `[${m.mentions
-                .map((ref) =>
-                  ref.kind === "task"
-                    ? `@${formatTaskCode(ref.taskNumber)}${ref.projectName ? `(${ref.projectName})` : ""}`
-                    : `@${ref.projectName}`,
-                )
-                .join(", ")}] `
-            : "";
-        const body = m.text.trim().slice(0, 360) || "(working...)";
-        return `${who}: ${mentionPrefix}${body}`;
-      })
-      .join("\n");
-  }
-
   private buildOrchestratorDeveloperInstructions(): string {
     return buildOrchestratorDeveloperInstructions(this.preferredLanguage);
   }
 
-  private buildOrchestratorPrompt(
+  private buildOrchestratorPromptWithMeta(
     userText: string,
     attachments: ChatAttachment[],
-    recentHistoryWindow: string,
     options: {
+      lane?: OrchestratorLaneState | null;
+      userMessageId?: string;
+      assistantMessageId?: string;
       isRestoredContextRebind?: boolean;
       explicitMentions?: readonly ExplicitMentionTarget[];
+      legacyHistoryWindow?: string;
     } = {},
-  ): string {
+  ): BuiltOrchestratorPrompt {
     const sections: string[] = [];
-    const topProjects = this.projects.slice(0, 30);
-    const projLines =
-      topProjects.length === 0
-        ? "Discovered projects: (none yet)"
-        : `Discovered projects (showing top ${topProjects.length} of ${this.projects.length}; use search_projects for others):\n` +
-          topProjects
-            .map((p) => `- ${p.name}: ${p.path}${p.gitBranch ? ` (branch: ${p.gitBranch})` : ""}`)
-            .join("\n");
-    sections.push(
-      `[Conductor Live Context]\n${buildOrchestratorLiveLanguageLine(this.preferredLanguage)}\n${projLines}`,
+    const isContinuation = Boolean(
+      options.lane && (options.lane.turnCount ?? 0) > 0 && !options.isRestoredContextRebind,
     );
 
-    if (this.tasks.length > 0) {
-      const taskLines = this.tasks
-        .slice(0, 15)
+    const projectsHash = computeProjectsHash(this.projects, DEFAULT_DISCOVERED_PROJECTS_LIMIT);
+    const projectsInjected =
+      !isContinuation || !options.lane?.lastProjectsHash || options.lane.lastProjectsHash !== projectsHash;
+
+    const liveHeaderLines = [
+      "[Conductor Live Context]",
+      buildOrchestratorLiveLanguageLine(this.preferredLanguage),
+    ];
+    if (projectsInjected) {
+      const topProjects = this.projects.slice(0, DEFAULT_DISCOVERED_PROJECTS_LIMIT);
+      const projLines =
+        topProjects.length === 0
+          ? "Discovered projects: (none yet)"
+          : `Discovered projects (showing top ${topProjects.length} of ${this.projects.length}; use search_projects for others):\n` +
+            topProjects
+              .map((p) => `- ${p.name}: ${p.path}${p.gitBranch ? ` (branch: ${p.gitBranch})` : ""}`)
+              .join("\n");
+      liveHeaderLines.push(projLines);
+    }
+    sections.push(liveHeaderLines.join("\n"));
+
+    const selectedTasks = selectCompactTasksForPrompt(this.tasks);
+    if (selectedTasks.length > 0) {
+      const taskLines = selectedTasks
         .map(
           (t) =>
             `- [${t.status}] ${formatTaskCode(t.taskNumber)} id=${t.id} project=${t.projectName} title="${t.title}"` +
@@ -2998,13 +3667,34 @@ export class ConductorController {
       );
     }
 
-    if (recentHistoryWindow) {
+    let historyText = "";
+    let injectedTranscriptCount = 0;
+    if (options.legacyHistoryWindow !== undefined) {
+      historyText = options.legacyHistoryWindow;
+      injectedTranscriptCount = historyText ? historyText.split("\n").filter(Boolean).length : 0;
+    } else {
+      const windowResult = selectConversationWindowForTurn({
+        messages: this.messages,
+        isContinuation,
+        lastSyncedMessageId: options.lane?.lastSyncedMessageId ?? null,
+        currentUserMessageId: options.userMessageId ?? null,
+        currentAssistantMessageId: options.assistantMessageId ?? null,
+        maxInitialMessages: options.isRestoredContextRebind
+          ? DEFAULT_REBIND_TRANSCRIPT_LIMIT
+          : DEFAULT_INITIAL_TRANSCRIPT_LIMIT,
+        maxDeltaMessages: DEFAULT_DELTA_TRANSCRIPT_LIMIT,
+      });
+      historyText = windowResult.text;
+      injectedTranscriptCount = windowResult.count;
+    }
+
+    if (historyText) {
       if (options.isRestoredContextRebind) {
         sections.push(
-          `[Restored Chat Session Context — continue this conversation seamlessly]\n${recentHistoryWindow}`,
+          `[Restored Chat Session Context — continue this conversation seamlessly]\n${historyText}`,
         );
       } else {
-        sections.push(`[Recent Unified Chat Transcript]\n${recentHistoryWindow}`);
+        sections.push(`[Recent Unified Chat Transcript]\n${historyText}`);
       }
     }
 
@@ -3025,7 +3715,31 @@ export class ConductorController {
     }
 
     sections.push(`[Current User Message to Answer Now]\n${userText}`);
-    return sections.join("\n\n");
+    return {
+      prompt: sections.join("\n\n"),
+      projectsHash,
+      projectsInjected,
+      injectedTranscriptCount,
+      tasksInjectedCount: selectedTasks.length,
+    };
+  }
+
+  private buildOrchestratorPrompt(
+    userText: string,
+    attachments: ChatAttachment[],
+    recentHistoryWindow: string,
+    options: {
+      isRestoredContextRebind?: boolean;
+      explicitMentions?: readonly ExplicitMentionTarget[];
+      lane?: OrchestratorLaneState | null;
+      userMessageId?: string;
+      assistantMessageId?: string;
+    } = {},
+  ): string {
+    return this.buildOrchestratorPromptWithMeta(userText, attachments, {
+      ...options,
+      legacyHistoryWindow: options.lane ? undefined : recentHistoryWindow,
+    }).prompt;
   }
 
   // MARK: - Orchestrator Notifications
@@ -3036,15 +3750,47 @@ export class ConductorController {
       this.updateProviderQuota(quotaUpdate);
     }
     if (!notification.threadId) return;
-    const laneIdx = this.responderLanes.findIndex((l) => l.threadId === notification.threadId);
+    if (notification.turnId) {
+      const turnKey = `${notification.threadId}:${notification.turnId}`;
+      if (this.cancelledCodexTurns.has(turnKey)) {
+        if (notification.method === "turn/completed") {
+          this.cancelledCodexTurns.delete(turnKey);
+        }
+        return;
+      }
+    }
+    let laneIdx = -1;
+    if (notification.turnId) {
+      laneIdx = this.responderLanes.findIndex(
+        (l) =>
+          l.threadId === notification.threadId &&
+          l.activeAssistantMessageId !== null &&
+          l.activeTurnId === notification.turnId,
+      );
+    }
+    if (laneIdx === -1) {
+      laneIdx = this.responderLanes.findIndex(
+        (l) => l.threadId === notification.threadId && l.activeAssistantMessageId !== null,
+      );
+    }
     if (laneIdx === -1) return;
-    const messageId = this.responderLanes[laneIdx].activeAssistantMessageId;
+    const lane = this.responderLanes[laneIdx];
+    const messageId = lane.activeAssistantMessageId;
     if (!messageId) return;
+
+    // Guard against stale / auxiliary / compaction turns sharing the same threadId
+    if (
+      lane.activeTurnId &&
+      notification.turnId &&
+      notification.turnId !== lane.activeTurnId
+    ) {
+      return;
+    }
 
     switch (notification.method) {
       case "turn/started":
-        if (notification.turnId) {
-          this.responderLanes[laneIdx].activeTurnId = notification.turnId;
+        if (notification.turnId && !lane.activeTurnId) {
+          lane.activeTurnId = notification.turnId;
           this.updateMessage(messageId, (m) => {
             m.responderTurnId = notification.turnId ?? undefined;
           });
@@ -3054,7 +3800,22 @@ export class ConductorController {
       case "item/agentMessage/delta": {
         const delta = asString(notification.params.delta);
         if (!delta) return;
+        this.markTurnFirstToken(messageId);
+        const itemId = notification.itemId ?? null;
+        if (!lane.streamedItemIds) lane.streamedItemIds = new Set();
+        const isNewAgentMessageItem = Boolean(
+          itemId &&
+            lane.lastAgentMessageItemId &&
+            lane.lastAgentMessageItemId !== itemId,
+        );
+        if (itemId) {
+          lane.streamedItemIds.add(itemId);
+          lane.lastAgentMessageItemId = itemId;
+        }
         this.updateMessage(messageId, (m) => {
+          if (isNewAgentMessageItem && m.text.trim().length > 0 && !/\n\n$/.test(m.text)) {
+            m.text = `${m.text.replace(/\s+$/, "")}\n\n`;
+          }
           m.text += delta;
         });
         this.scheduleBroadcast();
@@ -3064,6 +3825,7 @@ export class ConductorController {
       case "item/reasoning/summaryTextDelta": {
         const delta = asString(notification.params.delta);
         if (!delta) return;
+        this.markTurnFirstToken(messageId);
         this.updateMessage(messageId, (m) => {
           m.reasoningSummary = (m.reasoningSummary ?? "") + delta;
         });
@@ -3076,7 +3838,7 @@ export class ConductorController {
         const completed = notification.method === "item/completed";
         const item = asRecord(notification.params.item);
         if (item) {
-          this.handleOrchestratorItem(messageId, item, completed);
+          this.handleOrchestratorItem(messageId, item, completed, lane);
           this.broadcastSnapshot();
         }
         break;
@@ -3087,7 +3849,6 @@ export class ConductorController {
       case "codex/event/token_count": {
         const extracted = extractCodexTokenUsage(notification);
         if (extracted) {
-          const lane = this.responderLanes[laneIdx];
           lane.pendingUsage = this.accumulateCodexUsage(
             notification.threadId,
             lane.pendingUsage,
@@ -3098,7 +3859,6 @@ export class ConductorController {
       }
 
       case "turn/completed": {
-        const lane = this.responderLanes[laneIdx];
         const completedUsage = extractCodexTokenUsage(notification);
         if (completedUsage) {
           lane.pendingUsage = this.accumulateCodexUsage(
@@ -3137,17 +3897,38 @@ export class ConductorController {
     messageId: string,
     item: Record<string, unknown>,
     completed: boolean,
+    lane?: ResponderLane,
   ): void {
     const type = asString(item.type);
-    const itemId = asString(item.id) ?? crypto.randomUUID();
+    const rawItemId = asString(item.id);
+    const itemId = rawItemId ?? crypto.randomUUID();
     if (!type) return;
 
     if (type === "agentMessage" && completed) {
       const text = asString(item.text);
       if (text) {
+        if (rawItemId && lane?.streamedItemIds?.has(rawItemId)) {
+          // Already streamed via item/agentMessage/delta for this item
+          return;
+        }
+        this.markTurnFirstToken(messageId);
+        const hadUntrackedStream = Boolean(lane && (!lane.streamedItemIds || lane.streamedItemIds.size === 0));
         this.updateMessage(messageId, (m) => {
-          if (!m.text) m.text = text;
+          if (!m.text.trim()) {
+            m.text = text;
+            return;
+          }
+          // Backward compatibility: if deltas arrived without itemId and already match this text, avoid duplicating
+          if (hadUntrackedStream && m.text.trimEnd().endsWith(text.trim())) {
+            return;
+          }
+          m.text = `${m.text.replace(/\s+$/, "")}\n\n${text}`;
         });
+        if (lane && rawItemId) {
+          if (!lane.streamedItemIds) lane.streamedItemIds = new Set();
+          lane.streamedItemIds.add(rawItemId);
+          lane.lastAgentMessageItemId = rawItemId;
+        }
       }
       return;
     }
@@ -3156,6 +3937,9 @@ export class ConductorController {
       const rawTool = asString(item.tool);
       const tool = rawTool ?? "tool";
       const server = asString(item.server) ?? "";
+      if (server === "conductor" && rawTool === "search_chat_history") {
+        this.markTurnUsedSearchChatHistory(messageId);
+      }
       const label =
         server === "conductor" ? friendlyToolLabel(tool, this.getUiLocale()) : `${server}.${tool}`;
       const toolName = rawTool
@@ -3286,18 +4070,263 @@ export class ConductorController {
     }
   }
 
-  public updateTaskStatus(taskId: string, status: AgentTaskStatus): TaskStatusUpdateResult {
+  private reconcileTaskLandStatusInternal(
+    taskId: string,
+    options?: {
+      allowNoChanges?: boolean;
+      allowMissingWorktree?: boolean;
+      persistAndBroadcast?: boolean;
+    },
+  ): {
+    updated: boolean;
+    alreadyLanded: boolean;
+    eval: WorktreeLandEvaluation | null;
+    message: string;
+  } {
+    const task = this.tasks.find((t) => t.id === taskId);
+    if (!task) {
+      return {
+        updated: false,
+        alreadyLanded: false,
+        eval: null,
+        message: "タスクが見つかりませんでした。",
+      };
+    }
+    if (task.status === "running" || this.hasActiveWorkerForTask(task)) {
+      return {
+        updated: false,
+        alreadyLanded: false,
+        eval: null,
+        message: "ワーカーが実行中のため Land 状態を再確認できません。",
+      };
+    }
+    if (!requiresLandBeforeDone(task)) {
+      return {
+        updated: false,
+        alreadyLanded: true,
+        eval: null,
+        message: "すでに Land 済みまたは Worktree がありません。",
+      };
+    }
+    if (!task.projectPath) {
+      return {
+        updated: false,
+        alreadyLanded: false,
+        eval: null,
+        message: "プロジェクトパスが未設定のため Git 状態を確認できません。",
+      };
+    }
+
+    const landEval = evaluateWorktreeLandState({
+      parentPath: task.projectPath,
+      worktreePath: task.worktreePath,
+      worktreeBranch: task.worktreeBranch,
+      baseBranch: task.baseBranch,
+      baseCommit: task.baseCommit,
+    });
+    if (!landEval.repoRoot) {
+      return {
+        updated: false,
+        alreadyLanded: false,
+        eval: landEval,
+        message: "親ディレクトリが Git リポジトリではないため確認できませんでした。",
+      };
+    }
+
+    const allowNoChanges = Boolean(options?.allowNoChanges);
+    const allowMissingWorktree = options?.allowMissingWorktree !== false;
+    const shouldMarkLanded =
+      landEval.alreadyMerged ||
+      (allowNoChanges && landEval.noChanges) ||
+      (allowMissingWorktree && landEval.worktreeMissingAndBranchGone);
+
+    if (!shouldMarkLanded) {
+      const reasonMsg = landEval.inProgressOperation
+        ? `Worktree が ${landEval.inProgressOperation} の途中状態です。`
+        : landEval.worktreeDirty
+          ? "Worktree に未コミットの変更が残っています。Land を実行してください。"
+          : !landEval.worktreeExists && landEval.branchExists
+            ? `Worktree ディレクトリは存在しませんが、ブランチ ${task.worktreeBranch ?? ""} に未マージのコミットが残っています。`
+            : "まだ親ブランチにマージされていない変更があります。Land を実行してください。";
+      return {
+        updated: false,
+        alreadyLanded: false,
+        eval: landEval,
+        message: reasonMsg,
+      };
+    }
+
+    removeTaskWorktree({
+      parentPath: landEval.repoRoot,
+      worktreePath: task.worktreePath,
+      worktreeBranch: task.worktreeBranch,
+      deleteBranch: landEval.branchExists,
+    });
+
+    const targetBranch = landEval.targetBranch ?? task.landedBranch ?? task.baseBranch ?? null;
+    const commitHash = landEval.commitHash ?? task.landedCommit ?? null;
+    const now = new Date().toISOString();
+    const activityTitle =
+      landEval.alreadyMerged
+        ? `Auto-synced as landed (${targetBranch ?? "merged"})`
+        : landEval.noChanges
+          ? "Auto-synced as landed (no changes)"
+          : "Auto-synced as landed (worktree removed)";
+    const message = landEval.alreadyMerged
+      ? targetBranch
+        ? `${task.worktreeBranch ?? "Worktree"} は既に ${targetBranch} にマージ済みのため Land 済みに更新し、Worktree をクリーンアップしました。`
+        : "既に親ブランチへマージ済みのため Land 済みに更新し、Worktree をクリーンアップしました。"
+      : landEval.noChanges
+        ? "Worktree に差分がないため Land 済みに更新し、Worktree をクリーンアップしました。"
+        : "Worktree と一時ブランチは既に存在しないため Land 済みに同期しました。";
+
+    this.updateTask(taskId, (t) => {
+      t.landStatus = "landed";
+      t.landedBranch = targetBranch;
+      t.landedCommit = commitHash;
+      t.worktreePath = null;
+      t.worktreeBranch = null;
+      t.landError = null;
+      t.conflictFiles = undefined;
+      t.conflictParentHead = null;
+      t.conflictTargetBranch = null;
+      t.autoResolveConflictAttempts = undefined;
+      t.currentStep = landEval.alreadyMerged
+        ? targetBranch
+          ? `Landed → ${targetBranch}`
+          : "Landed"
+        : "変更なし (Worktree 削除済み)";
+      t.activities.push({
+        id: crypto.randomUUID(),
+        kind: "system",
+        title: activityTitle,
+        detail: message,
+        timestamp: now,
+      });
+      t.updatedAt = now;
+    });
+
+    if (task.projectPath) {
+      const refreshedBranch = getGitBranch(task.projectPath);
+      this.projects = this.projects.map((p) =>
+        p.path === task.projectPath || (task.projectId && p.id === task.projectId)
+          ? { ...p, gitBranch: refreshedBranch }
+          : p,
+      );
+    }
+
+    if (options?.persistAndBroadcast) {
+      this.persist();
+      this.broadcastSnapshot();
+    }
+
+    return {
+      updated: true,
+      alreadyLanded: true,
+      eval: landEval,
+      message,
+    };
+  }
+
+  public syncTaskLandStatus(taskId: string): SyncTaskLandStatusResult {
+    const task = this.tasks.find((t) => t.id === taskId);
+    if (!task) {
+      return {
+        ok: false,
+        updated: false,
+        reason: "error",
+        message: "タスクが見つかりませんでした。",
+      };
+    }
+    if (task.status === "running" || this.hasActiveWorkerForTask(task)) {
+      return {
+        ok: false,
+        updated: false,
+        landStatus: task.landStatus,
+        reason: "error",
+        message: "ワーカーが実行中のため Land 状態を再確認できません。",
+      };
+    }
+    const outcome = this.reconcileTaskLandStatusInternal(taskId, {
+      allowNoChanges: true,
+      allowMissingWorktree: true,
+      persistAndBroadcast: true,
+    });
+    const latest = this.tasks.find((t) => t.id === taskId) ?? task;
+    return {
+      ok: true,
+      updated: outcome.updated,
+      landStatus: latest.landStatus,
+      reason: outcome.updated
+        ? (outcome.eval?.reason ?? "no_changes")
+        : outcome.alreadyLanded
+          ? "already_landed"
+          : "unlanded",
+      message: outcome.message,
+    };
+  }
+
+  public reconcileAllUnlandedTasks(options?: { allowNoChanges?: boolean }): number {
+    let updatedCount = 0;
+    for (const task of [...this.tasks]) {
+      if (
+        task.status === "running" ||
+        task.status === "queued" ||
+        this.hasActiveWorkerForTask(task) ||
+        !requiresLandBeforeDone(task)
+      ) {
+        continue;
+      }
+      const outcome = this.reconcileTaskLandStatusInternal(task.id, {
+        allowNoChanges: Boolean(options?.allowNoChanges),
+        allowMissingWorktree: true,
+        persistAndBroadcast: false,
+      });
+      if (outcome.updated) {
+        updatedCount += 1;
+      }
+    }
+    if (updatedCount > 0) {
+      this.persist();
+      this.broadcastSnapshot();
+    }
+    return updatedCount;
+  }
+
+  public updateTaskStatus(
+    taskId: string,
+    status: AgentTaskStatus,
+    options?: TaskStatusUpdateOptions,
+  ): TaskStatusUpdateResult {
     const task = this.tasks.find((t) => t.id === taskId);
     if (!task) {
       return { ok: false, error: "Task not found" };
     }
+    const hasActiveWorker = this.hasActiveWorkerForTask(task);
+    const force = Boolean(options?.force);
+
+    if (
+      status === "done" &&
+      task.status !== "running" &&
+      !hasActiveWorker &&
+      requiresLandBeforeDone(task)
+    ) {
+      this.reconcileTaskLandStatusInternal(taskId, {
+        allowNoChanges: force,
+        allowMissingWorktree: true,
+        persistAndBroadcast: false,
+      });
+    }
+
+    const latestTask = this.tasks.find((t) => t.id === taskId) ?? task;
     const validation = validateManualTaskStatusTransition({
-      currentStatus: task.status,
+      currentStatus: latestTask.status,
       nextStatus: status,
-      hasActiveWorker: this.hasActiveWorkerForTask(task),
-      worktreePath: task.worktreePath,
-      worktreeBranch: task.worktreeBranch,
-      landStatus: task.landStatus,
+      hasActiveWorker,
+      worktreePath: latestTask.worktreePath,
+      worktreeBranch: latestTask.worktreeBranch,
+      landStatus: latestTask.landStatus,
+      force,
     });
     if (!validation.ok) {
       return {
@@ -3306,11 +4335,25 @@ export class ConductorController {
       };
     }
 
+    const forcedWithUnlanded =
+      force && status === "done" && requiresLandBeforeDone(latestTask);
+    const now = new Date().toISOString();
+
     this.pendingAutoResumeTaskIds = this.pendingAutoResumeTaskIds.filter((id) => id !== taskId);
     this.updateTask(taskId, (t) => {
       t.status = status;
       t.autoResumeOnStartup = false;
-      t.updatedAt = new Date().toISOString();
+      if (forcedWithUnlanded) {
+        t.activities.push({
+          id: crypto.randomUUID(),
+          kind: "system",
+          title: "Forced Done (unlanded worktree preserved)",
+          detail:
+            "未Landの Worktree を保持したまま手動で完了にしました。",
+          timestamp: now,
+        });
+      }
+      t.updatedAt = now;
     });
     this.persist();
     this.broadcastSnapshot();
@@ -3536,12 +4579,12 @@ export class ConductorController {
       initialTask.projectPath,
     );
 
-    if (!initialTask.projectPath || !initialTask.worktreePath || !initialTask.worktreeBranch) {
+    if (!initialTask.projectPath) {
       return {
         ok: false,
         mode,
         action: "error",
-        message: "このタスクには独立した Git Worktree がありません。",
+        message: "このタスクにはプロジェクトパスが設定されていません。",
       };
     }
 
@@ -3554,10 +4597,42 @@ export class ConductorController {
       };
     }
 
+    if (!initialTask.worktreePath && !initialTask.worktreeBranch) {
+      if (requiresLandBeforeDone(initialTask)) {
+        const reconciled = this.reconcileTaskLandStatusInternal(taskId, {
+          allowNoChanges: true,
+          allowMissingWorktree: true,
+          persistAndBroadcast: false,
+        });
+        if (reconciled.updated) {
+          this.updateTask(taskId, (t) => {
+            t.status = "done";
+            t.updatedAt = new Date().toISOString();
+          });
+          this.persist();
+          this.broadcastSnapshot();
+          return {
+            ok: true,
+            mode,
+            action: "noop",
+            targetBranch: reconciled.eval?.targetBranch ?? null,
+            commitHash: reconciled.eval?.commitHash ?? null,
+            message: reconciled.message,
+          };
+        }
+      }
+      return {
+        ok: false,
+        mode,
+        action: "error",
+        message: "このタスクには独立した Git Worktree がありません。",
+      };
+    }
+
     const repoKey = initialTask.projectPath;
     return this.withRepoLandLock(repoKey, async () => {
       const task = this.tasks.find((t) => t.id === taskId);
-      if (!task || !task.projectPath || !task.worktreePath || !task.worktreeBranch) {
+      if (!task || !task.projectPath || (!task.worktreePath && !task.worktreeBranch)) {
         return {
           ok: false,
           mode,
@@ -3581,8 +4656,8 @@ export class ConductorController {
 
       const result = landTaskWorktree({
         parentPath: task.projectPath,
-        worktreePath: task.worktreePath,
-        worktreeBranch: task.worktreeBranch,
+        worktreePath: task.worktreePath ?? "",
+        worktreeBranch: task.worktreeBranch ?? "",
         baseBranch: task.baseBranch,
         baseCommit: task.baseCommit,
         taskTitle: task.title,
@@ -3609,23 +4684,18 @@ export class ConductorController {
           t.status = "done";
           t.currentStep = result.targetBranch ? `Landed → ${result.targetBranch}` : "Landed";
         } else if (result.action === "noop") {
-          if (effectiveMode === "per-task-pr") {
-            t.landStatus = "unlanded";
-            t.landError = result.message;
-          } else {
-            t.landStatus = "landed";
-            t.landedBranch = result.targetBranch ?? null;
-            t.landedCommit = result.commitHash ?? null;
-            t.worktreePath = null;
-            t.worktreeBranch = null;
-            t.landError = null;
-            t.conflictFiles = undefined;
-            t.conflictParentHead = null;
-            t.conflictTargetBranch = null;
-            t.autoResolveConflictAttempts = undefined;
-            t.status = "done";
-            t.currentStep = "変更なし (Worktree 削除済み)";
-          }
+          t.landStatus = "landed";
+          t.landedBranch = result.targetBranch ?? null;
+          t.landedCommit = result.commitHash ?? null;
+          t.worktreePath = null;
+          t.worktreeBranch = null;
+          t.landError = null;
+          t.conflictFiles = undefined;
+          t.conflictParentHead = null;
+          t.conflictTargetBranch = null;
+          t.autoResolveConflictAttempts = undefined;
+          t.status = "done";
+          t.currentStep = "変更なし (Worktree 削除済み)";
         } else if (result.action === "pushed") {
           t.landStatus = "pushed";
           t.landedBranch = result.targetBranch ?? t.worktreeBranch ?? null;
@@ -3721,13 +4791,10 @@ export class ConductorController {
   }
 
   private isTaskEligibleForAutoLand(task: AgentTask): boolean {
-    if (!task.projectPath || !task.worktreePath || !task.worktreeBranch) {
+    if (!task.projectPath || (!task.worktreePath && !task.worktreeBranch)) {
       return false;
     }
     if (task.landStatus === "landed") {
-      return false;
-    }
-    if (!fs.existsSync(task.worktreePath)) {
       return false;
     }
     const effectiveMode = this.getEffectiveIntegrationModeForProject(
@@ -4020,9 +5087,7 @@ export class ConductorController {
         !task ||
         task.status !== "running" ||
         !task.projectPath ||
-        !task.worktreePath ||
-        !task.worktreeBranch ||
-        !fs.existsSync(task.worktreePath)
+        (!task.worktreePath && !task.worktreeBranch)
       ) {
         return null;
       }
@@ -4044,8 +5109,8 @@ export class ConductorController {
 
       const result = landTaskWorktree({
         parentPath: task.projectPath,
-        worktreePath: task.worktreePath,
-        worktreeBranch: task.worktreeBranch,
+        worktreePath: task.worktreePath ?? "",
+        worktreeBranch: task.worktreeBranch ?? "",
         baseBranch: task.baseBranch,
         baseCommit: task.baseCommit,
         taskTitle: task.title,
@@ -4486,6 +5551,13 @@ export class ConductorController {
           updatedTask = tTask;
         });
 
+        this.reconcileTaskLandStatusInternal(taskId, {
+          allowNoChanges: true,
+          allowMissingWorktree: true,
+          persistAndBroadcast: false,
+        });
+        updatedTask = this.tasks.find((tTask) => tTask.id === taskId) ?? updatedTask;
+
         if (updatedTask) {
           const excerpt = buildTaskCompletionExcerpt(updatedTask.latestOutput);
           this.appendTaskEventMessage(
@@ -4585,6 +5657,28 @@ export class ConductorController {
       case "list_tasks":
         return { text: JSON.stringify(this.tasks.map((t) => this.taskSummary(t)), null, 2) };
 
+      case "search_chat_history": {
+        const callerAssistantId = this.resolveAssistantMessageIdForMcpCall(
+          "search_chat_history",
+          context,
+        );
+        this.markTurnUsedSearchChatHistory(callerAssistantId);
+        const result = searchChatHistoryMessages(this.messages, {
+          query: asString(args.query) ?? undefined,
+          role: asString(args.role) ?? undefined,
+          since: asString(args.since) ?? undefined,
+          until: asString(args.until) ?? undefined,
+          limit: typeof args.limit === "number" ? args.limit : undefined,
+          offset: typeof args.offset === "number" ? args.offset : undefined,
+          order: asString(args.order) ?? undefined,
+          maxCharsPerMessage:
+            typeof args.max_chars_per_message === "number"
+              ? args.max_chars_per_message
+              : undefined,
+        });
+        return { text: JSON.stringify(result, null, 2) };
+      }
+
       case "create_task": {
         const title = asString(args.title);
         if (!title) return { text: "Missing title", isError: true };
@@ -4637,13 +5731,29 @@ export class ConductorController {
             ? (args.status as AgentTaskStatus)
             : null;
         if (requestedStatus) {
+          const hasActiveWorker = this.hasActiveWorkerForTask(targetTask);
+          const force = args.force === true;
+          if (
+            requestedStatus === "done" &&
+            targetTask.status !== "running" &&
+            !hasActiveWorker &&
+            requiresLandBeforeDone(targetTask)
+          ) {
+            this.reconcileTaskLandStatusInternal(taskId, {
+              allowNoChanges: force,
+              allowMissingWorktree: true,
+              persistAndBroadcast: false,
+            });
+          }
+          const latestTarget = this.tasks.find((t) => t.id === taskId) ?? targetTask;
           const validation = validateManualTaskStatusTransition({
-            currentStatus: targetTask.status,
+            currentStatus: latestTarget.status,
             nextStatus: requestedStatus,
-            hasActiveWorker: this.hasActiveWorkerForTask(targetTask),
-            worktreePath: targetTask.worktreePath,
-            worktreeBranch: targetTask.worktreeBranch,
-            landStatus: targetTask.landStatus,
+            hasActiveWorker,
+            worktreePath: latestTarget.worktreePath,
+            worktreeBranch: latestTarget.worktreeBranch,
+            landStatus: latestTarget.landStatus,
+            force,
           });
           if (!validation.ok) {
             return {
@@ -5051,6 +6161,34 @@ export class ConductorController {
     return [...ids];
   }
 
+  private resolveAssistantMessageIdForMcpCall(
+    toolName: string,
+    context?: MCPToolCallContext,
+  ): string | null {
+    if (context?.assistantMessageId) {
+      return context.assistantMessageId;
+    }
+    if (context?.laneId) {
+      const agyLane = this.agyResponderLanes.find((l) => l.laneId === context.laneId);
+      if (agyLane?.activeAssistantMessageId) return agyLane.activeAssistantMessageId;
+      const claudeLane = this.claudeResponderLanes.find((l) => l.laneId === context.laneId);
+      if (claudeLane?.activeAssistantMessageId) return claudeLane.activeAssistantMessageId;
+    }
+    const activeAssistantIds = this.getActiveResponderAssistantMessageIds();
+    if (activeAssistantIds.length === 1) {
+      return activeAssistantIds[0]!;
+    }
+    const activeSet = new Set(activeAssistantIds);
+    const matching = [...this.inFlightMcpToolCalls.values()].filter(
+      (entry) => activeSet.has(entry.assistantMessageId) && entry.toolName === toolName,
+    );
+    const distinctIds = new Set(matching.map((e) => e.assistantMessageId));
+    if (distinctIds.size === 1) {
+      return [...distinctIds][0]!;
+    }
+    return null;
+  }
+
   private resolveUserMessageIdForMcpCall(
     toolName: string,
     args: Record<string, unknown>,
@@ -5289,6 +6427,7 @@ export class ConductorController {
     });
 
     if (touchedActive) {
+      this.snapshotVersion += 1;
       this.syncActiveChatSession(false);
       return;
     }
@@ -6098,6 +7237,13 @@ export class ConductorController {
           finishedTask = tTask;
         });
 
+        this.reconcileTaskLandStatusInternal(args.taskId, {
+          allowNoChanges: true,
+          allowMissingWorktree: true,
+          persistAndBroadcast: false,
+        });
+        finishedTask = this.tasks.find((tTask) => tTask.id === args.taskId) ?? finishedTask;
+
         if (finishedTask) {
           const excerpt = buildTaskCompletionExcerpt(
             finishedTask.latestOutput || outcome.errorMessage || "",
@@ -6198,10 +7344,8 @@ export class ConductorController {
     }
   }
 
-  private persist(): void {
-    this.syncActiveChatSession(false);
-    this.lastPersistedBrowserKey = this.computePersistedBrowserKey();
-    this.store.save({
+  private buildPersistedState(): PersistedState {
+    return {
       projects: this.projects,
       scanRoots: this.scanRoots,
       tasks: this.tasks,
@@ -6233,7 +7377,54 @@ export class ConductorController {
       remoteAccessToken: this.remoteAccessToken,
       usageRecords: this.usageRecords,
       usageBudgets: this.usageBudgets,
+    };
+  }
+
+  private applyMergedExternalState(merged: PersistedState): void {
+    this.projects = merged.projects;
+    this.scanRoots = merged.scanRoots ?? [];
+    const normalized = normalizeTaskNumbers(merged.tasks, merged.nextTaskNumber);
+    this.tasks = normalized.tasks;
+    this.nextTaskNumber = normalized.nextTaskNumber;
+    const normalizedChats = normalizeChatSessions({
+      chatSessions: merged.chatSessions,
+      activeChatSessionId: merged.activeChatSessionId,
+      legacyMessages: merged.messages,
+      chatProvider: merged.chatProvider ?? this.chatProvider,
     });
+    this.chatSessions = normalizedChats.chatSessions;
+    this.activeChatSessionId = normalizedChats.activeChatSessionId;
+    const activeChat = this.chatSessions.find((s) => s.id === this.activeChatSessionId);
+    this.messages = activeChat ? activeChat.messages : [];
+    this.usageRecords = normalizeUsageRecords(merged.usageRecords);
+  }
+
+  /**
+   * Reconciles in-memory state if `state.json` on disk was updated externally by
+   * another process. Fast O(1) stat check on the common unchanged path.
+   */
+  public syncExternalState(): boolean {
+    const externalDiskState = this.store.loadIfExternallyChanged();
+    if (!externalDiskState) {
+      return false;
+    }
+    this.syncActiveChatSession(false);
+    const merged = mergePersistedStates(externalDiskState, this.buildPersistedState(), {
+      preferDiskScalars: true,
+    });
+    this.applyMergedExternalState(merged);
+    this.broadcastSnapshot();
+    return true;
+  }
+
+  private persist(): void {
+    this.syncActiveChatSession(false);
+    this.lastPersistedBrowserKey = this.computePersistedBrowserKey();
+    const result = this.store.save(this.buildPersistedState());
+    if (result.ok && result.mergedExternalChanges) {
+      this.applyMergedExternalState(result.state);
+      this.scheduleBroadcast();
+    }
   }
 
   private scheduleBroadcast(): void {
@@ -6249,6 +7440,7 @@ export class ConductorController {
       clearTimeout(this.snapshotTimer);
       this.snapshotTimer = null;
     }
+    this.snapshotVersion += 1;
     const snapshot = this.getSnapshot();
     this.emitSnapshot(snapshot);
     this.remoteServer?.publishSnapshot(snapshot);

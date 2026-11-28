@@ -835,7 +835,7 @@ describe("Auto-Land on worker completion & AI conflict self-resolution", () => {
     expect(failEvent?.text).toContain("Worker CLI crashed");
   });
 
-  it("does NOT trigger AI conflict self-resolution and never touches dirty parent repo on non-conflict errors", async () => {
+  it("does NOT trigger AI conflict self-resolution and blocks when parent repo has overlapping uncommitted/untracked changes", async () => {
     const repo = initGitRepo();
     const storeDir = makeTempDir("conductor-store-dirty-");
     const store = new StateStore(storeDir);
@@ -871,9 +871,9 @@ describe("Auto-Land on worker completion & AI conflict self-resolution", () => {
     const prov = ctrl.provisionWorktreeForTask(task.id, project);
     fs.writeFileSync(path.join(prov.worktreePath!, "feature.ts"), "export const ok = 1;\n");
 
-    // User has uncommitted WIP changes in the parent repo
-    const userDirtyFile = path.join(repo, "user-wip.txt");
-    fs.writeFileSync(userDirtyFile, "do not touch my wip\n", "utf8");
+    // User has an OVERLAPPING untracked WIP file in the parent repo at the exact same path
+    const userDirtyFile = path.join(repo, "feature.ts");
+    fs.writeFileSync(userDirtyFile, "// do not touch my local wip\n", "utf8");
 
     await ctrl.sendToTaskWorker(task.id, "Add feature");
     expect(agyRuns).toHaveLength(1);
@@ -891,15 +891,77 @@ describe("Auto-Land on worker completion & AI conflict self-resolution", () => {
     expect(finalTask.status).toBe("needs_review");
     expect(finalTask.landStatus).toBe("error");
     expect(finalTask.landError).toContain("未コミット");
-    // Parent repo and user's dirty file remain 100% untouched
-    expect(fs.readFileSync(userDirtyFile, "utf8")).toBe("do not touch my wip\n");
-    expect(fs.existsSync(path.join(repo, "feature.ts"))).toBe(false);
+    expect(finalTask.landError).toContain("feature.ts");
+    // Parent repo and user's overlapping file remain 100% untouched
+    expect(fs.readFileSync(userDirtyFile, "utf8")).toBe("// do not touch my local wip\n");
     expect(fs.existsSync(prov.worktreePath!)).toBe(true);
 
     const errEvent = ctrl
       .getSnapshot()
       .messages.find((m) => m.role === "taskEvent" && m.relatedTaskId === task.id);
-    expect(errEvent?.text).toContain("未コミット");
+    expect(errEvent?.text).toContain("feature.ts");
+  });
+
+  it("auto-lands cleanly when parent repo has non-overlapping untracked and modified files, preserving both intact", async () => {
+    const repo = initGitRepo();
+    const storeDir = makeTempDir("conductor-store-disjoint-auto-");
+    const store = new StateStore(storeDir);
+
+    const agyRuns: Array<{ callbacks: CliTurnCallbacks }> = [];
+
+    const setupCtrl = new ConductorController({
+      store,
+      browser: makeFakeBrowser(),
+      onSnapshot: () => {},
+    });
+    const project = setupCtrl.registerProject(repo, "disjoint-auto-repo")!;
+    const task = makeTaskFixture(project, {
+      id: "disjoint-auto-task-1",
+      taskNumber: 1,
+      title: "Add Disjoint Feature",
+      provider: "agy",
+      status: "queued",
+    });
+    store.save({ ...store.load(), tasks: [task] });
+
+    const ctrl = new ConductorController({
+      store,
+      browser: makeFakeBrowser(),
+      onSnapshot: () => {},
+      cliWorkerRunner: {
+        runAgyTurn: (_opts, callbacks): RunningCliTurn => {
+          agyRuns.push({ callbacks });
+          return { cancel: () => {} };
+        },
+      },
+    });
+    const prov = ctrl.provisionWorktreeForTask(task.id, project);
+    fs.writeFileSync(path.join(prov.worktreePath!, "feature.ts"), "export const ok = 1;\n");
+
+    // Parent has BOTH a non-overlapping untracked file and a non-overlapping modified tracked file
+    const untrackedWip = path.join(repo, "user-wip.txt");
+    fs.writeFileSync(untrackedWip, "do not touch my untracked wip\n", "utf8");
+    const modifiedTracked = path.join(repo, "shared.txt");
+    fs.writeFileSync(modifiedTracked, "local uncommitted edit to shared.txt\n", "utf8");
+
+    await ctrl.sendToTaskWorker(task.id, "Add feature");
+    expect(agyRuns).toHaveLength(1);
+    agyRuns[0]!.callbacks.onComplete?.({ ok: true, finalText: "Feature done." });
+
+    await waitFor(
+      () => ctrl.getSnapshot().tasks.find((t) => t.id === task.id)?.landStatus === "landed",
+    );
+
+    const finalTask = ctrl.getSnapshot().tasks.find((t) => t.id === task.id)!;
+    expect(finalTask.status).toBe("needs_review");
+    expect(finalTask.landStatus).toBe("landed");
+    expect(finalTask.landedBranch).toBe("conductor/add-disjoint-feature");
+    expect(fs.existsSync(prov.worktreePath!)).toBe(false);
+
+    // Worker's change landed while parent's non-overlapping untracked & modified files stayed 100% intact
+    expect(fs.readFileSync(path.join(repo, "feature.ts"), "utf8")).toBe("export const ok = 1;\n");
+    expect(fs.readFileSync(untrackedWip, "utf8")).toBe("do not touch my untracked wip\n");
+    expect(fs.readFileSync(modifiedTracked, "utf8")).toBe("local uncommitted edit to shared.txt\n");
   });
 
   it("formats buildConflictResolutionPrompt with targetBranch, parentHead, conflictFiles, and language policy", () => {
@@ -923,5 +985,90 @@ describe("Auto-Land on worker completion & AI conflict self-resolution", () => {
     expect(prompt).toContain("preserving BOTH");
     expect(prompt).toContain("Output Language (REQUIRED)");
     expect(prompt).toContain("clear English");
+  });
+
+  it("auto-marks task as landed when worktree has no diff (worker modified parent directly) or branch is already merged, even with dirty parent or autoLandOnComplete=false", async () => {
+    const repo = initGitRepo();
+    const storeDir = makeTempDir("conductor-store-reconcile-");
+    const store = new StateStore(storeDir);
+
+    const agyRuns: Array<{ callbacks: CliTurnCallbacks }> = [];
+    const setupCtrl = new ConductorController({
+      store,
+      browser: makeFakeBrowser(),
+      onSnapshot: () => {},
+    });
+    const project = setupCtrl.registerProject(repo, "reconcile-repo")!;
+
+    const taskParentDirect = makeTaskFixture(project, {
+      id: "task-parent-direct",
+      taskNumber: 1,
+      title: "Direct parent edit",
+      provider: "agy",
+      status: "queued",
+    });
+    const taskAlreadyMerged = makeTaskFixture(project, {
+      id: "task-already-merged",
+      taskNumber: 2,
+      title: "Already merged manual off",
+      provider: "agy",
+      status: "queued",
+    });
+    store.save({ ...store.load(), tasks: [taskParentDirect, taskAlreadyMerged] });
+
+    const ctrl = new ConductorController({
+      store,
+      browser: makeFakeBrowser(),
+      onSnapshot: () => {},
+      cliWorkerRunner: {
+        runAgyTurn: (_opts, callbacks): RunningCliTurn => {
+          agyRuns.push({ callbacks });
+          return { cancel: () => {} };
+        },
+      },
+    });
+
+    // Task 1: Worker writes directly to parent repo (leaving parent dirty!) while worktree stays untouched
+    const prov1 = ctrl.provisionWorktreeForTask(taskParentDirect.id, project);
+    expect(prov1.created).toBe(true);
+    fs.writeFileSync(path.join(repo, "parent-direct-file.txt"), "edited in parent\n", "utf8");
+
+    await ctrl.sendToTaskWorker(taskParentDirect.id, "Edit parent directly");
+    agyRuns[0]!.callbacks.onComplete?.({ ok: true, finalText: "Edited parent repo directly." });
+
+    await waitFor(
+      () => ctrl.getSnapshot().tasks.find((t) => t.id === taskParentDirect.id)?.landStatus === "landed",
+    );
+    const after1 = ctrl.getSnapshot().tasks.find((t) => t.id === taskParentDirect.id)!;
+    expect(after1.status).toBe("needs_review");
+    expect(after1.landStatus).toBe("landed");
+    expect(after1.worktreePath).toBeNull();
+    expect(after1.worktreeBranch).toBeNull();
+    expect(fs.existsSync(prov1.worktreePath!)).toBe(false);
+    // Done succeeds without getting stuck!
+    expect(ctrl.updateTaskStatus(taskParentDirect.id, "done")).toEqual({ ok: true });
+
+    // Clean parent file for Task 2 merge
+    fs.rmSync(path.join(repo, "parent-direct-file.txt"));
+
+    // Task 2: autoLandOnComplete = false, worker commits in worktree and merges into main before completing
+    ctrl.setAutoLandOnComplete(false);
+    const prov2 = ctrl.provisionWorktreeForTask(taskAlreadyMerged.id, project);
+    expect(prov2.created).toBe(true);
+    fs.writeFileSync(path.join(prov2.worktreePath!, "merged-in-turn.ts"), "export const x = 42;\n");
+    git(prov2.worktreePath!, ["add", "merged-in-turn.ts"]);
+    git(prov2.worktreePath!, ["commit", "-m", "Add merged-in-turn.ts"]);
+    git(repo, ["merge", "--ff-only", prov2.worktreeBranch!]);
+
+    await ctrl.sendToTaskWorker(taskAlreadyMerged.id, "Commit and merge");
+    agyRuns[1]!.callbacks.onComplete?.({ ok: true, finalText: "Merged to main." });
+
+    const after2 = ctrl.getSnapshot().tasks.find((t) => t.id === taskAlreadyMerged.id)!;
+    expect(after2.status).toBe("needs_review");
+    expect(after2.landStatus).toBe("landed");
+    expect(after2.worktreePath).toBeNull();
+    expect(after2.worktreeBranch).toBeNull();
+    expect(fs.existsSync(prov2.worktreePath!)).toBe(false);
+    expect(ctrl.updateTaskStatus(taskAlreadyMerged.id, "done")).toEqual({ ok: true });
   });
 });

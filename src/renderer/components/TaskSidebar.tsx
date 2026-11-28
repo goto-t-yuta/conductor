@@ -1132,7 +1132,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const quickTransition = getQuickStatusTransition(task.status, locale);
   const subtitle = getTaskCardSubtitle(task);
   const isDone = task.status === "done";
-  const hasActiveWorktree = Boolean(task.worktreePath && task.worktreeBranch);
+  const hasActiveWorktree = Boolean(task.worktreePath?.trim() || task.worktreeBranch?.trim());
   const isLanding = task.landStatus === "landing";
   const needsLand = requiresLandBeforeDone(task);
   const doneBlockedReason =
@@ -1142,7 +1142,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   const isQuickDoneBlocked = Boolean(doneBlockedReason);
   const canQuickLand =
     Boolean(onLand) &&
-    hasActiveWorktree &&
+    (hasActiveWorktree || needsLand) &&
     task.status !== "running" &&
     task.landStatus !== "landed";
   const isPrMode = effectiveMode === "per-task-pr";

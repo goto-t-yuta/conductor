@@ -197,8 +197,8 @@ export const UI_STRINGS = {
     "chat.usagePillEmptyTitle": "Usage / API利用料を表示",
     "chat.toggleMarkdownTitle": "Markdown Viewer を開く/切替 (⌘⇧M)",
     "chat.toggleRightPaneTitle": "右ペイン (Browser / Markdown) を表示/非表示 (⌘\\)",
-    "chat.openImageInRightPaneTitle": "右ペインで画像を表示: {label}",
-    "chat.openImageInRightPaneAria": "画像を右ペインで表示: {label}",
+    "chat.openImageTitle": "画像を拡大表示: {label}",
+    "chat.openImageAria": "画像を拡大表示: {label}",
     "chat.removeAttachmentAria": "{label} を削除",
     "chat.composerPlaceholder":
       "複数プロジェクトへの指示や質問を入力…（@ でプロジェクト/タスクを指定・応答中でも連投OK）",
@@ -281,6 +281,7 @@ export const UI_STRINGS = {
     // TaskInspectorModal
     "inspector.statusAria": "タスクステータス",
     "inspector.statusTitle": "タスクステータスを変更",
+    "inspector.statusUpdateError": "ステータスの更新に失敗しました",
     "inspector.refreshGitTitle": "Git 状態を更新",
     "inspector.parentDirty": "親リポジトリに未コミット変更あり",
     "inspector.conflictFiles": "対象ファイル: {files}",
@@ -289,6 +290,13 @@ export const UI_STRINGS = {
     "inspector.landing": "取り込み中...",
     "inspector.pushPrGhTitle": "ブランチを Push して gh CLI で PR を作成",
     "inspector.pushPrNoGhTitle": "ブランチを Push（gh CLI 未検出の場合は Push のみ実行）",
+    "inspector.recheckLandBtn": "状態を再確認",
+    "inspector.recheckLandTitle":
+      "親ブランチへのマージ済み・差分なし状態を再確認して同期します",
+    "inspector.recheckingLand": "確認中...",
+    "inspector.forceDoneBtn": "強制完了",
+    "inspector.forceDoneTitle":
+      "マージ済み・差分なしなら自動で Land 済みにし、未マージの変更が残っていても Worktree を保持したまま完了にします",
     "inspector.deleteWorktree": "Worktree を削除",
     "inspector.summary": "概要",
     "inspector.latestOutput": "ワーカー最新出力",
@@ -412,7 +420,8 @@ export const UI_STRINGS = {
     "markdown.editorHint": "⌘S で保存 · Tab インデント",
     "markdown.editorAria": "{fileName} の Markdown ソースエディタ",
     "markdown.openInViewerTitle": "Markdown Viewer で開く",
-    "markdown.imageZoomTitle": "クリックで Image Viewer で拡大表示",
+    "markdown.openHtmlInBrowserTitle": "右ペインの In-App Browser で開く",
+    "markdown.imageZoomTitle": "クリックで拡大表示",
     "markdown.imageLoadFailed": "画像を読み込めませんでした",
     "markdown.imageRenderFailed": "画像データの表示に失敗しました。",
     "markdown.imageLoading": "{name} を読み込み中...",
@@ -445,7 +454,7 @@ export const UI_STRINGS = {
     "image.sourcePageTitle": "元ページをブラウザで開く: {url}",
     "image.sourcePageBtn": "元ページ",
     "image.emptyDesc":
-      "チャットに貼り付けた画像や添付サムネイルをクリックすると、この右ペインで拡大表示できます。",
+      "チャットやタスク詳細の画像プレビューから「右ペインで開く」を選ぶと、この右ペインで拡大表示・比較できます。",
     "image.loading": "画像を読み込み中...",
     "image.errorHeading": "画像を表示できませんでした",
     "image.missingData": "画像データが見つかりません。",
@@ -453,6 +462,12 @@ export const UI_STRINGS = {
     "image.clickFitTitle": "クリックでペインに合わせる (Fit)",
     "image.dblClickActualSizeTitle": "ダブルクリックで原寸大 (100%) に切替 / ピンチでズーム",
     "image.dblClickFitTitle": "ダブルクリックでペインに合わせる (Fit) / スクロール・ドラッグで移動",
+    "image.lightboxDialogAria": "画像プレビュー: {label}",
+    "image.lightboxOpenInRightPane": "右ペインで開く",
+    "image.lightboxOpenInRightPaneTitle": "モーダルを閉じて右ペインの Image Viewer で開く",
+    "image.lightboxCloseTitle": "閉じる (Esc)",
+    "image.lightboxCloseAria": "画像プレビューを閉じる",
+    "image.lightboxEscHint": "Esc または背景クリックで閉じる",
 
     // CodeViewerPane & ProjectFileTree
     "code.copyContent": "内容をコピー",
@@ -896,8 +911,8 @@ export const UI_STRINGS = {
     "chat.usagePillEmptyTitle": "Show Usage / API Cost",
     "chat.toggleMarkdownTitle": "Open/Switch Markdown Viewer (⌘⇧M)",
     "chat.toggleRightPaneTitle": "Toggle right pane (Browser / Markdown) (⌘\\)",
-    "chat.openImageInRightPaneTitle": "View image in right pane: {label}",
-    "chat.openImageInRightPaneAria": "View image in right pane: {label}",
+    "chat.openImageTitle": "View image: {label}",
+    "chat.openImageAria": "View image: {label}",
     "chat.removeAttachmentAria": "Remove {label}",
     "chat.composerPlaceholder":
       "Ask a question or give instructions across projects… (@ to mention project/task · non-blocking)",
@@ -980,6 +995,7 @@ export const UI_STRINGS = {
     // TaskInspectorModal
     "inspector.statusAria": "Task status",
     "inspector.statusTitle": "Change task status",
+    "inspector.statusUpdateError": "Failed to update task status",
     "inspector.refreshGitTitle": "Refresh Git status",
     "inspector.parentDirty": "Parent repository has uncommitted changes",
     "inspector.conflictFiles": "Conflicted files: {files}",
@@ -988,6 +1004,13 @@ export const UI_STRINGS = {
     "inspector.landing": "Landing...",
     "inspector.pushPrGhTitle": "Push branch and create PR with gh CLI",
     "inspector.pushPrNoGhTitle": "Push branch (push only if gh CLI is not available)",
+    "inspector.recheckLandBtn": "Re-check Land",
+    "inspector.recheckLandTitle":
+      "Re-check whether this worktree is already merged into the base/parent branch or has no diff",
+    "inspector.recheckingLand": "Checking...",
+    "inspector.forceDoneBtn": "Force Done",
+    "inspector.forceDoneTitle":
+      "Auto-marks as landed if already merged or empty; otherwise marks done while keeping the worktree intact",
     "inspector.deleteWorktree": "Remove Worktree",
     "inspector.summary": "Summary",
     "inspector.latestOutput": "Latest Worker Output",
@@ -1111,7 +1134,8 @@ export const UI_STRINGS = {
     "markdown.editorHint": "⌘S to save · Tab to indent",
     "markdown.editorAria": "Markdown source editor for {fileName}",
     "markdown.openInViewerTitle": "Open in Markdown Viewer",
-    "markdown.imageZoomTitle": "Click to enlarge in Image Viewer",
+    "markdown.openHtmlInBrowserTitle": "Open in In-App Browser",
+    "markdown.imageZoomTitle": "Click to enlarge",
     "markdown.imageLoadFailed": "Failed to load image",
     "markdown.imageRenderFailed": "Failed to display image data.",
     "markdown.imageLoading": "Loading {name}...",
@@ -1144,7 +1168,7 @@ export const UI_STRINGS = {
     "image.sourcePageTitle": "Open source page in browser: {url}",
     "image.sourcePageBtn": "Source",
     "image.emptyDesc":
-      "Click any pasted image or attachment thumbnail in chat to zoom and inspect it here.",
+      'Click "Open in Right Pane" from an image preview in chat or task details to inspect and zoom it here.',
     "image.loading": "Loading image...",
     "image.errorHeading": "Could not display image",
     "image.missingData": "Image data not found.",
@@ -1152,6 +1176,12 @@ export const UI_STRINGS = {
     "image.clickFitTitle": "Click to fit to pane (Fit)",
     "image.dblClickActualSizeTitle": "Double-click for actual size (100%) / Pinch to zoom",
     "image.dblClickFitTitle": "Double-click to fit pane / Scroll or drag to pan",
+    "image.lightboxDialogAria": "Image preview: {label}",
+    "image.lightboxOpenInRightPane": "Open in Right Pane",
+    "image.lightboxOpenInRightPaneTitle": "Close modal and open in the right-pane Image Viewer",
+    "image.lightboxCloseTitle": "Close (Esc)",
+    "image.lightboxCloseAria": "Close image preview",
+    "image.lightboxEscHint": "Press Esc or click outside to close",
 
     // CodeViewerPane & ProjectFileTree
     "code.copyContent": "Copy content",
@@ -1539,6 +1569,8 @@ export function getFriendlyToolLabel(name: string, locale: UiLocale = "ja"): str
         return "Stop worker";
       case "get_task_detail":
         return "Get task detail";
+      case "search_chat_history":
+        return "Search chat history";
       case "browser_open":
         return "Open browser";
       case "browser_snapshot":
@@ -1583,6 +1615,8 @@ export function getFriendlyToolLabel(name: string, locale: UiLocale = "ja"): str
       return "ワーカーを停止";
     case "get_task_detail":
       return "タスク詳細を取得";
+    case "search_chat_history":
+      return "チャット履歴を検索";
     case "browser_open":
       return "ブラウザを開く";
     case "browser_snapshot":

@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -259,50 +258,12 @@ fun MarkdownImageBlock(
     val caption = alt.trim().ifBlank { displayFileName }
 
     if (classified is ClassifiedImageSource.VideoMedia) {
-        Surface(
-            color = colors.surfaceSecondary,
-            shape = RoundedCornerShape(10.dp),
-            border = BorderStroke(1.dp, colors.border),
-            modifier = modifier.fillMaxWidth(),
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 11.dp, vertical = 9.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(9.dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(30.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(colors.indigoBg),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Videocam,
-                        contentDescription = null,
-                        tint = colors.indigo,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(
-                        text = caption,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = colors.textPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = "動画ファイル · デスクトップ版で再生できます",
-                        fontSize = 11.sp,
-                        color = colors.textMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
+        MarkdownVideoBlock(
+            alt = alt,
+            src = src,
+            basePath = basePath,
+            modifier = modifier,
+        )
         return
     }
 

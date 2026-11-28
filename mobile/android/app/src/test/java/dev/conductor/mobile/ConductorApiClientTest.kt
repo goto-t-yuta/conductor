@@ -1,12 +1,18 @@
 package dev.conductor.mobile
 
+import dev.conductor.mobile.data.ApiHttpException
 import dev.conductor.mobile.data.ClassifiedImageSource
+import dev.conductor.mobile.data.ClassifiedVideoSource
 import dev.conductor.mobile.data.ConductorApiClient
 import dev.conductor.mobile.data.ImageSourceClassifier
 import dev.conductor.mobile.data.SseEvent
+import dev.conductor.mobile.data.VideoPlaybackTarget
+import dev.conductor.mobile.data.VideoSourceClassifier
 import dev.conductor.mobile.model.ChatAttachment
 import dev.conductor.mobile.model.ConnectionConfig
 import dev.conductor.mobile.ui.components.ConductorImageLoader
+import dev.conductor.mobile.ui.components.ConductorVideoPlaybackCoordinator
+import dev.conductor.mobile.ui.components.VideoPlayerFormatting
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -555,6 +561,245 @@ class ConductorApiClientTest {
             )
             assertTrue(conflictRes.isFailure)
             assertTrue(conflictRes.exceptionOrNull()?.message?.contains("実行中のタスク") == true)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun staleChatSessionOnSendAndSelectReturnsApiHttpExceptionWithServerSnapshot() = runBlocking {
+        server.handler = { reqLine, _, out, _ ->
+            val path = reqLine.split(" ").getOrNull(1).orEmpty()
+            val (statusLine, bodyText) = when (path) {
+                "/api/chat/send" -> "HTTP/1.1 409 Conflict" to """
+                    {
+                      "ok": false,
+                      "reason": "session_mismatch",
+                      "error": "アクティブなチャットセッションが切り替わっています。",
+                      "activeChatSessionId": "sess-latest",
+                      "snapshot": {
+                        "snapshotEpoch": "ep-2",
+                        "snapshotVersion": 5,
+                        "activeChatSessionId": "sess-latest",
+                        "chatSessions": [
+                          {"id": "sess-latest", "title": "Latest Chat", "messageCount": 2}
+                        ],
+                        "isConnected": true,
+                        "messages": [{"id": "m-new", "role": "user", "text": "fresh", "isStreaming": false}]
+                      }
+                    }
+                """.trimIndent()
+
+                "/api/chat/session" -> "HTTP/1.1 404 Not Found" to """
+                    {
+                      "ok": false,
+                      "reason": "session_not_found",
+                      "error": "指定されたチャットセッションは存在しません。",
+                      "activeChatSessionId": "sess-latest",
+                      "snapshot": {
+                        "snapshotEpoch": "ep-2",
+                        "snapshotVersion": 6,
+                        "activeChatSessionId": "sess-latest",
+                        "chatSessions": [
+                          {"id": "sess-latest", "title": "Latest Chat", "messageCount": 2}
+                        ],
+                        "isConnected": true
+                      }
+                    }
+                """.trimIndent()
+
+                else -> "HTTP/1.1 404 Not Found" to """{"ok":false,"error":"Not Found"}"""
+            }
+            val body = bodyText.toByteArray(Charsets.UTF_8)
+            val head = "$statusLine\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                "Content-Length: ${body.size}\r\n" +
+                "Connection: close\r\n\r\n"
+            out.write(head.toByteArray(Charsets.UTF_8))
+            out.write(body)
+            out.flush()
+        }
+
+        val client = ConductorApiClient()
+        try {
+            val sendRes = client.sendMessage(
+                config = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token),
+                text = "hello stale",
+                mentions = emptyList(),
+                chatSessionId = "sess-old-1707",
+            )
+            assertTrue(sendRes.isFailure)
+            assertTrue(server.lastRequestBody.contains("\"chatSessionId\":\"sess-old-1707\""))
+            val sendErr = sendRes.exceptionOrNull() as? ApiHttpException
+            assertNotNull(sendErr)
+            assertEquals(409, sendErr?.statusCode)
+            assertEquals("session_mismatch", sendErr?.response?.reason)
+            assertEquals("sess-latest", sendErr?.response?.snapshot?.activeChatSessionId)
+            assertEquals(1, sendErr?.response?.snapshot?.chatSessions?.size)
+
+            val selectRes = client.selectChatSession(
+                config = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token),
+                sessionId = "sess-deleted",
+            )
+            assertTrue(selectRes.isFailure)
+            assertTrue(server.lastRequestBody.contains("\"sessionId\":\"sess-deleted\""))
+            val selectErr = selectRes.exceptionOrNull() as? ApiHttpException
+            assertNotNull(selectErr)
+            assertEquals(404, selectErr?.statusCode)
+            assertEquals("session_not_found", selectErr?.response?.reason)
+            assertEquals("sess-latest", selectErr?.response?.snapshot?.activeChatSessionId)
+            assertEquals("Latest Chat", selectErr?.response?.snapshot?.chatSessions?.firstOrNull()?.title)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun videoSourceClassifierAndPlaybackTargetHandleLocalRemoteInlineAndSecurity() {
+        assertEquals(
+            ClassifiedVideoSource.LocalPath("/Users/dev/Application Support/demo.mp4", null),
+            VideoSourceClassifier.classify("/Users/dev/Application Support/demo.mp4"),
+        )
+        assertEquals(
+            ClassifiedVideoSource.LocalPath("recordings/ui.webm", "/repo/wt"),
+            VideoSourceClassifier.classify("recordings/ui.webm", "/repo/wt"),
+        )
+        assertTrue(VideoSourceClassifier.classify("recordings/ui.webm", null) is ClassifiedVideoSource.Invalid)
+        assertEquals(
+            ClassifiedVideoSource.RemoteUrl("https://cdn.example.com/demo.mp4"),
+            VideoSourceClassifier.classify("//cdn.example.com/demo.mp4"),
+        )
+        assertTrue(
+            VideoSourceClassifier.classify("data:video/mp4;base64,AAAA") is ClassifiedVideoSource.DataUrl,
+        )
+        assertTrue(
+            VideoSourceClassifier.classify("javascript:alert(1)") is ClassifiedVideoSource.Invalid,
+        )
+        assertEquals("MP4", VideoSourceClassifier.extractFormatBadge("/tmp/a.mp4?v=1"))
+        assertEquals("WEBM", VideoSourceClassifier.extractFormatBadge("/tmp/a.WEBM"))
+        assertEquals("MOV", VideoSourceClassifier.extractFormatBadge("/tmp/screen.mov#t=2"))
+        assertEquals("VIDEO", VideoSourceClassifier.extractFormatBadge("https://example.com/stream"))
+
+        val client = ConductorApiClient()
+        val cfg = ConnectionConfig(serverUrl = "http://100.64.0.10:4789", bearerToken = token)
+        try {
+            // Local video resolves to /api/media/video with Authorization header
+            val localTarget = client.resolveVideoPlaybackTarget(
+                config = cfg,
+                rawSrc = "/Users/dev/Application Support/demo.mp4",
+                basePath = "/Users/dev/repo",
+            ).getOrThrow() as VideoPlaybackTarget.HttpStream
+            assertTrue(localTarget.requiresConductorAuth)
+            assertEquals("Bearer $token", localTarget.headers["Authorization"])
+            assertTrue(localTarget.url.startsWith("http://100.64.0.10:4789/api/media/video?"))
+            assertTrue(localTarget.url.contains("path=%2FUsers%2Fdev%2FApplication%20Support%2Fdemo.mp4"))
+            assertTrue(localTarget.url.contains("base=%2FUsers%2Fdev%2Frepo"))
+            assertEquals("MP4", localTarget.formatBadge)
+
+            // Remote HTTP video MUST NOT receive Conductor Bearer token
+            val remoteTarget = client.resolveVideoPlaybackTarget(
+                config = cfg,
+                rawSrc = "https://example.com/public/clip.webm",
+            ).getOrThrow() as VideoPlaybackTarget.HttpStream
+            assertTrue(!remoteTarget.requiresConductorAuth)
+            assertTrue(remoteTarget.headers.isEmpty())
+            assertEquals("https://example.com/public/clip.webm", remoteTarget.url)
+            assertEquals("WEBM", remoteTarget.formatBadge)
+
+            // Inline data:video URL produces InlineData target even without server config
+            val inlineTarget = client.resolveVideoPlaybackTarget(
+                config = null,
+                rawSrc = "data:video/mp4;base64,AAAA",
+            ).getOrThrow() as VideoPlaybackTarget.InlineData
+            assertEquals("video/mp4", inlineTarget.mimeType)
+            assertEquals("AAAA", inlineTarget.base64Data)
+
+            // Unconfigured connection rejects local video cleanly
+            assertTrue(client.resolveVideoPlaybackTarget(null, "/tmp/demo.mp4").isFailure)
+        } finally {
+            client.close()
+        }
+
+        // Video formatting & coordinator helpers
+        assertEquals(null, VideoPlayerFormatting.formatDurationMs(null))
+        assertEquals(null, VideoPlayerFormatting.formatDurationMs(0L))
+        assertEquals("0:09", VideoPlayerFormatting.formatDurationMs(9_000L))
+        assertEquals("2:05", VideoPlayerFormatting.formatDurationMs(125_000L))
+        assertEquals("1:01:05", VideoPlayerFormatting.formatDurationMs(3_665_000L))
+        assertTrue(VideoPlayerFormatting.mapHttpErrorCode(401).contains("401"))
+        assertTrue(VideoPlayerFormatting.mapHttpErrorCode(404).contains("404"))
+        assertTrue(VideoPlayerFormatting.mapHttpErrorCode(416).contains("416"))
+
+        val coordinator = ConductorVideoPlaybackCoordinator()
+        assertEquals(null, coordinator.activeInlineKey.value)
+        coordinator.activateInline("v1")
+        assertEquals("v1", coordinator.activeInlineKey.value)
+        coordinator.activateInline("v2")
+        assertEquals("v2", coordinator.activeInlineKey.value)
+        coordinator.deactivateInline("v1")
+        assertEquals("v2", coordinator.activeInlineKey.value)
+        coordinator.pauseAllInline()
+        assertEquals(null, coordinator.activeInlineKey.value)
+    }
+
+    @Test
+    fun getTaskDetailSupportsSkipGitAndParsesActivitiesAndProgressMetadata() = runBlocking {
+        val seenPaths = mutableListOf<String>()
+        server.handler = { reqLine, _, out, _ ->
+            val path = reqLine.split(" ").getOrNull(1).orEmpty()
+            seenPaths.add(path)
+            val body = """
+                {
+                  "ok": true,
+                  "task": {
+                    "id": "task-live",
+                    "taskNumber": 9,
+                    "title": "Stream logs",
+                    "status": "running",
+                    "currentStep": "テスト実行中",
+                    "latestOutput": "実行ログ出力中...",
+                    "outputLength": 11,
+                    "activityCount": 2,
+                    "latestActivity": {
+                      "id": "a2",
+                      "kind": "command",
+                      "title": "$ pnpm test",
+                      "detail": "PASS",
+                      "timestamp": "2026-11-28T01:02:00Z"
+                    },
+                    "activities": [
+                      {"id": "a1", "kind": "system", "title": "開始", "timestamp": "2026-11-28T01:00:00Z"},
+                      {"id": "a2", "kind": "command", "title": "$ pnpm test", "detail": "PASS", "timestamp": "2026-11-28T01:02:00Z"}
+                    ]
+                  },
+                  "worktreeStatus": null,
+                  "gitStatus": null
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            val head = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                "Content-Length: ${body.size}\r\n" +
+                "Connection: close\r\n\r\n"
+            out.write(head.toByteArray(Charsets.UTF_8))
+            out.write(body)
+            out.flush()
+        }
+
+        val client = ConductorApiClient()
+        val cfg = ConnectionConfig(serverUrl = server.baseUrl, bearerToken = token)
+        try {
+            val fastRes = client.getTaskDetail(cfg, "task-live", skipGit = true)
+            assertTrue(fastRes.isSuccess)
+            val detail = fastRes.getOrThrow()
+            assertEquals("/api/tasks/task-live?skipGit=1", seenPaths[0])
+            assertEquals(2, detail.task?.activities?.size)
+            assertEquals(2, detail.task?.effectiveActivityCount)
+            assertEquals("$ pnpm test", detail.task?.latestActivity?.title)
+            assertEquals("実行ログ出力中...", detail.task?.latestOutput)
+
+            val fullRes = client.getTaskDetail(cfg, "task-live", skipGit = false)
+            assertTrue(fullRes.isSuccess)
+            assertEquals("/api/tasks/task-live", seenPaths[1])
         } finally {
             client.close()
         }

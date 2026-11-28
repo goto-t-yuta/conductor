@@ -9,6 +9,7 @@ import type {
   IntegrationMode,
   PreferredLanguage,
   SendMessagePayload,
+  TaskStatusUpdateOptions,
   TerminalCreateOptions,
   UsageBudgetSettings,
   VoiceMicPermissionResult,
@@ -29,6 +30,12 @@ import {
   readLocalMarkdownFile,
   writeLocalMarkdownFile,
 } from "./markdown-viewer.js";
+import { installMainWindowNavigationGuard } from "./main-window-guard.js";
+import {
+  DataDirectoryLock,
+  formatDataDirectoryLockConflictMessage,
+  resolveConductorUserDataPath,
+} from "./instance-lock.js";
 import { registerProjectFileTreeIpcHandlers } from "./project-files.js";
 import { QuitGuard, buildUpdateRestartConfirmationDialog } from "./quit-guard.js";
 import { StateStore } from "./state-store.js";
@@ -41,6 +48,8 @@ let markdownWatcher: MarkdownFileWatcher | null = null;
 let terminalManager: TerminalManager | null = null;
 let controller: ConductorController | null = null;
 let stateStore: StateStore | null = null;
+let dataDirectoryLock: DataDirectoryLock | null = null;
+let createWindowPromise: Promise<void> | null = null;
 let appUpdater: AppUpdater | null = null;
 let startupUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 let hasRunStartupUpdateCheck = false;
@@ -114,6 +123,7 @@ const quitGuard = new QuitGuard({
     // (either via "Restart & Update Now" or "Apply automatically on quit").
     appUpdater?.launchPendingApplyHelperOnShutdown();
     appUpdater?.dispose();
+    dataDirectoryLock?.release();
   },
   quitApp: () => {
     app.quit();
@@ -302,9 +312,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle("conductor:stopMessage", (_e, messageId: string) => controller?.stopMessage(messageId));
   ipcMain.handle("conductor:stopAllResponders", () => controller?.stopAllResponders());
   ipcMain.handle("conductor:startFreshChat", () => controller?.startFreshChat());
-  ipcMain.handle("conductor:selectChatSession", (_e, sessionId: string) =>
-    controller?.selectChatSession(sessionId),
-  );
+  ipcMain.handle("conductor:selectChatSession", async (_e, sessionId: string) => {
+    await controller?.selectChatSession(sessionId);
+  });
   ipcMain.handle("conductor:deleteChatSession", (_e, sessionId: string) =>
     controller?.deleteChatSession(sessionId),
   );
@@ -416,8 +426,13 @@ function registerIpcHandlers(): void {
     }
   });
 
-  ipcMain.handle("conductor:updateTaskStatus", (_e, taskId: string, status: AgentTaskStatus) =>
-    controller?.updateTaskStatus(taskId, status) ?? { ok: false, error: "Controller not initialized" },
+  ipcMain.handle(
+    "conductor:updateTaskStatus",
+    (_e, taskId: string, status: AgentTaskStatus, options?: TaskStatusUpdateOptions) =>
+      controller?.updateTaskStatus(taskId, status, options) ?? {
+        ok: false,
+        error: "Controller not initialized",
+      },
   );
   ipcMain.handle("conductor:stopTaskWorker", (_e, taskId: string) => controller?.stopTaskWorker(taskId));
   ipcMain.handle("conductor:deleteTask", (_e, taskId: string) => controller?.deleteTask(taskId));
@@ -434,6 +449,14 @@ function registerIpcHandlers(): void {
         action: "error",
         message: "Controller not initialized",
       },
+  );
+  ipcMain.handle("conductor:syncTaskLandStatus", (_e, taskId: string) =>
+    controller?.syncTaskLandStatus(taskId) ?? {
+      ok: false,
+      updated: false,
+      reason: "error",
+      message: "Controller not initialized",
+    },
   );
   ipcMain.handle("conductor:resolveTaskConflictWithAI", (_e, taskId: string) =>
     controller?.resolveTaskConflictWithAI(taskId) ?? {
@@ -561,96 +584,143 @@ function registerIpcHandlers(): void {
 }
 
 async function createWindow(): Promise<void> {
-  stateStore = new StateStore(path.join(app.getPath("userData"), "conductor-data"));
-  const windowIcon = loadAppIcon();
+  if (createWindowPromise) {
+    return createWindowPromise;
+  }
+  const run = (async () => {
+    const previousController = controller;
+    if (previousController) {
+      controller = null;
+      await Promise.race([
+        previousController.shutdown().catch(() => {}),
+        new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
+      ]);
+    }
+    browserManager?.destroyAll();
+    browserManager = null;
 
-  mainWindow = new BrowserWindow({
-    width: 1520,
-    height: 920,
-    minWidth: 960,
-    minHeight: 620,
-    title: "Conductor",
-    ...(windowIcon ? { icon: windowIcon } : {}),
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 14, y: 12 },
-    backgroundColor: "#0f1115",
-    webPreferences: {
-      preload: path.join(__dirname, "../preload/index.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  });
+    stateStore = new StateStore(path.join(app.getPath("userData"), "conductor-data"));
+    const windowIcon = loadAppIcon();
 
-  browserManager = new BrowserManager({
-    window: mainWindow,
-    store: stateStore,
-    onTabsChanged: (reason) =>
-      controller?.notifyBrowserChanged({ persist: reason !== "transient" }),
-    onElementPicked: (attachment) => sendToRenderer("conductor:browserAttachment", attachment),
-  });
+    mainWindow = new BrowserWindow({
+      width: 1520,
+      height: 920,
+      minWidth: 960,
+      minHeight: 620,
+      title: "Conductor",
+      ...(windowIcon ? { icon: windowIcon } : {}),
+      titleBarStyle: "hiddenInset",
+      trafficLightPosition: { x: 14, y: 12 },
+      backgroundColor: "#0f1115",
+      webPreferences: {
+        preload: path.join(__dirname, "../preload/index.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
 
-  controller = new ConductorController({
-    store: stateStore,
-    browser: browserManager,
-    onSnapshot: (snapshot) => sendToRenderer("conductor:snapshot", snapshot),
-  });
+    const nextBrowserManager = new BrowserManager({
+      window: mainWindow,
+      store: stateStore,
+      onTabsChanged: (reason) => {
+        if (browserManager !== nextBrowserManager) return;
+        controller?.notifyBrowserChanged({ persist: reason !== "transient" });
+      },
+      onElementPicked: (attachment) => {
+        if (browserManager !== nextBrowserManager) return;
+        sendToRenderer("conductor:browserAttachment", attachment);
+      },
+    });
+    browserManager = nextBrowserManager;
 
-  const devUrl = process.env.CONDUCTOR_DEV_SERVER_URL;
-  mainWindow.webContents.session.setPermissionRequestHandler(
-    (_webContents, permission, callback) => {
-      if (permission === "clipboard-sanitized-write") {
-        callback(true);
-        return;
-      }
-      if (permission === "media") {
-        if (process.platform === "darwin") {
-          const status = systemPreferences.getMediaAccessStatus("microphone");
-          if (status === "granted") {
-            callback(true);
-            return;
-          }
-          if (status === "not-determined") {
-            void systemPreferences
-              .askForMediaAccess("microphone")
-              .then((granted) => callback(granted))
-              .catch(() => callback(false));
-            return;
-          }
-          callback(false);
+    const nextController = new ConductorController({
+      store: stateStore,
+      browser: nextBrowserManager,
+      onSnapshot: (snapshot) => {
+        if (controller !== nextController) return;
+        sendToRenderer("conductor:snapshot", snapshot);
+      },
+    });
+    controller = nextController;
+
+    const devUrl = process.env.CONDUCTOR_DEV_SERVER_URL;
+    const rendererHtmlPath = path.join(__dirname, "../renderer/index.html");
+
+    installMainWindowNavigationGuard(mainWindow.webContents, {
+      devServerUrl: devUrl,
+      rendererHtmlPath,
+      onOpenInAppBrowser: (url) => {
+        if (controller !== nextController || browserManager !== nextBrowserManager) return;
+        nextController.setLayout({ showBrowserPane: true });
+        void nextBrowserManager.navigate(url, true);
+      },
+    });
+
+    mainWindow.webContents.session.setPermissionRequestHandler(
+      (_webContents, permission, callback) => {
+        if (permission === "clipboard-sanitized-write") {
+          callback(true);
           return;
         }
-        callback(true);
-        return;
-      }
-      callback(false);
-    },
-  );
-  if (devUrl) {
-    await mainWindow.loadURL(devUrl);
-  } else {
-    await mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
-  }
+        if (permission === "media") {
+          if (process.platform === "darwin") {
+            const status = systemPreferences.getMediaAccessStatus("microphone");
+            if (status === "granted") {
+              callback(true);
+              return;
+            }
+            if (status === "not-determined") {
+              void systemPreferences
+                .askForMediaAccess("microphone")
+                .then((granted) => callback(granted))
+                .catch(() => callback(false));
+              return;
+            }
+            callback(false);
+            return;
+          }
+          callback(true);
+          return;
+        }
+        callback(false);
+      },
+    );
+    if (devUrl) {
+      await mainWindow.loadURL(devUrl);
+    } else {
+      await mainWindow.loadFile(rendererHtmlPath);
+    }
 
-  mainWindow.on("closed", () => {
-    voiceTts.stop();
-    markdownWatcher?.dispose();
-    markdownWatcher = null;
-    terminalManager?.disposeAll();
-    browserManager?.destroyAll();
-    mainWindow = null;
-  });
+    mainWindow.on("closed", () => {
+      voiceTts.stop();
+      markdownWatcher?.dispose();
+      markdownWatcher = null;
+      terminalManager?.disposeAll();
+      browserManager?.destroyAll();
+      mainWindow = null;
+    });
 
-  void controller.start();
+    void nextController.start();
 
-  // Check for updates once in the background shortly after startup (silently ignores network failures)
-  if (!hasRunStartupUpdateCheck) {
-    hasRunStartupUpdateCheck = true;
-    startupUpdateTimer = setTimeout(() => {
-      startupUpdateTimer = null;
-      void getAppUpdater().checkForUpdates({ silent: true });
-    }, 3_000);
-    startupUpdateTimer.unref?.();
+    // Check for updates once in the background shortly after startup (silently ignores network failures)
+    if (!hasRunStartupUpdateCheck) {
+      hasRunStartupUpdateCheck = true;
+      startupUpdateTimer = setTimeout(() => {
+        startupUpdateTimer = null;
+        void getAppUpdater().checkForUpdates({ silent: true });
+      }, 3_000);
+      startupUpdateTimer.unref?.();
+    }
+  })();
+
+  createWindowPromise = run;
+  try {
+    await run;
+  } finally {
+    if (createWindowPromise === run) {
+      createWindowPromise = null;
+    }
   }
 }
 
@@ -669,31 +739,99 @@ protocol.registerSchemesAsPrivileged([
 
 app.setName("Conductor");
 
-app.whenReady().then(async () => {
-  if (process.platform === "darwin" && app.dock) {
-    const dockIcon = loadAppIcon();
-    if (dockIcon) {
-      app.dock.setIcon(dockIcon);
-    }
-  }
-  protocol.handle(CONDUCTOR_MEDIA_PROTOCOL, (request) => handleConductorMediaRequest(request));
-  createApplicationMenu();
-  registerIpcHandlers();
-  await createWindow();
+const resolvedUserData = resolveConductorUserDataPath({
+  appDataDir: app.getPath("appData"),
+  isPackaged: app.isPackaged,
+  env: process.env,
+});
+app.setPath("userData", resolvedUserData.userDataDir);
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      void createWindow();
+function focusOrRecreateMainWindow(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+  if (app.isReady()) {
+    void createWindow();
+  }
+}
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  console.error(
+    `[Conductor] Another instance is already running for userData=${resolvedUserData.userDataDir} (mode=${resolvedUserData.mode}). Exiting secondary instance.`,
+  );
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    focusOrRecreateMainWindow();
+  });
+
+  app.whenReady().then(async () => {
+    const conductorDataDir = path.join(app.getPath("userData"), "conductor-data");
+    const lock = new DataDirectoryLock(conductorDataDir, {
+      isPackaged: app.isPackaged,
+      execPath: process.execPath,
+      appVersion: app.getVersion(),
+      mode: resolvedUserData.mode,
+    });
+    const lockResult = lock.acquire({ retryMs: 800, retryIntervalMs: 80 });
+    if (!lockResult.ok) {
+      const conflictMessage = formatDataDirectoryLockConflictMessage(
+        conductorDataDir,
+        lockResult.existingOwner,
+      );
+      console.error(`[Conductor] Data directory lock conflict:\n${conflictMessage}`);
+      try {
+        dialog.showErrorBox("Conductor の多重起動を検出しました", conflictMessage);
+      } catch {
+        // best-effort dialog in headless environments
+      }
+      app.exit(0);
+      return;
+    }
+    dataDirectoryLock = lock;
+
+    if (process.platform === "darwin" && app.dock) {
+      const dockIcon = loadAppIcon();
+      if (dockIcon) {
+        app.dock.setIcon(dockIcon);
+      }
+    }
+    protocol.handle(CONDUCTOR_MEDIA_PROTOCOL, (request) => handleConductorMediaRequest(request));
+    createApplicationMenu();
+    registerIpcHandlers();
+    await createWindow();
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        void createWindow();
+      } else {
+        focusOrRecreateMainWindow();
+      }
+    });
+  });
+
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") {
+      app.quit();
     }
   });
-});
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
-});
+  app.on("before-quit", (event) => {
+    void quitGuard.handleBeforeQuit(event);
+  });
 
-app.on("before-quit", (event) => {
-  void quitGuard.handleBeforeQuit(event);
-});
+  app.on("will-quit", () => {
+    dataDirectoryLock?.release();
+  });
+
+  process.on("exit", () => {
+    dataDirectoryLock?.release();
+  });
+}

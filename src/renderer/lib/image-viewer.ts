@@ -19,11 +19,34 @@ export interface ResolvedImageSource {
   localPathToLoad: string | null;
 }
 
+export interface ImageDimensions {
+  width: number;
+  height: number;
+}
+
+export type ImageZoomCursorClass =
+  | "cursor-zoom-in"
+  | "cursor-grabbing"
+  | "cursor-grab"
+  | "cursor-zoom-out";
+
+export type LightboxPointerOrigin = "backdrop" | "dialog" | null;
+
+export interface DragPanSession {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  startScrollLeft: number;
+  startScrollTop: number;
+  hasMoved: boolean;
+}
+
 export const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 5] as const;
 export const MIN_ZOOM = ZOOM_STEPS[0];
 export const MAX_ZOOM = ZOOM_STEPS[ZOOM_STEPS.length - 1];
 export const WHEEL_ZOOM_SENSITIVITY = 0.01;
 export const IMAGE_VIEWPORT_PADDING_PX = 16;
+export const DRAG_PAN_MOVE_THRESHOLD_PX = 3;
 
 export interface CursorAnchoredScrollParams {
   prevScale: number;
@@ -78,6 +101,7 @@ export function extractImageFileName(imagePath?: string): string | null {
   if (!imagePath) return null;
   const trimmed = imagePath.trim();
   if (!trimmed) return null;
+  if (/^(data|blob):/i.test(trimmed)) return null;
   const withoutQuery = trimmed.split(/[?#]/)[0] ?? trimmed;
   const segments = withoutQuery.split(/[/\\]/).filter(Boolean);
   const last = segments[segments.length - 1];
@@ -134,12 +158,34 @@ export function isViewableImageAttachment(
   return Boolean(directSrc || localPathToLoad);
 }
 
+export interface MarkdownImageLike {
+  src: string;
+  alt?: string;
+  filePath?: string;
+}
+
+export function buildAttachmentFromMarkdownImage(image: MarkdownImageLike): ChatAttachment {
+  const fileName = extractImageFileName(image.filePath ?? image.src);
+  const label = image.alt?.trim() || fileName || "Image";
+  const id = image.filePath
+    ? `md-image:${image.filePath}`
+    : `md-image:${image.src.slice(0, 120)}`;
+  return {
+    id,
+    kind: "image",
+    label,
+    imagePath: image.filePath,
+    imageDataUrl: image.src,
+  };
+}
+
 export function buildImageTabFromAttachment(attachment: ChatAttachment): {
   tab: ImageViewerTab;
   localPathToLoad: string | null;
 } {
   const { directSrc, localPathToLoad } = resolveImageSource(attachment);
-  const fileName = extractImageFileName(attachment.imagePath);
+  const fileName =
+    extractImageFileName(attachment.imagePath) ?? extractImageFileName(attachment.imageDataUrl);
   const label = attachment.label?.trim() || fileName || "Image";
 
   return {
@@ -154,6 +200,18 @@ export function buildImageTabFromAttachment(attachment: ChatAttachment): {
       error: !directSrc && !localPathToLoad ? "表示できる画像ソースがありません。" : null,
     },
     localPathToLoad,
+  };
+}
+
+export function mergeLoadedImageIntoAttachment(
+  attachment: ChatAttachment,
+  tab: Pick<ImageViewerTab, "src" | "imagePath" | "label">,
+): ChatAttachment {
+  return {
+    ...attachment,
+    label: tab.label || attachment.label,
+    imageDataUrl: tab.src ?? attachment.imageDataUrl,
+    imagePath: tab.imagePath ?? attachment.imagePath,
   };
 }
 
@@ -373,4 +431,162 @@ export function computeCursorAnchoredScroll(
     scrollLeft: Math.min(maxScrollLeft, Math.max(0, rawNextScrollLeft)),
     scrollTop: Math.min(maxScrollTop, Math.max(0, rawNextScrollTop)),
   };
+}
+
+/**
+ * Returns true when a zoomed image plus viewport padding exceeds the visible viewport bounds.
+ */
+export function isImageOverflowingViewport(params: {
+  zoomMode: ImageZoomMode;
+  zoomScale: number;
+  naturalSize: ImageDimensions | null;
+  viewportWidth: number;
+  viewportHeight: number;
+  padding?: number;
+}): boolean {
+  const {
+    zoomMode,
+    zoomScale,
+    naturalSize,
+    viewportWidth,
+    viewportHeight,
+    padding = IMAGE_VIEWPORT_PADDING_PX,
+  } = params;
+  if (zoomMode !== "custom" || !naturalSize) return false;
+  if (
+    !Number.isFinite(zoomScale) ||
+    zoomScale <= 0 ||
+    !Number.isFinite(viewportWidth) ||
+    !Number.isFinite(viewportHeight) ||
+    viewportWidth <= 0 ||
+    viewportHeight <= 0
+  ) {
+    return false;
+  }
+  const pad = Number.isFinite(padding) ? Math.max(0, padding) : 0;
+  return (
+    naturalSize.width * zoomScale + pad * 2 > viewportWidth + 1 ||
+    naturalSize.height * zoomScale + pad * 2 > viewportHeight + 1
+  );
+}
+
+/**
+ * Resolves the pointer cursor class for an image canvas matching the current zoom/pan state.
+ */
+export function resolveImageZoomCursorClass(params: {
+  zoomMode: ImageZoomMode;
+  isDraggingPan: boolean;
+  isOverflowingViewport: boolean;
+}): ImageZoomCursorClass {
+  if (params.zoomMode === "fit") return "cursor-zoom-in";
+  if (params.isDraggingPan) return "cursor-grabbing";
+  return params.isOverflowingViewport ? "cursor-grab" : "cursor-zoom-out";
+}
+
+/**
+ * Computes next scroll offsets during click-and-drag panning and tracks whether the pointer
+ * actually moved past the drag threshold.
+ */
+export function computeDragPanScroll(
+  session: DragPanSession,
+  currentX: number,
+  currentY: number,
+): { scrollLeft: number; scrollTop: number; hasMoved: boolean } {
+  const dx = currentX - session.startX;
+  const dy = currentY - session.startY;
+  const movedNow =
+    Math.abs(dx) >= DRAG_PAN_MOVE_THRESHOLD_PX || Math.abs(dy) >= DRAG_PAN_MOVE_THRESHOLD_PX;
+  return {
+    scrollLeft: session.startScrollLeft - dx,
+    scrollTop: session.startScrollTop - dy,
+    hasMoved: session.hasMoved || movedNow,
+  };
+}
+
+/**
+ * Returns true if the keyboard event target is an editable form control where single-key
+ * zoom shortcuts (`0`, `1`, `+`, `-`) should be ignored.
+ */
+export function isEditableEventTarget(
+  target: { tagName?: string; isContentEditable?: boolean } | null | undefined,
+): boolean {
+  if (!target) return false;
+  return (
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT" ||
+    Boolean(target.isContentEditable)
+  );
+}
+
+/**
+ * Computes the next zoom scale and cursor-anchored scroll position for a pinch/Ctrl+wheel event,
+ * returning `null` if the wheel gesture should be a no-op (e.g. pinching out while already fitted
+ * below MIN_ZOOM, or already clamped at MIN_ZOOM/MAX_ZOOM).
+ */
+export function computeWheelZoomUpdate(params: {
+  prevMode: ImageZoomMode;
+  prevScale: number;
+  deltaY: number;
+  deltaMode?: number;
+  naturalWidth: number;
+  naturalHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  scrollLeft: number;
+  scrollTop: number;
+  cursorX: number;
+  cursorY: number;
+  padding?: number;
+}): { mode: "custom"; scale: number; scrollLeft: number; scrollTop: number } | null {
+  const { prevMode, prevScale, deltaY, deltaMode = 0 } = params;
+
+  // If an oversized image is already fitted below MIN_ZOOM and the user pinches out,
+  // stay in Fit mode rather than jumping larger to MIN_ZOOM.
+  if (prevMode === "fit" && prevScale < MIN_ZOOM && deltaY > 0) {
+    return null;
+  }
+
+  const nextScale = computeNextWheelZoom(prevScale, deltaY, { deltaMode });
+  if (prevMode === "custom" && Math.abs(nextScale - prevScale) < 1e-6) {
+    return null;
+  }
+
+  const targetScroll = computeCursorAnchoredScroll({
+    prevScale,
+    nextScale,
+    naturalWidth: params.naturalWidth,
+    naturalHeight: params.naturalHeight,
+    viewportWidth: params.viewportWidth,
+    viewportHeight: params.viewportHeight,
+    scrollLeft: params.scrollLeft,
+    scrollTop: params.scrollTop,
+    cursorX: params.cursorX,
+    cursorY: params.cursorY,
+    padding: params.padding ?? IMAGE_VIEWPORT_PADDING_PX,
+  });
+
+  return {
+    mode: "custom",
+    scale: nextScale,
+    scrollLeft: targetScroll.scrollLeft,
+    scrollTop: targetScroll.scrollTop,
+  };
+}
+
+/**
+ * Determines whether clicking the lightbox backdrop overlay should dismiss the modal.
+ * Prevents accidental dismissal when a drag/pan interaction started inside the dialog
+ * or when a pan drag just ended over the overlay.
+ */
+export function shouldDismissLightboxOnBackdropClick(params: {
+  isTargetBackdrop: boolean;
+  pointerDownOrigin: LightboxPointerOrigin;
+  isDraggingPan: boolean;
+  suppressNextBackdropClick: boolean;
+}): boolean {
+  if (!params.isTargetBackdrop) return false;
+  if (params.isDraggingPan || params.suppressNextBackdropClick) return false;
+  if (params.pointerDownOrigin === "dialog") return false;
+  return true;
 }

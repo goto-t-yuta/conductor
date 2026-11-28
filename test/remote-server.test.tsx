@@ -172,7 +172,7 @@ function createMockBridgeController(initialTasks: AgentTask[] = []) {
     startFreshChat: async () => {
       calls.startFreshChat += 1;
     },
-    updateTaskStatus: (taskId: string, status: AgentTaskStatus) => {
+    updateTaskStatus: (taskId: string, status: AgentTaskStatus, options?: { force?: boolean }) => {
       const task = tasks.find((t) => t.id === taskId);
       if (!task) return { ok: false, error: "Task not found" };
       const check = validateManualTaskStatusTransition({
@@ -182,6 +182,7 @@ function createMockBridgeController(initialTasks: AgentTask[] = []) {
         worktreePath: task.worktreePath,
         worktreeBranch: task.worktreeBranch,
         landStatus: task.landStatus,
+        force: options?.force,
       });
       if (!check.ok) {
         return { ok: false, error: check.error };
@@ -201,6 +202,22 @@ function createMockBridgeController(initialTasks: AgentTask[] = []) {
         );
       }
       return nextLandResult;
+    },
+    syncTaskLandStatus: (taskId: string) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) {
+        return { ok: false, updated: false, reason: "error", message: "Task not found" };
+      }
+      tasks = tasks.map((t) =>
+        t.id === taskId ? { ...t, landStatus: "landed", worktreePath: null, worktreeBranch: null } : t,
+      );
+      return {
+        ok: true,
+        updated: true,
+        landStatus: "landed",
+        reason: "merged_into_parent",
+        message: "既にマージ済みのため Land 済みに更新しました。",
+      };
     },
     getTaskGitStatus: (taskId: string) => (tasks.some((t) => t.id === taskId) ? "M src/app.ts" : null),
     getTaskWorktreeStatus: (taskId: string): TaskWorktreeStatus | null =>
@@ -750,6 +767,35 @@ describe("RemoteBridgeServer HTTP & SSE API", () => {
       body: JSON.stringify({ status: "done" }),
     });
     expect(unlandedDone.status).toBe(409);
+
+    // Force Done bypasses unlanded worktree guard (200), then reopen for sync-land & land tests
+    const forcedDone = await fetch(`${baseUrl}/api/tasks/t-wt/status`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ status: "done", force: true }),
+    });
+    expect(forcedDone.status).toBe(200);
+    await fetch(`${baseUrl}/api/tasks/t-wt/status`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ status: "needs_review" }),
+    });
+
+    // POST /api/tasks/:id/sync-land reconciles landStatus and returns updated task
+    const syncRes = await fetch(`${baseUrl}/api/tasks/t-wt/sync-land`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({}),
+    });
+    expect(syncRes.status).toBe(200);
+    const syncBody = (await syncRes.json()) as {
+      ok: boolean;
+      updated: boolean;
+      task: AgentTask;
+    };
+    expect(syncBody.ok).toBe(true);
+    expect(syncBody.updated).toBe(true);
+    expect(syncBody.task.landStatus).toBe("landed");
 
     // Land task -> 200 -> then Done succeeds
     const landRes = await fetch(`${baseUrl}/api/tasks/t-wt/land`, {
@@ -1653,5 +1699,418 @@ describe("RemoteBridgeServer authenticated local image media endpoint (/api/medi
       label: "ui.png",
       imagePath: "/tmp/ui.png",
     });
+  });
+
+  it("includes compact activityCount/latestActivity/outputLength in remote snapshots, supports skipGit=1 on /api/tasks/:id, and serves authenticated /api/media/video", async () => {
+    const tmpDir = makeTempDir("conductor-remote-task-progress-");
+    const sampleMp4Path = path.join(tmpDir, "walkthrough.mp4");
+    const mp4Bytes = Buffer.from("00000018667479706d70343200000000", "hex");
+    fs.writeFileSync(sampleMp4Path, mp4Bytes);
+
+    const longOutput = "A".repeat(4_500) + "\n## 完了サマリー\nすべて成功しました。";
+    const task = makeTask({
+      id: "t-live",
+      taskNumber: 7,
+      status: "running",
+      currentStep: "テスト実行中: pnpm test",
+      latestOutput: longOutput,
+      activities: [
+        {
+          id: "a1",
+          kind: "system",
+          title: "Codex ワーカー開始",
+          detail: null,
+          timestamp: "2026-11-28T01:00:00.000Z",
+        },
+        {
+          id: "a2",
+          kind: "command",
+          title: "$ pnpm test",
+          detail: "PASS test/remote-server.test.tsx",
+          timestamp: "2026-11-28T01:01:00.000Z",
+        },
+      ],
+    });
+
+    let gitStatusCalls = 0;
+    let worktreeStatusCalls = 0;
+    const mock = createMockBridgeController([task]);
+    const controller: RemoteBridgeController = {
+      ...mock.controller,
+      getTaskGitStatus: (id) => {
+        gitStatusCalls += 1;
+        return mock.controller.getTaskGitStatus(id);
+      },
+      getTaskWorktreeStatus: (id) => {
+        worktreeStatusCalls += 1;
+        return mock.controller.getTaskWorktreeStatus(id);
+      },
+    };
+
+    const srv = new RemoteBridgeServer(controller, {
+      host: "127.0.0.1",
+      port: 0,
+      token: "progress-test-token-123456",
+      detectNetwork: () => ({ tailscaleIp: null, magicDnsName: null, lanIp: "127.0.0.1" }),
+    });
+    activeServers.push(srv);
+    await srv.start();
+    const baseUrl = `http://127.0.0.1:${srv.getPort()}`;
+    const headers = { Authorization: "Bearer progress-test-token-123456" };
+
+    // 1. Remote snapshot includes activityCount, latestActivity, and full outputLength while keeping activities empty
+    const snapRes = await fetch(`${baseUrl}/api/snapshot`, { headers });
+    expect(snapRes.status).toBe(200);
+    const snapJson = (await snapRes.json()) as {
+      tasks: Array<{
+        activities: unknown[];
+        activityCount: number;
+        latestActivity?: { id: string; kind: string; title: string };
+        outputLength: number;
+        latestOutput: string;
+      }>;
+    };
+    expect(snapJson.tasks[0].activities).toEqual([]);
+    expect(snapJson.tasks[0].activityCount).toBe(2);
+    expect(snapJson.tasks[0].latestActivity?.id).toBe("a2");
+    expect(snapJson.tasks[0].latestActivity?.title).toBe("$ pnpm test");
+    expect(snapJson.tasks[0].outputLength).toBe(longOutput.length);
+    expect(snapJson.tasks[0].latestOutput.length).toBeLessThanOrEqual(3_000);
+
+    // 2. GET /api/tasks/:id?skipGit=1 returns full activities & output without running git subprocesses
+    const fastDetailRes = await fetch(`${baseUrl}/api/tasks/t-live?skipGit=1`, { headers });
+    expect(fastDetailRes.status).toBe(200);
+    const fastDetail = (await fastDetailRes.json()) as {
+      ok: boolean;
+      task: AgentTask;
+      worktreeStatus: TaskWorktreeStatus | null;
+      gitStatus: string | null;
+    };
+    expect(fastDetail.ok).toBe(true);
+    expect(fastDetail.task.activities).toHaveLength(2);
+    expect(fastDetail.task.latestOutput).toBe(longOutput);
+    expect(fastDetail.worktreeStatus).toBeNull();
+    expect(fastDetail.gitStatus).toBeNull();
+    expect(gitStatusCalls).toBe(0);
+    expect(worktreeStatusCalls).toBe(0);
+
+    // 3. Regular GET /api/tasks/:id includes worktreeStatus and gitStatus
+    const fullDetailRes = await fetch(`${baseUrl}/api/tasks/t-live`, { headers });
+    expect(fullDetailRes.status).toBe(200);
+    const fullDetail = (await fullDetailRes.json()) as {
+      worktreeStatus: TaskWorktreeStatus | null;
+      gitStatus: string | null;
+    };
+    expect(fullDetail.worktreeStatus?.hasWorktree).toBe(true);
+    expect(fullDetail.gitStatus).toBe("M src/app.ts");
+    expect(gitStatusCalls).toBe(1);
+    expect(worktreeStatusCalls).toBe(1);
+
+    // 4. GET /api/media/video enforces auth and supports Range 206
+    const unauthVideo = await fetch(`${baseUrl}/api/media/video?path=${encodeURIComponent(sampleMp4Path)}`);
+    expect(unauthVideo.status).toBe(401);
+
+    const okVideo = await fetch(`${baseUrl}/api/media/video?path=${encodeURIComponent(sampleMp4Path)}`, { headers });
+    expect(okVideo.status).toBe(200);
+    expect(okVideo.headers.get("content-type")).toBe("video/mp4");
+    expect(Buffer.from(await okVideo.arrayBuffer()).equals(mp4Bytes)).toBe(true);
+
+    const rangeVideo = await fetch(`${baseUrl}/api/media/video?path=${encodeURIComponent(sampleMp4Path)}`, {
+      headers: { ...headers, Range: "bytes=0-3" },
+    });
+    expect(rangeVideo.status).toBe(206);
+    expect(rangeVideo.headers.get("content-range")).toBe(`bytes 0-3/${mp4Bytes.length}`);
+    expect(Buffer.from(await rangeVideo.arrayBuffer()).equals(mp4Bytes.subarray(0, 4))).toBe(true);
+
+    // 5. Mobile Web UI HTML exposes live activity log, Markdown, media hydration, and skipGit refresh
+    const uiHtml = await (await fetch(`${baseUrl}/`)).text();
+    expect(uiHtml).toContain("partitionTaskActivities");
+    expect(uiHtml).toContain("mergeTaskForDisplay");
+    expect(uiHtml).toContain("hydrateProtectedMedia");
+    expect(uiHtml).toContain("?skipGit=1");
+  });
+});
+
+describe("RemoteBridgeServer authenticated local video streaming (/api/media/video) & mobile web media", () => {
+  it("streams local mp4/webm/mov with Range 206 Partial Content, HEAD, If-Range, 416, ETag 304, spaces, and relative base dir", async () => {
+    const tmpDir = makeTempDir("conductor-remote-vid-");
+    const spacedDir = path.join(tmpDir, "Application Support", "recordings");
+    fs.mkdirSync(spacedDir, { recursive: true });
+    const mp4Path = path.join(spacedDir, "ui demo.mp4");
+    const movPath = path.join(spacedDir, "screen cap.mov");
+    const webmPath = path.join(spacedDir, "clip.webm");
+    const mp4Bytes = Buffer.from("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    const movBytes = Buffer.from("MOV-DEMO-BYTES-12345");
+    const webmBytes = Buffer.from("WEBM-DEMO-BYTES");
+    fs.writeFileSync(mp4Path, mp4Bytes);
+    fs.writeFileSync(movPath, movBytes);
+    fs.writeFileSync(webmPath, webmBytes);
+
+    const { controller } = createMockBridgeController([]);
+    const srv = new RemoteBridgeServer(controller, {
+      host: "127.0.0.1",
+      port: 0,
+      token: "video-test-token-123456",
+      detectNetwork: () => ({ tailscaleIp: null, magicDnsName: null, lanIp: "127.0.0.1" }),
+    });
+    activeServers.push(srv);
+    await srv.start();
+    const baseUrl = `http://127.0.0.1:${srv.getPort()}`;
+    const authHeaders = { Authorization: "Bearer video-test-token-123456" };
+
+    // 1. Unauthenticated and query-token requests rejected with 401
+    expect(
+      (await fetch(`${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`)).status,
+    ).toBe(401);
+    expect(
+      (
+        await fetch(
+          `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}&token=video-test-token-123456`,
+        )
+      ).status,
+    ).toBe(401);
+
+    // 2. Full GET returns 200 OK + Accept-Ranges: bytes + ETag
+    const fullRes = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { headers: authHeaders },
+    );
+    expect(fullRes.status).toBe(200);
+    expect(fullRes.headers.get("content-type")).toBe("video/mp4");
+    expect(fullRes.headers.get("accept-ranges")).toBe("bytes");
+    expect(Number(fullRes.headers.get("content-length"))).toBe(mp4Bytes.length);
+    const etag = fullRes.headers.get("etag");
+    expect(etag).toBeTruthy();
+    expect(Buffer.from(await fullRes.arrayBuffer()).equals(mp4Bytes)).toBe(true);
+
+    // 3. Conditional GET with If-None-Match (no Range) -> 304
+    const notModRes = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { headers: { ...authHeaders, "If-None-Match": etag! } },
+    );
+    expect(notModRes.status).toBe(304);
+
+    // 4. Byte range request -> 206 Partial Content
+    const rangeRes = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { headers: { ...authHeaders, Range: "bytes=4-11" } },
+    );
+    expect(rangeRes.status).toBe(206);
+    expect(rangeRes.headers.get("content-type")).toBe("video/mp4");
+    expect(rangeRes.headers.get("accept-ranges")).toBe("bytes");
+    expect(rangeRes.headers.get("content-range")).toBe(`bytes 4-11/${mp4Bytes.length}`);
+    expect(rangeRes.headers.get("content-length")).toBe("8");
+    expect(await rangeRes.text()).toBe("456789AB");
+
+    // 5. Open-ended & suffix Range requests
+    const openEndRes = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { headers: { ...authHeaders, Range: "bytes=30-" } },
+    );
+    expect(openEndRes.status).toBe(206);
+    expect(openEndRes.headers.get("content-range")).toBe(`bytes 30-35/${mp4Bytes.length}`);
+    expect(await openEndRes.text()).toBe("UVWXYZ");
+
+    const suffixRes = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { headers: { ...authHeaders, Range: "bytes=-4" } },
+    );
+    expect(suffixRes.status).toBe(206);
+    expect(suffixRes.headers.get("content-range")).toBe(`bytes 32-35/${mp4Bytes.length}`);
+    expect(await suffixRes.text()).toBe("WXYZ");
+
+    // 6. HEAD with Range returns 206 + exact Content-Length and empty body
+    const headRange = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { method: "HEAD", headers: { ...authHeaders, Range: "bytes=0-9" } },
+    );
+    expect(headRange.status).toBe(206);
+    expect(headRange.headers.get("content-range")).toBe(`bytes 0-9/${mp4Bytes.length}`);
+    expect(headRange.headers.get("content-length")).toBe("10");
+    expect((await headRange.arrayBuffer()).byteLength).toBe(0);
+
+    // 7. If-Range matching ETag -> 206; mismatched If-Range -> 200 full body
+    const ifRangeMatch = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { headers: { ...authHeaders, Range: "bytes=0-3", "If-Range": etag! } },
+    );
+    expect(ifRangeMatch.status).toBe(206);
+    expect(await ifRangeMatch.text()).toBe("0123");
+
+    const ifRangeMismatch = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { headers: { ...authHeaders, Range: "bytes=0-3", "If-Range": '"stale-etag"' } },
+    );
+    expect(ifRangeMismatch.status).toBe(200);
+    expect(Buffer.from(await ifRangeMismatch.arrayBuffer()).equals(mp4Bytes)).toBe(true);
+
+    // 8. Unsatisfiable Range -> 416 Range Not Satisfiable
+    const badRange = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { headers: { ...authHeaders, Range: "bytes=999-1050" } },
+    );
+    expect(badRange.status).toBe(416);
+    expect(badRange.headers.get("content-range")).toBe(`bytes */${mp4Bytes.length}`);
+
+    // 9. .mov serves video/mp4 playback Content-Type; .webm serves video/webm; relative base dir works
+    const movRes = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent("recordings/screen cap.mov")}&base=${encodeURIComponent(path.join(tmpDir, "Application Support"))}`,
+      { headers: authHeaders },
+    );
+    expect(movRes.status).toBe(200);
+    expect(movRes.headers.get("content-type")).toBe("video/mp4");
+    expect(Buffer.from(await movRes.arrayBuffer()).equals(movBytes)).toBe(true);
+
+    const webmRes = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(`file://${webmPath.split(path.sep).map(encodeURIComponent).join("/")}`)}`,
+      { headers: authHeaders },
+    );
+    expect(webmRes.status).toBe(200);
+    expect(webmRes.headers.get("content-type")).toBe("video/webm");
+    expect(Buffer.from(await webmRes.arrayBuffer()).equals(webmBytes)).toBe(true);
+  });
+
+  it("blocks non-video files, symlinks to non-video files, and authenticates mobile web media cookie with rotation invalidation", async () => {
+    const tmpDir = makeTempDir("conductor-remote-vid-sec-");
+    const mp4Path = path.join(tmpDir, "clip.mp4");
+    fs.writeFileSync(mp4Path, Buffer.from("0123456789"));
+    const secretFile = path.join(tmpDir, "secret.env");
+    fs.writeFileSync(secretFile, "SECRET=1");
+    const evilLink = path.join(tmpDir, "fake.mp4");
+    fs.symlinkSync(secretFile, evilLink);
+
+    const { controller } = createMockBridgeController([]);
+    const srv = new RemoteBridgeServer(controller, {
+      host: "127.0.0.1",
+      port: 0,
+      token: "cookie-test-token-123456",
+      detectNetwork: () => ({ tailscaleIp: null, magicDnsName: null, lanIp: "127.0.0.1" }),
+    });
+    activeServers.push(srv);
+    await srv.start();
+    const baseUrl = `http://127.0.0.1:${srv.getPort()}`;
+    const authHeaders = { Authorization: "Bearer cookie-test-token-123456" };
+
+    // Security guards
+    expect((await fetch(`${baseUrl}/api/media/video`, { headers: authHeaders })).status).toBe(400);
+    expect(
+      (await fetch(`${baseUrl}/api/media/video?path=${encodeURIComponent(secretFile)}`, { headers: authHeaders }))
+        .status,
+    ).toBe(400);
+    expect(
+      (await fetch(`${baseUrl}/api/media/video?path=${encodeURIComponent(evilLink)}`, { headers: authHeaders }))
+        .status,
+    ).toBe(403);
+    expect(
+      (
+        await fetch(
+          `${baseUrl}/api/media/video?path=${encodeURIComponent(path.join(tmpDir, "missing.mp4"))}`,
+          { headers: authHeaders },
+        )
+      ).status,
+    ).toBe(404);
+
+    // Media session cookie flow (used by mobile Web UI <video>/<img> tags)
+    const unauthSession = await fetch(`${baseUrl}/api/media/session`, { method: "POST" });
+    expect(unauthSession.status).toBe(401);
+
+    const sessionRes = await fetch(`${baseUrl}/api/media/session`, {
+      method: "POST",
+      headers: authHeaders,
+    });
+    expect(sessionRes.status).toBe(200);
+    const setCookie = sessionRes.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain("conductor_remote_media=");
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("SameSite=Strict");
+    const cookiePair = setCookie.split(";")[0]!;
+
+    // Cookie authorizes /api/media/video Range requests
+    const cookieVideo = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { headers: { Cookie: cookiePair, Range: "bytes=2-5" } },
+    );
+    expect(cookieVideo.status).toBe(206);
+    expect(await cookieVideo.text()).toBe("2345");
+
+    // Cookie does NOT authorize general REST APIs like /api/snapshot
+    const cookieSnapshot = await fetch(`${baseUrl}/api/snapshot`, {
+      headers: { Cookie: cookiePair },
+    });
+    expect(cookieSnapshot.status).toBe(401);
+
+    // Rotating the token immediately invalidates the old media cookie
+    srv.setToken("rotated-video-token-999999");
+    const staleCookieVideo = await fetch(
+      `${baseUrl}/api/media/video?path=${encodeURIComponent(mp4Path)}`,
+      { headers: { Cookie: cookiePair } },
+    );
+    expect(staleCookieVideo.status).toBe(401);
+
+    // DELETE /api/media/session clears the cookie
+    const clearRes = await fetch(`${baseUrl}/api/media/session`, { method: "DELETE" });
+    expect(clearRes.status).toBe(200);
+    expect(clearRes.headers.get("set-cookie")).toContain("Max-Age=0");
+  });
+
+  it("renders valid mobile Web UI JavaScript that turns Markdown/HTML videos and images into inline players and lightbox cards", async () => {
+    const { controller } = createMockBridgeController([]);
+    const srv = new RemoteBridgeServer(controller, {
+      host: "127.0.0.1",
+      port: 0,
+      token: "web-ui-test-token-123456",
+      detectNetwork: () => ({ tailscaleIp: null, magicDnsName: null, lanIp: "127.0.0.1" }),
+    });
+    activeServers.push(srv);
+    await srv.start();
+    const baseUrl = `http://127.0.0.1:${srv.getPort()}`;
+
+    const html = await (await fetch(`${baseUrl}/`)).text();
+    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(html);
+    expect(scriptMatch).not.toBeNull();
+    const scriptBody = scriptMatch![1]!;
+
+    // Syntax-check the entire inline script body
+    expect(() => new Function(scriptBody)).not.toThrow();
+
+    // Strip the auto-boot IIFE and DOM listeners so we can invoke the pure Markdown helpers in Node
+    const helpersOnly = scriptBody.slice(0, scriptBody.indexOf("document.addEventListener("));
+    const loadHelpers = new Function(
+      "localStorage",
+      `${helpersOnly}\nreturn { isVideoSrc, resolveMediaUrl, renderMarkdownRichHtml };`,
+    ) as (ls: { getItem: (k: string) => string | null }) => {
+      isVideoSrc: (s: string) => boolean;
+      resolveMediaUrl: (src: string, base: string, isVideo: boolean) => { ok: boolean; url?: string; error?: string };
+      renderMarkdownRichHtml: (md: string, base: string) => string;
+    };
+    const helpers = loadHelpers({ getItem: () => null });
+
+    expect(helpers.isVideoSrc("/tmp/demo.mp4")).toBe(true);
+    expect(helpers.isVideoSrc("/tmp/walkthrough.webm?v=1")).toBe(true);
+    expect(helpers.isVideoSrc("/tmp/screen.MOV")).toBe(true);
+    expect(helpers.isVideoSrc("/tmp/shot.png")).toBe(false);
+
+    const rendered = helpers.renderMarkdownRichHtml(
+      [
+        "完了レポート:",
+        "![UIデモ](</Users/dev/Application Support/demo clip.mp4>)",
+        "![変更後スクショ](/Users/dev/shot.png)",
+        '<video controls><source src="./clip.mov" type="video/quicktime" /></video>',
+        "コード例: `![Ignored](/tmp/code.mp4)`",
+        "```md",
+        "![Fenced](/tmp/fenced.webm)",
+        "```",
+      ].join("\n"),
+      "/repo/worktree",
+    );
+
+    expect(rendered).toContain('<video class="media-video" controls playsinline preload="metadata"');
+    expect(rendered).toContain("/api/media/video?path=%2FUsers%2Fdev%2FApplication+Support%2Fdemo+clip.mp4");
+    expect(rendered).toContain("/api/media/video?path=.%2Fclip.mov&amp;base=%2Frepo%2Fworktree");
+    expect(rendered).toContain("/api/media/image?path=%2FUsers%2Fdev%2Fshot.png");
+    expect(rendered).toContain("openVideoLightboxFromBtn(this)");
+    expect(rendered).toContain("openImageLightboxFromCard(this)");
+    expect(rendered).not.toContain("/api/media/video?path=%2Ftmp%2Fcode.mp4");
+    expect(rendered).not.toContain("/api/media/video?path=%2Ftmp%2Ffenced.webm");
   });
 });

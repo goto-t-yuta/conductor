@@ -83,13 +83,40 @@
       "f3.p3Title": "ライブ Markdown・コード・ファイル・画像ビューア",
       "f3.p3Desc":
         "ファイル監視で自動リロードする Markdown（GFM / Mermaid / TOC 対応）、プロジェクトファイルツリー、ソースコード・透過グリッド付き画像ビューアをひとつのタブバーに統合。",
-      "f4.badge": "Tailscale + Android Companion",
-      "f4.title": "Tailscale 経由リモートアクセス＆QR コードで即セットアップできる Android アプリ",
-      "f4.desc":
-        "デスクを離れても手元からオーケストレーション。同じ Tailscale tailnet 上の Mac に安全に接続し、チャット送信やタスク監視・承認をリアルタイムで行えます。",
-      "f4.bullet1": "<strong>QR コードでワンタップ連携:</strong> デスクトップ設定画面の QR をスキャンするだけで URL と Bearer Token を自動保存（Google Play サービス不要）",
-      "f4.bullet2": "<strong>SSE リアルタイム同期 &amp; 操作:</strong> チャット応答・<code>@</code> メンション・Running / Needs Review 確認とワンタップ Stop / Land / Done",
-      "f4.bullet3": "<strong>モバイル Web UI フォールバック:</strong> アプリなしでも Android Chrome から <code>http://100.x.x.x:4789</code> を開くだけですぐ利用可能",
+      "mobile.eyebrow": "Android Companion",
+      "mobile.title": "デスクを離れても、手元から並列開発を指揮する。",
+      "mobile.subtitle":
+        "同じ Tailscale tailnet 上の Mac に安全接続。リアルタイムチャット・画像添付と閲覧・ワンタップタスク完了・PC リモートコンソール・単体 APK アップデートまで、ネイティブ Android アプリに凝縮しました。",
+      "mobile.tabChat": "チャット & 画像添付",
+      "mobile.tabTasks": "タスク一覧 & 完了",
+      "mobile.tabTerminal": "リモートコンソール",
+      "mobile.tabSettings": "Tailscale & 単体更新",
+      "mobile.captionChat":
+        "SSE ライブ同期チャット。報告内の成果スクショ確認、端末画像の添付送信、@ メンション補完に対応。",
+      "mobile.captionTasks":
+        "実行中・確認待ち・完了済みを一覧表示。プロジェクト絞り込みやワンタップ Land / Done 操作に対応。",
+      "mobile.captionTerminal":
+        "Mac 上の対話的シェル（PTY）をスマホから操作。ANSI カラー・cwd 切替・Ctrl+C / Tab 補助キーバーを搭載。",
+      "mobile.captionSettings":
+        "Tailscale Live SSE 接続、QR コードによるワンタップ連携、GitHub Releases からの単体 APK 更新に対応。",
+      "mobile.badge": "Kotlin + Jetpack Compose • Google Play 不要",
+      "mobile.detailsTitle": "スマホ1台で、指示・確認・ターミナル操作・更新まで完結",
+      "mobile.detailsDesc":
+        "デスクトップ版 Conductor と同じデザイン言語・ダーク／ライトテーマを採用。外出先やソファからでも、Mac 上の並列エージェントをリアルタイムに制御できます。",
+      "mobile.f1Title": "SSE チャット & @ メンション補完",
+      "mobile.f1Desc": "リアルタイム応答ストリームに加え、<code>@</code> 入力でプロジェクト・タスク候補を即座に補完。",
+      "mobile.f2Title": "画像添付 & 報告内画像ビューア",
+      "mobile.f2Desc": "スマホから画像を添付して指示を送信。ワーカー完了報告に含まれる UI スクショもその場で拡大確認。",
+      "mobile.f3Title": "タスク確認 & ワンタップ Land / Done",
+      "mobile.f3Desc": "実行中・確認待ちをプロジェクト別に整理。一覧から直接 Land / Done でき、詳細完了時は自動クローズ。",
+      "mobile.f4Title": "PC リモートコンソール（PTY）",
+      "mobile.f4Desc": "プロジェクトごとの作業ディレクトリ切替・ANSI カラー出力・<code>Ctrl+C</code> / <code>Tab</code> 補助キーバーを搭載。",
+      "mobile.f5Title": "Tailscale 経由接続 & QR 連携",
+      "mobile.f5Desc": "デスクトップの QR をスキャンするだけで接続完了。Chrome で <code>100.x.x.x:4789</code> を開く Web UI にも対応。",
+      "mobile.f6Title": "単体アップデート（GitHub Releases）",
+      "mobile.f6Desc": "アプリ内で最新 APK を自動検知し、ワンタップでダウンロード＆上書き更新。ストア審査待ち不要。",
+      "mobile.ctaApk": "Android APK をダウンロード",
+      "mobile.ctaGuide": "Tailscale・QR 接続ガイド ↗",
       "f5.badge": "Usage • i18n • Voice",
       "f5.title": "トークン使用量・推定利用料（Usage）＆日英 i18n・音声入出力",
       "f5.desc":
@@ -210,13 +237,40 @@
       "f3.p3Title": "Live Markdown, Code, File Tree & Image Viewer",
       "f3.p3Desc":
         "File-watched auto-reloading Markdown (GFM, Mermaid, TOC), project file tree, syntax-aware code viewer, and zoomable image viewer with transparency grid.",
-      "f4.badge": "Tailscale + Android Companion",
-      "f4.title": "Tailscale Remote Access & QR-Code Instant Android Pairing",
-      "f4.desc":
-        "Stay in control away from your desk. Connect securely over your private Tailscale tailnet to chat, monitor tasks, and land completed worktrees from Android.",
-      "f4.bullet1": "<strong>One-Tap QR Setup:</strong> Scan the QR code in Desktop Settings to store URL &amp; Bearer Token instantly (no Google Play Services required)",
-      "f4.bullet2": "<strong>Real-Time SSE Sync:</strong> Live streaming chat, <code>@</code> mention picker, and one-tap Stop / Land / Done / Reopen actions",
-      "f4.bullet3": "<strong>Zero-Install Mobile Web Fallback:</strong> Open <code>http://100.x.x.x:4789</code> in Android Chrome anytime for an instant lightweight UI",
+      "mobile.eyebrow": "Android Companion",
+      "mobile.title": "Stay in command away from your desk with Android.",
+      "mobile.subtitle":
+        "Connect securely to your Mac over Tailscale. Real-time chat with image attachments & inline previews, one-tap task Land/Done, remote PC terminal, and standalone GitHub Releases APK updates — all in a native Jetpack Compose app.",
+      "mobile.tabChat": "Chat & Images",
+      "mobile.tabTasks": "Tasks & Done",
+      "mobile.tabTerminal": "Remote Console",
+      "mobile.tabSettings": "Tailscale & Updates",
+      "mobile.captionChat":
+        "Real-time SSE chat with inline report screenshots, mobile photo/image attachments, and @ mention autocomplete.",
+      "mobile.captionTasks":
+        "Browse Running, Needs Review, and Completed tasks with project filters and one-tap Land / Done controls.",
+      "mobile.captionTerminal":
+        "Control your Mac's interactive shell (PTY) remotely with ANSI colors, project cwd switcher, and Ctrl+C / Tab aux keys.",
+      "mobile.captionSettings":
+        "Live Tailscale SSE status, instant QR code pairing, and standalone in-app APK updates straight from GitHub Releases.",
+      "mobile.badge": "Kotlin + Jetpack Compose • No Google Play Required",
+      "mobile.detailsTitle": "Chat, approve tasks, run terminal commands, and self-update from your pocket",
+      "mobile.detailsDesc":
+        "Designed with the same visual tokens and Dark/Light theme as Desktop Conductor so switching between your desk and phone feels seamless.",
+      "mobile.f1Title": "SSE Chat & @ Mention Autocomplete",
+      "mobile.f1Desc": "Live streaming replies with instant <code>@</code> autocomplete for projects and tasks plus scroll position preservation.",
+      "mobile.f2Title": "Image Attach & Inline Viewer",
+      "mobile.f2Desc": "Attach screenshots or photos right from Android and tap to zoom UI previews inside worker completion reports.",
+      "mobile.f3Title": "Tasks & One-Tap Land / Done",
+      "mobile.f3Desc": "Filter by project, land worktrees, and mark tasks Done directly from the list with auto-close on detail completion.",
+      "mobile.f4Title": "Remote PC Console (PTY)",
+      "mobile.f4Desc": "Switch project working directories on your Mac with ANSI color output and a mobile <code>Ctrl+C</code> / <code>Tab</code> key bar.",
+      "mobile.f5Title": "Tailscale + QR Instant Pairing",
+      "mobile.f5Desc": "Scan Desktop Settings' QR code to connect over Tailscale, or open <code>100.x.x.x:4789</code> in Chrome as a fallback.",
+      "mobile.f6Title": "Standalone In-App APK Updates",
+      "mobile.f6Desc": "Detects new GitHub Releases automatically and downloads/installs signed APK updates with a single tap.",
+      "mobile.ctaApk": "Download Android APK",
+      "mobile.ctaGuide": "Tailscale & QR Guide ↗",
       "f5.badge": "Usage • i18n • Voice",
       "f5.title": "Token Usage & Cost Estimates, Bilingual i18n & Voice I/O",
       "f5.desc":
@@ -291,11 +345,41 @@
       '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
   };
 
+  const MOBILE_SHOT_ORDER = ["chat", "tasks", "terminal", "settings"];
+
+  const MOBILE_SHOTS = {
+    chat: {
+      src: "./images/android-chat.png",
+      tag: "Chat",
+      lightboxTitle: "Conductor Android — Chat, Image Attachments & @ Mentions",
+      captionKey: "mobile.captionChat",
+    },
+    tasks: {
+      src: "./images/android-tasks.png",
+      tag: "Tasks",
+      lightboxTitle: "Conductor Android — Agent Tasks & One-Tap Land / Done",
+      captionKey: "mobile.captionTasks",
+    },
+    terminal: {
+      src: "./images/android-terminal.png",
+      tag: "Terminal",
+      lightboxTitle: "Conductor Android — Remote PC Console (PTY & ANSI)",
+      captionKey: "mobile.captionTerminal",
+    },
+    settings: {
+      src: "./images/android-settings.png",
+      tag: "Settings",
+      lightboxTitle: "Conductor Android — Tailscale Live SSE & Standalone APK Update",
+      captionKey: "mobile.captionSettings",
+    },
+  };
+
   const state = {
     lang: document.documentElement.getAttribute("data-lang") === "en" ? "en" : "ja",
     theme: document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark",
     platform: { os: "unknown", arch: "arm64" },
     activeShot: "overview",
+    activeMobileShot: "chat",
     release: null,
   };
 
@@ -531,6 +615,7 @@
     bindAssetLink("dl-linux-appimage", "size-linux-appimage", a.linuxAppImage, htmlUrl);
     bindAssetLink("dl-linux-deb", "size-linux-deb", a.linuxDeb, htmlUrl);
     bindAssetLink("dl-android-apk", "size-android-apk", a.androidApk, htmlUrl);
+    bindAssetLink("mobile-dl-apk", "size-mobile-apk", a.androidApk, htmlUrl);
 
     updateHeroDownloadButton();
   }
@@ -610,6 +695,12 @@
       captionEl.textContent = t(shot.captionKey);
     }
 
+    const mobileShot = MOBILE_SHOTS[state.activeMobileShot];
+    const mobileCaptionEl = document.getElementById("mobile-screen-caption");
+    if (mobileShot && mobileCaptionEl) {
+      mobileCaptionEl.textContent = t(mobileShot.captionKey);
+    }
+
     renderReleaseMetadata();
     updateHeroDownloadButton();
   }
@@ -683,6 +774,91 @@
 
     if (img) img.addEventListener("click", openCurrentShot);
     if (zoomBtn) zoomBtn.addEventListener("click", openCurrentShot);
+  }
+
+  function initMobileShowcase() {
+    const heroImg = document.getElementById("mobile-showcase-img");
+    const heroTrigger = document.getElementById("mobile-hero-trigger");
+    const mobileZoomBtn = document.getElementById("mobile-zoom-btn");
+    const tagEl = document.getElementById("mobile-screen-tag");
+    const captionEl = document.getElementById("mobile-screen-caption");
+    const peekLeftBtn = document.getElementById("mobile-peek-left");
+    const peekLeftImg = document.getElementById("mobile-peek-left-img");
+    const peekRightBtn = document.getElementById("mobile-peek-right");
+    const peekRightImg = document.getElementById("mobile-peek-right-img");
+    const tabs = document.querySelectorAll("[data-mobile-shot]");
+    const featureCards = document.querySelectorAll("[data-mobile-shot-card]");
+
+    function setMobileShot(key) {
+      const shot = MOBILE_SHOTS[key];
+      if (!shot || !heroImg) return;
+      state.activeMobileShot = key;
+
+      heroImg.src = shot.src;
+      heroImg.alt = shot.lightboxTitle;
+      if (tagEl) tagEl.textContent = shot.tag;
+      if (captionEl) captionEl.textContent = t(shot.captionKey);
+
+      const idx = MOBILE_SHOT_ORDER.indexOf(key);
+      const prevKey = MOBILE_SHOT_ORDER[(idx - 1 + MOBILE_SHOT_ORDER.length) % MOBILE_SHOT_ORDER.length];
+      const nextKey = MOBILE_SHOT_ORDER[(idx + 1) % MOBILE_SHOT_ORDER.length];
+      const prevShot = MOBILE_SHOTS[prevKey];
+      const nextShot = MOBILE_SHOTS[nextKey];
+
+      if (peekLeftBtn && peekLeftImg && prevShot) {
+        peekLeftBtn.setAttribute("data-mobile-switch", prevKey);
+        peekLeftImg.src = prevShot.src;
+        peekLeftImg.alt = prevShot.lightboxTitle;
+      }
+      if (peekRightBtn && peekRightImg && nextShot) {
+        peekRightBtn.setAttribute("data-mobile-switch", nextKey);
+        peekRightImg.src = nextShot.src;
+        peekRightImg.alt = nextShot.lightboxTitle;
+      }
+
+      tabs.forEach((tab) => {
+        const active = tab.getAttribute("data-mobile-shot") === key;
+        tab.classList.toggle("is-active", active);
+        tab.setAttribute("aria-selected", String(active));
+      });
+
+      featureCards.forEach((card) => {
+        const matches = card.getAttribute("data-mobile-shot-card") === key;
+        card.classList.toggle("is-highlighted", matches);
+      });
+    }
+
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => {
+        const key = tab.getAttribute("data-mobile-shot");
+        if (key) setMobileShot(key);
+      });
+    });
+
+    featureCards.forEach((card) => {
+      card.addEventListener("click", () => {
+        const key = card.getAttribute("data-mobile-shot-card");
+        if (key) setMobileShot(key);
+      });
+    });
+
+    [peekLeftBtn, peekRightBtn].forEach((btn) => {
+      if (!btn) return;
+      btn.addEventListener("click", () => {
+        const key = btn.getAttribute("data-mobile-switch");
+        if (key) setMobileShot(key);
+      });
+    });
+
+    const openCurrentMobileShot = () => {
+      const shot = MOBILE_SHOTS[state.activeMobileShot];
+      if (shot) openLightbox(shot.src, shot.lightboxTitle);
+    };
+
+    if (heroTrigger) heroTrigger.addEventListener("click", openCurrentMobileShot);
+    if (mobileZoomBtn) mobileZoomBtn.addEventListener("click", openCurrentMobileShot);
+
+    setMobileShot(state.activeMobileShot);
   }
 
   function openLightbox(src, title) {
@@ -771,6 +947,7 @@
   initLanguageControls();
   initThemeControls();
   initShowcaseTabs();
+  initMobileShowcase();
   initLightbox();
   initCopyButtons();
 

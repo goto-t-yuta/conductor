@@ -606,4 +606,161 @@ describe("ConductorController unlanded worktree Done guard, cleanup, and noop la
     expect(controller.updateTaskStatus(task.id, "needs_review")).toEqual({ ok: true });
     expect(controller.updateTaskStatus(task.id, "done")).toEqual({ ok: true });
   });
+
+  it("auto-reconciles already-merged worktrees on syncTaskLandStatus, updateTaskStatus(done), and reconcileAllUnlandedTasks", () => {
+    const repo = initTempGitRepo();
+    const git = (cwd: string, args: string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+
+    const store = createTempStore();
+    const controller = new ConductorController({
+      store,
+      browser: createFakeBrowserManager(),
+      onSnapshot: () => {},
+    });
+    const project = controller.registerProject(repo, "merged-sync-repo")!;
+
+    const mergedErrorTask = makeTask({
+      id: "task-merged-err",
+      taskNumber: 30,
+      title: "Already merged but stuck in error",
+      projectId: project.id,
+      projectName: project.name,
+      projectPath: project.path,
+      status: "needs_review",
+    });
+    const noDiffErrorTask = makeTask({
+      id: "task-nodiff-err",
+      taskNumber: 31,
+      title: "No diff stuck in error",
+      projectId: project.id,
+      projectName: project.name,
+      projectPath: project.path,
+      status: "needs_review",
+    });
+    const batchMergedTask = makeTask({
+      id: "task-batch-merged",
+      taskNumber: 32,
+      title: "Externally merged task for startup reconcile",
+      projectId: project.id,
+      projectName: project.name,
+      projectPath: project.path,
+      status: "needs_review",
+    });
+    (controller as unknown as { tasks: AgentTask[] }).tasks = [
+      mergedErrorTask,
+      noDiffErrorTask,
+      batchMergedTask,
+    ];
+
+    const provMerged = controller.provisionWorktreeForTask(mergedErrorTask.id, project);
+    fs.writeFileSync(path.join(provMerged.worktreePath!, "done.txt"), "already merged\n", "utf8");
+    git(provMerged.worktreePath!, ["add", "done.txt"]);
+    git(provMerged.worktreePath!, ["commit", "-m", "Add done.txt"]);
+    git(repo, ["merge", "--ff-only", provMerged.worktreeBranch!]);
+
+    const provNoDiff = controller.provisionWorktreeForTask(noDiffErrorTask.id, project);
+
+    const provBatch = controller.provisionWorktreeForTask(batchMergedTask.id, project);
+    fs.writeFileSync(path.join(provBatch.worktreePath!, "batch.txt"), "batch merged\n", "utf8");
+    git(provBatch.worktreePath!, ["add", "batch.txt"]);
+    git(provBatch.worktreePath!, ["commit", "-m", "Add batch.txt"]);
+    git(repo, ["merge", "--no-ff", provBatch.worktreeBranch!, "-m", "Merge batch"]);
+
+    // Simulate stale error/unlanded states
+    const tasksRef = (controller as unknown as { tasks: AgentTask[] }).tasks;
+    tasksRef[0]!.landStatus = "error";
+    tasksRef[0]!.landError = "親リポジトリに未コミットの変更があります";
+    tasksRef[1]!.landStatus = "error";
+    tasksRef[1]!.landError = "親リポジトリに未コミットの変更があります";
+    tasksRef[2]!.landStatus = "unlanded";
+
+    // 1. Clicking Done directly on already-merged task auto-reconciles to landed & marks Done!
+    expect(controller.updateTaskStatus(mergedErrorTask.id, "done")).toEqual({ ok: true });
+    const afterMerged = controller.getSnapshot().tasks.find((t) => t.id === mergedErrorTask.id)!;
+    expect(afterMerged.status).toBe("done");
+    expect(afterMerged.landStatus).toBe("landed");
+    expect(afterMerged.worktreePath).toBeNull();
+    expect(afterMerged.worktreeBranch).toBeNull();
+    expect(afterMerged.landError).toBeNull();
+    expect(fs.existsSync(provMerged.worktreePath!)).toBe(false);
+
+    // 2. syncTaskLandStatus on no-diff task stuck in error updates it to landed & cleans up worktree!
+    const syncRes = controller.syncTaskLandStatus(noDiffErrorTask.id);
+    expect(syncRes.ok).toBe(true);
+    expect(syncRes.updated).toBe(true);
+    expect(syncRes.landStatus).toBe("landed");
+    expect(syncRes.reason).toBe("no_changes");
+    const afterNoDiff = controller.getSnapshot().tasks.find((t) => t.id === noDiffErrorTask.id)!;
+    expect(afterNoDiff.landStatus).toBe("landed");
+    expect(afterNoDiff.worktreePath).toBeNull();
+    expect(fs.existsSync(provNoDiff.worktreePath!)).toBe(false);
+    expect(controller.updateTaskStatus(noDiffErrorTask.id, "done")).toEqual({ ok: true });
+
+    // 3. reconcileAllUnlandedTasks catches externally merged task automatically
+    const reconciledCount = controller.reconcileAllUnlandedTasks();
+    expect(reconciledCount).toBe(1);
+    const afterBatch = controller.getSnapshot().tasks.find((t) => t.id === batchMergedTask.id)!;
+    expect(afterBatch.landStatus).toBe("landed");
+    expect(afterBatch.worktreePath).toBeNull();
+    expect(fs.existsSync(provBatch.worktreePath!)).toBe(false);
+  });
+
+  it("supports force Done for stuck unlanded tasks while still blocking running tasks and preserving unmerged worktrees", () => {
+    const repo = initTempGitRepo();
+    const store = createTempStore();
+    const controller = new ConductorController({
+      store,
+      browser: createFakeBrowserManager(),
+      onSnapshot: () => {},
+    });
+    const project = controller.registerProject(repo, "force-done-repo")!;
+
+    const unmergedTask = makeTask({
+      id: "task-force-unmerged",
+      taskNumber: 40,
+      title: "Unmerged worktree task",
+      projectId: project.id,
+      projectName: project.name,
+      projectPath: project.path,
+      status: "needs_review",
+    });
+    const runningTask = makeTask({
+      id: "task-force-running",
+      taskNumber: 41,
+      title: "Running task",
+      projectId: project.id,
+      projectName: project.name,
+      projectPath: project.path,
+      status: "running",
+      landStatus: "unlanded",
+    });
+    (controller as unknown as { tasks: AgentTask[] }).tasks = [unmergedTask, runningTask];
+
+    const prov = controller.provisionWorktreeForTask(unmergedTask.id, project);
+    fs.writeFileSync(path.join(prov.worktreePath!, "wip.ts"), "export const wip = true;\n", "utf8");
+
+    // Normal Done is still blocked
+    expect(controller.updateTaskStatus(unmergedTask.id, "done")).toEqual({
+      ok: false,
+      error: UNLANDED_TASK_DONE_BLOCKED_REASON,
+    });
+
+    // Force Done bypasses unlanded guard while preserving unmerged worktree on disk
+    expect(controller.updateTaskStatus(unmergedTask.id, "done", { force: true })).toEqual({
+      ok: true,
+    });
+    const afterForce = controller.getSnapshot().tasks.find((t) => t.id === unmergedTask.id)!;
+    expect(afterForce.status).toBe("done");
+    expect(fs.existsSync(prov.worktreePath!)).toBe(true);
+
+    // Force Done MUST STILL block running tasks
+    expect(controller.updateTaskStatus(runningTask.id, "done", { force: true })).toEqual({
+      ok: false,
+      error: RUNNING_TASK_DONE_BLOCKED_REASON,
+    });
+  });
 });

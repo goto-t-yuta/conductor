@@ -13,6 +13,15 @@ data class QuickTaskTransition(
     val blockedReason: String? = null,
 )
 
+data class TaskStatusUpdateOutcome(
+    val snapshot: AppSnapshot?,
+    val selectedTaskId: String?,
+    val selectedTaskDetail: TaskDetailResponse?,
+    val isLoadingTaskDetail: Boolean,
+    val shouldCloseDetail: Boolean,
+    val shouldRefreshDetail: Boolean,
+)
+
 /**
  * Desktop-aligned quick status transition rules and guards for AgentTask items.
  * Mirrors `src/shared/task-status.ts` and `src/renderer/lib/task-sidebar.ts`.
@@ -58,7 +67,17 @@ object TaskStatusActions {
     }
 
     fun canQuickLand(task: AgentTask): Boolean =
-        task.hasWorktree && task.status != STATUS_RUNNING && task.landStatus != "landed"
+        (task.hasWorktree || task.isUnlandedWorktree) &&
+            task.status != STATUS_RUNNING &&
+            task.landStatus != "landed"
+
+    fun canSyncLandStatus(task: AgentTask): Boolean =
+        task.isUnlandedWorktree && task.status != STATUS_RUNNING
+
+    fun canForceMarkDone(task: AgentTask): Boolean =
+        task.status != STATUS_RUNNING &&
+            task.status != STATUS_DONE &&
+            task.isUnlandedWorktree
 
     fun applyTaskUpdate(
         snapshot: AppSnapshot?,
@@ -81,6 +100,68 @@ object TaskStatusActions {
             }
         }
         return if (changed) snapshot.copy(tasks = nextTasks) else snapshot
+    }
+
+    fun shouldCloseTaskDetailAfterStatusUpdate(
+        selectedTaskId: String?,
+        updatedTaskId: String,
+        nextStatus: String,
+        succeeded: Boolean,
+        isUndo: Boolean = false,
+    ): Boolean =
+        succeeded &&
+            !isUndo &&
+            nextStatus == STATUS_DONE &&
+            selectedTaskId != null &&
+            selectedTaskId == updatedTaskId
+
+    fun applyStatusUpdateSuccess(
+        snapshot: AppSnapshot?,
+        selectedTaskId: String?,
+        selectedTaskDetail: TaskDetailResponse?,
+        isLoadingTaskDetail: Boolean,
+        taskId: String,
+        nextStatus: String,
+        updatedTask: AgentTask? = null,
+        isUndo: Boolean = false,
+    ): TaskStatusUpdateOutcome {
+        val nextSnapshot = applyTaskUpdate(
+            snapshot = snapshot,
+            taskId = taskId,
+            updatedTask = updatedTask,
+            fallbackStatus = nextStatus,
+        )
+        val shouldClose = shouldCloseTaskDetailAfterStatusUpdate(
+            selectedTaskId = selectedTaskId,
+            updatedTaskId = taskId,
+            nextStatus = nextStatus,
+            succeeded = true,
+            isUndo = isUndo,
+        )
+        if (shouldClose) {
+            return TaskStatusUpdateOutcome(
+                snapshot = nextSnapshot,
+                selectedTaskId = null,
+                selectedTaskDetail = null,
+                isLoadingTaskDetail = false,
+                shouldCloseDetail = true,
+                shouldRefreshDetail = false,
+            )
+        }
+        val nextDetail = if (selectedTaskId == taskId && selectedTaskDetail != null) {
+            val patchedTask = updatedTask ?: selectedTaskDetail.task?.copy(status = nextStatus)
+            selectedTaskDetail.copy(task = patchedTask)
+        } else {
+            selectedTaskDetail
+        }
+        return TaskStatusUpdateOutcome(
+            snapshot = nextSnapshot,
+            selectedTaskId = selectedTaskId,
+            selectedTaskDetail = nextDetail,
+            isLoadingTaskDetail = isLoadingTaskDetail,
+            shouldCloseDetail = false,
+            shouldRefreshDetail = selectedTaskId == taskId,
+        )
     }
 
     fun formatStatusFeedback(

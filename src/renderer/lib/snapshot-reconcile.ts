@@ -32,10 +32,11 @@ function areStringArraysEqual(
 }
 
 function areAttachmentsEqual(
-  a: readonly ChatAttachment[],
-  b: readonly ChatAttachment[],
+  a: readonly ChatAttachment[] | undefined,
+  b: readonly ChatAttachment[] | undefined,
 ): boolean {
   if (a === b) return true;
+  if (!a || !b) return (a?.length ?? 0) === (b?.length ?? 0);
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {
     const x = a[i];
@@ -56,10 +57,11 @@ function areAttachmentsEqual(
 }
 
 function areToolChipsEqual(
-  a: readonly ToolActivityChip[],
-  b: readonly ToolActivityChip[],
+  a: readonly ToolActivityChip[] | undefined,
+  b: readonly ToolActivityChip[] | undefined,
 ): boolean {
   if (a === b) return true;
+  if (!a || !b) return (a?.length ?? 0) === (b?.length ?? 0);
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {
     const x = a[i];
@@ -376,16 +378,37 @@ function reconcileKeyedArray<T extends { id: string }>(
   if (prev === next) return prev;
   if (prev.length === 0 && next.length === 0) return prev;
 
+  // Defensively deduplicate incoming items with identical IDs (keeping the latest entry)
+  // so React keys never collide or glitch in chat/task lists.
+  let dedupedNext = next;
+  const seenIndex = new Map<string, number>();
+  let hasDuplicates = false;
+  for (let i = 0; i < next.length; i += 1) {
+    const id = next[i].id;
+    if (seenIndex.has(id)) {
+      hasDuplicates = true;
+      break;
+    }
+    seenIndex.set(id, i);
+  }
+  if (hasDuplicates) {
+    const lastIndexById = new Map<string, number>();
+    for (let i = 0; i < next.length; i += 1) {
+      lastIndexById.set(next[i].id, i);
+    }
+    dedupedNext = next.filter((item, idx) => lastIndexById.get(item.id) === idx);
+  }
+
   const prevById = new Map<string, T>();
   for (const item of prev) {
     prevById.set(item.id, item);
   }
 
-  let allSame = prev.length === next.length;
-  const result = new Array<T>(next.length);
+  let allSame = prev.length === dedupedNext.length;
+  const result = new Array<T>(dedupedNext.length);
 
-  for (let i = 0; i < next.length; i += 1) {
-    const nextItem = next[i];
+  for (let i = 0; i < dedupedNext.length; i += 1) {
+    const nextItem = dedupedNext[i];
     const prevItem = prevById.get(nextItem.id);
     if (prevItem && isEqual(prevItem, nextItem)) {
       result[i] = prevItem;
@@ -439,7 +462,21 @@ export function reconcileAppSnapshot(
   prev: AppSnapshot | null,
   next: AppSnapshot,
 ): AppSnapshot {
+  if (!next) return prev as AppSnapshot;
   if (!prev || prev === next) return next;
+
+  // Reject stale out-of-order snapshots from the same controller instance
+  // (e.g., an initial getSnapshot() promise resolving after a newer onSnapshot push).
+  if (
+    prev.snapshotEpoch &&
+    next.snapshotEpoch &&
+    prev.snapshotEpoch === next.snapshotEpoch &&
+    typeof prev.snapshotVersion === "number" &&
+    typeof next.snapshotVersion === "number" &&
+    next.snapshotVersion < prev.snapshotVersion
+  ) {
+    return prev;
+  }
 
   const projects = reconcileKeyedArray(prev.projects, next.projects, areProjectsEqual);
   const scanRoots = areStringArraysEqual(prev.scanRoots, next.scanRoots)
@@ -476,6 +513,7 @@ export function reconcileAppSnapshot(
     : next.providerQuotas;
 
   const unchanged =
+    prev.snapshotEpoch === next.snapshotEpoch &&
     projects === prev.projects &&
     scanRoots === prev.scanRoots &&
     tasks === prev.tasks &&

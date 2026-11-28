@@ -45,13 +45,19 @@ data class AgentTask(
     val currentStep: String? = null,
     val previewURL: String? = null,
     val latestOutput: String = "",
+    val outputLength: Int? = null,
     val activities: List<WorkerActivityEntry> = emptyList(),
+    val activityCount: Int? = null,
+    val latestActivity: WorkerActivityEntry? = null,
     val worktreePath: String? = null,
     val worktreeBranch: String? = null,
+    val baseBranch: String? = null,
     val landStatus: String? = null,
     val landedBranch: String? = null,
+    val landedCommit: String? = null,
     val prUrl: String? = null,
     val landError: String? = null,
+    val conflictFiles: List<String> = emptyList(),
     val createdAt: String = "",
     val updatedAt: String = "",
 ) {
@@ -63,6 +69,9 @@ data class AgentTask(
             if (landStatus in setOf("landed", "pushed", "pr_created")) return false
             return hasWorktree || landStatus in setOf("unlanded", "landing", "conflict", "error")
         }
+
+    val effectiveActivityCount: Int
+        get() = maxOf(activities.size, activityCount ?: 0)
 }
 
 @Serializable
@@ -94,9 +103,12 @@ data class TaskDetailResponse(
 @Serializable
 data class ApiActionResponse(
     val ok: Boolean = false,
+    val updated: Boolean = false,
     val message: String? = null,
     val error: String? = null,
     val action: String? = null,
+    val reason: String? = null,
+    val activeChatSessionId: String? = null,
     val prUrl: String? = null,
     val task: AgentTask? = null,
     val snapshot: AppSnapshot? = null,
@@ -220,11 +232,25 @@ data class ChatMessage(
 )
 
 @Serializable
+data class ChatSessionSummary(
+    val id: String,
+    val title: String = "",
+    val preview: String = "",
+    val messageCount: Int = 0,
+    val createdAt: String = "",
+    val updatedAt: String = "",
+    val provider: String? = null,
+)
+
+@Serializable
 data class AppSnapshot(
+    val snapshotEpoch: String? = null,
+    val snapshotVersion: Long? = null,
     val projects: List<Project> = emptyList(),
     val tasks: List<AgentTask> = emptyList(),
     val messages: List<ChatMessage> = emptyList(),
     val activeChatSessionId: String = "",
+    val chatSessions: List<ChatSessionSummary> = emptyList(),
     val isConnected: Boolean = false,
     val connectionStatus: String = "",
     val activeResponderCount: Int = 0,
@@ -240,6 +266,12 @@ data class ChatSendRequest(
     val text: String,
     val explicitMentions: List<ExplicitMentionTarget> = emptyList(),
     val attachments: List<ChatAttachment> = emptyList(),
+    val chatSessionId: String? = null,
+)
+
+@Serializable
+data class ChatSessionSelectRequest(
+    val sessionId: String,
 )
 
 @Serializable
@@ -250,6 +282,7 @@ data class ChatStopRequest(
 @Serializable
 data class TaskStatusRequest(
     val status: String,
+    val force: Boolean = false,
 )
 
 @Serializable

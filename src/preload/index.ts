@@ -11,6 +11,7 @@ import type {
   MarkdownWatchEvent,
   PreferredLanguage,
   SendMessagePayload,
+  TaskStatusUpdateOptions,
   TerminalCreateOptions,
   TerminalDataEvent,
   TerminalExitEvent,
@@ -89,13 +90,14 @@ const api: ConductorAPI = {
   voiceStop: () => ipcRenderer.invoke("voice:stop"),
   voiceRequestMicPermission: () => ipcRenderer.invoke("voice:requestMicPermission"),
 
-  updateTaskStatus: (taskId: string, status: AgentTaskStatus) =>
-    ipcRenderer.invoke("conductor:updateTaskStatus", taskId, status),
+  updateTaskStatus: (taskId: string, status: AgentTaskStatus, options?: TaskStatusUpdateOptions) =>
+    ipcRenderer.invoke("conductor:updateTaskStatus", taskId, status, options),
   stopTaskWorker: (taskId) => ipcRenderer.invoke("conductor:stopTaskWorker", taskId),
   deleteTask: (taskId) => ipcRenderer.invoke("conductor:deleteTask", taskId),
   getTaskGitStatus: (taskId) => ipcRenderer.invoke("conductor:getTaskGitStatus", taskId),
   getTaskWorktreeStatus: (taskId) => ipcRenderer.invoke("conductor:getTaskWorktreeStatus", taskId),
   landTask: (taskId, options) => ipcRenderer.invoke("conductor:landTask", taskId, options),
+  syncTaskLandStatus: (taskId) => ipcRenderer.invoke("conductor:syncTaskLandStatus", taskId),
   resolveTaskConflictWithAI: (taskId) =>
     ipcRenderer.invoke("conductor:resolveTaskConflictWithAI", taskId),
   cleanupTaskWorktree: (taskId) => ipcRenderer.invoke("conductor:cleanupTaskWorktree", taskId),

@@ -308,6 +308,10 @@ export function conductorMCPTools(): MCPToolDefinition[] {
           title: s("Updated title (written in Conductor's configured output language)"),
           summary: s("Updated summary (written in Conductor's configured output language)"),
           status: s("queued | running | needs_review | done | failed"),
+          force: {
+            type: "boolean",
+            description: "Optional: bypass unlanded worktree guard when marking done (running tasks remain blocked)",
+          },
           current_step: s("Updated progress label (written in Conductor's configured output language)"),
           preview_url: s("Preview URL"),
         },
@@ -356,6 +360,21 @@ export function conductorMCPTools(): MCPToolDefinition[] {
       description:
         "Strictly read-only, non-blocking inspection of a task: returns live active worker status (`is_worker_active`), task prompts, resolved worktree path, latest worker output, recent activities (with details), Git status & diff stat, and recent AGY transcript excerpts. ALWAYS use this (never `send_to_worker`) to answer questions about a task's progress, status, design, modified files, or errors immediately without waiting for task completion.",
       inputSchema: schema({ task_id: s("Task ID (UUID or T# code)") }, ["task_id"]),
+    },
+    {
+      name: "search_chat_history",
+      description:
+        "Strictly read-only search over the active Unified Chat history. Use this whenever you need earlier conversation details, prior decisions, file paths, or task events beyond the recent context window. Supports keyword filtering, role filtering, ISO timestamp range (`since`/`until`), and pagination (`limit`/`offset`).",
+      inputSchema: schema({
+        query: s("Optional case-insensitive keyword/substring to match against message text, mentions, or attachments"),
+        role: s("Optional role filter: all (default) | user | assistant | taskEvent | system"),
+        since: s("Optional inclusive ISO-8601 lower bound on message timestamp (e.g. 2026-11-27T00:00:00Z)"),
+        until: s("Optional inclusive ISO-8601 upper bound on message timestamp"),
+        limit: n("Max messages to return (default 20, max 50)"),
+        offset: n("Number of matched messages to skip for pagination (default 0)"),
+        order: s("Sort order: desc (newest first, default) | asc (oldest first)"),
+        max_chars_per_message: n("Max characters per returned message excerpt (default 800, max 4000)"),
+      }),
     },
     // --- Real Chromium CDP Browser Automation Tools ---
     {

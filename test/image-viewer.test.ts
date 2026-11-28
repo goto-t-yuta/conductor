@@ -13,12 +13,17 @@ import {
   clampZoom,
   closeImageTab,
   computeCursorAnchoredScroll,
+  computeDragPanScroll,
   computeFitScale,
   computeNextWheelZoom,
+  computeWheelZoomUpdate,
+  DRAG_PAN_MOVE_THRESHOLD_PX,
   extractImageFileName,
   formatZoomLabel,
   IMAGE_VIEWPORT_PADDING_PX,
   isDirectRenderableImageUrl,
+  isEditableEventTarget,
+  isImageOverflowingViewport,
   isLocalImagePathOrFileUrl,
   isPinchOrZoomWheelEvent,
   isViewableImageAttachment,
@@ -26,6 +31,8 @@ import {
   MIN_ZOOM,
   normalizeWheelDeltaY,
   resolveImageSource,
+  resolveImageZoomCursorClass,
+  shouldDismissLightboxOnBackdropClick,
   stepZoom,
   upsertImageTab,
 } from "../src/renderer/lib/image-viewer.js";
@@ -461,5 +468,229 @@ describe("Image Viewer (renderer source resolution & tabs)", () => {
       padding: IMAGE_VIEWPORT_PADDING_PX,
     });
     expect(fitsViewport).toEqual({ scrollLeft: 0, scrollTop: 0 });
+  });
+
+  it("computes wheel zoom updates with oversized-fit guard and clamp no-ops", () => {
+    // Oversized image fitted below MIN_ZOOM (0.2) pinching out stays in Fit mode (no-op)
+    expect(
+      computeWheelZoomUpdate({
+        prevMode: "fit",
+        prevScale: 0.2,
+        deltaY: 12,
+        naturalWidth: 4000,
+        naturalHeight: 3000,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        scrollLeft: 0,
+        scrollTop: 0,
+        cursorX: 400,
+        cursorY: 300,
+      }),
+    ).toBeNull();
+
+    // Pinching in from fit mode switches to custom mode with cursor-anchored scroll
+    const zoomedIn = computeWheelZoomUpdate({
+      prevMode: "fit",
+      prevScale: 0.5,
+      deltaY: -20,
+      naturalWidth: 1600,
+      naturalHeight: 1200,
+      viewportWidth: 832,
+      viewportHeight: 632,
+      scrollLeft: 0,
+      scrollTop: 0,
+      cursorX: 416,
+      cursorY: 316,
+    });
+    expect(zoomedIn).not.toBeNull();
+    expect(zoomedIn!.mode).toBe("custom");
+    expect(zoomedIn!.scale).toBeCloseTo(0.5 * Math.exp(0.2), 6);
+    expect(zoomedIn!.scrollLeft).toBeGreaterThan(0);
+    expect(zoomedIn!.scrollTop).toBeGreaterThan(0);
+
+    // Already at MAX_ZOOM zooming further in is a no-op
+    expect(
+      computeWheelZoomUpdate({
+        prevMode: "custom",
+        prevScale: MAX_ZOOM,
+        deltaY: -20,
+        naturalWidth: 1000,
+        naturalHeight: 800,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        scrollLeft: 100,
+        scrollTop: 100,
+        cursorX: 400,
+        cursorY: 300,
+      }),
+    ).toBeNull();
+
+    // Already at MIN_ZOOM zooming further out is a no-op
+    expect(
+      computeWheelZoomUpdate({
+        prevMode: "custom",
+        prevScale: MIN_ZOOM,
+        deltaY: 20,
+        naturalWidth: 1000,
+        naturalHeight: 800,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        scrollLeft: 0,
+        scrollTop: 0,
+        cursorX: 400,
+        cursorY: 300,
+      }),
+    ).toBeNull();
+  });
+
+  it("detects viewport overflow, resolves pan/zoom cursor classes, and computes drag-pan scroll", () => {
+    expect(
+      isImageOverflowingViewport({
+        zoomMode: "fit",
+        zoomScale: 2,
+        naturalSize: { width: 2000, height: 1500 },
+        viewportWidth: 800,
+        viewportHeight: 600,
+      }),
+    ).toBe(false);
+
+    expect(
+      isImageOverflowingViewport({
+        zoomMode: "custom",
+        zoomScale: 0.5,
+        naturalSize: { width: 800, height: 600 },
+        viewportWidth: 800,
+        viewportHeight: 600,
+      }),
+    ).toBe(false);
+
+    expect(
+      isImageOverflowingViewport({
+        zoomMode: "custom",
+        zoomScale: 1.5,
+        naturalSize: { width: 800, height: 600 },
+        viewportWidth: 800,
+        viewportHeight: 600,
+      }),
+    ).toBe(true);
+
+    expect(
+      resolveImageZoomCursorClass({
+        zoomMode: "fit",
+        isDraggingPan: false,
+        isOverflowingViewport: false,
+      }),
+    ).toBe("cursor-zoom-in");
+    expect(
+      resolveImageZoomCursorClass({
+        zoomMode: "custom",
+        isDraggingPan: false,
+        isOverflowingViewport: true,
+      }),
+    ).toBe("cursor-grab");
+    expect(
+      resolveImageZoomCursorClass({
+        zoomMode: "custom",
+        isDraggingPan: true,
+        isOverflowingViewport: true,
+      }),
+    ).toBe("cursor-grabbing");
+    expect(
+      resolveImageZoomCursorClass({
+        zoomMode: "custom",
+        isDraggingPan: false,
+        isOverflowingViewport: false,
+      }),
+    ).toBe("cursor-zoom-out");
+
+    const session = {
+      pointerId: 1,
+      startX: 300,
+      startY: 200,
+      startScrollLeft: 120,
+      startScrollTop: 80,
+      hasMoved: false,
+    };
+    const microMove = computeDragPanScroll(session, 301, 201);
+    expect(microMove).toEqual({ scrollLeft: 119, scrollTop: 79, hasMoved: false });
+
+    const realPan = computeDragPanScroll(
+      session,
+      300 - (DRAG_PAN_MOVE_THRESHOLD_PX + 20),
+      200 - 40,
+    );
+    expect(realPan.scrollLeft).toBe(120 + DRAG_PAN_MOVE_THRESHOLD_PX + 20);
+    expect(realPan.scrollTop).toBe(120);
+    expect(realPan.hasMoved).toBe(true);
+
+    // Editable target guard for keyboard shortcuts
+    expect(isEditableEventTarget({ tagName: "INPUT" })).toBe(true);
+    expect(isEditableEventTarget({ tagName: "TEXTAREA" })).toBe(true);
+    expect(isEditableEventTarget({ tagName: "SELECT" })).toBe(true);
+    expect(isEditableEventTarget({ tagName: "DIV", isContentEditable: true })).toBe(true);
+    expect(isEditableEventTarget({ tagName: "DIV", isContentEditable: false })).toBe(false);
+    expect(isEditableEventTarget(null)).toBe(false);
+  });
+
+  it("separates lightbox pan drags from backdrop dismissal clicks cleanly", () => {
+    // Normal click on the dark overlay dismisses the modal
+    expect(
+      shouldDismissLightboxOnBackdropClick({
+        isTargetBackdrop: true,
+        pointerDownOrigin: "backdrop",
+        isDraggingPan: false,
+        suppressNextBackdropClick: false,
+      }),
+    ).toBe(true);
+
+    // Direct synthetic click on the backdrop without pointerdown also dismisses
+    expect(
+      shouldDismissLightboxOnBackdropClick({
+        isTargetBackdrop: true,
+        pointerDownOrigin: null,
+        isDraggingPan: false,
+        suppressNextBackdropClick: false,
+      }),
+    ).toBe(true);
+
+    // Click inside dialog never dismisses
+    expect(
+      shouldDismissLightboxOnBackdropClick({
+        isTargetBackdrop: false,
+        pointerDownOrigin: "dialog",
+        isDraggingPan: false,
+        suppressNextBackdropClick: false,
+      }),
+    ).toBe(false);
+
+    // Drag/pan starting inside dialog and releasing over backdrop must NOT dismiss
+    expect(
+      shouldDismissLightboxOnBackdropClick({
+        isTargetBackdrop: true,
+        pointerDownOrigin: "dialog",
+        isDraggingPan: false,
+        suppressNextBackdropClick: false,
+      }),
+    ).toBe(false);
+
+    // Active pan drag must NOT dismiss
+    expect(
+      shouldDismissLightboxOnBackdropClick({
+        isTargetBackdrop: true,
+        pointerDownOrigin: "backdrop",
+        isDraggingPan: true,
+        suppressNextBackdropClick: false,
+      }),
+    ).toBe(false);
+
+    // Suppressed click right after drag-pan or backdrop-to-dialog drag must NOT dismiss
+    expect(
+      shouldDismissLightboxOnBackdropClick({
+        isTargetBackdrop: true,
+        pointerDownOrigin: "backdrop",
+        isDraggingPan: false,
+        suppressNextBackdropClick: true,
+      }),
+    ).toBe(false);
   });
 });

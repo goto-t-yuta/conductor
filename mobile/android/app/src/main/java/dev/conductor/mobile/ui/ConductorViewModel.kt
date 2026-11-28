@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.conductor.mobile.BuildConfig
 import dev.conductor.mobile.data.AndroidImageAttachmentProcessor
+import dev.conductor.mobile.data.ApiHttpException
 import dev.conductor.mobile.data.ApkInstallLaunchResult
 import dev.conductor.mobile.data.ApkInstaller
 import dev.conductor.mobile.data.AppUpdateClient
@@ -18,6 +19,10 @@ import dev.conductor.mobile.data.ConnectionTestResult
 import dev.conductor.mobile.data.ImageAttachmentLogic
 import dev.conductor.mobile.data.ReleaseFetchResult
 import dev.conductor.mobile.data.SseEvent
+import dev.conductor.mobile.data.TerminalConnectionHandle
+import dev.conductor.mobile.data.TerminalOutputBuffer
+import dev.conductor.mobile.data.TerminalWebSocketClient
+import dev.conductor.mobile.data.TerminalWsEvent
 import dev.conductor.mobile.model.AppSnapshot
 import dev.conductor.mobile.model.AppUpdateErrorCode
 import dev.conductor.mobile.model.AppUpdateLogic
@@ -28,12 +33,22 @@ import dev.conductor.mobile.model.ConnectionConfig
 import dev.conductor.mobile.model.CurrentBuildInfo
 import dev.conductor.mobile.model.ExplicitMentionTarget
 import dev.conductor.mobile.model.GITHUB_LATEST_RELEASE_PAGE_URL
+import dev.conductor.mobile.model.MentionAutocomplete
 import dev.conductor.mobile.model.PendingImageAttachment
+import dev.conductor.mobile.model.SnapshotSyncGuard
 import dev.conductor.mobile.model.StreamTransportState
+import dev.conductor.mobile.model.TaskDetailRefreshPlan
 import dev.conductor.mobile.model.TaskDetailResponse
+import dev.conductor.mobile.model.TaskDetailSync
 import dev.conductor.mobile.model.TaskStatusActions
+import dev.conductor.mobile.model.TerminalConnectionState
+import dev.conductor.mobile.model.TerminalUiState
 import dev.conductor.mobile.model.ThemeMode
 import dev.conductor.mobile.ui.components.ConductorImageLoader
+import dev.conductor.mobile.ui.components.ConductorVideoPlaybackCoordinator
+import dev.conductor.mobile.ui.components.ConductorVideoPreviewCache
+import dev.conductor.mobile.ui.screens.TerminalAuxKey
+import dev.conductor.mobile.ui.screens.TerminalAuxKeyKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -73,6 +88,7 @@ data class ConductorUiState(
     val selectedTaskId: String? = null,
     val selectedTaskDetail: TaskDetailResponse? = null,
     val isLoadingTaskDetail: Boolean = false,
+    val taskDetailError: String? = null,
     val updatingTaskIds: Set<String> = emptySet(),
     val landingTaskIds: Set<String> = emptySet(),
     val isTestingConnection: Boolean = false,
@@ -85,10 +101,14 @@ data class ConductorUiState(
 class ConductorViewModel(application: Application) : AndroidViewModel(application) {
     private val appContext = application.applicationContext
     private val store = ConnectionStore(appContext)
-    private val api = ConductorApiClient()
+    val api = ConductorApiClient()
+    private val terminalWsClient = TerminalWebSocketClient()
+    private val terminalOutputBuffer = TerminalOutputBuffer()
     private val imageProcessor = AndroidImageAttachmentProcessor(appContext)
     private val attachmentImageCache = AttachmentByteCache()
     val imageLoader = ConductorImageLoader(api)
+    val videoPreviewCache = ConductorVideoPreviewCache()
+    val videoPlaybackCoordinator = ConductorVideoPlaybackCoordinator()
 
     private val currentBuildInfo = CurrentBuildInfo(
         versionName = BuildConfig.VERSION_NAME,
@@ -109,8 +129,22 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     )
     val uiState: StateFlow<ConductorUiState> = _uiState.asStateFlow()
 
+    private val _terminalUiState = MutableStateFlow(TerminalUiState())
+    val terminalUiState: StateFlow<TerminalUiState> = _terminalUiState.asStateFlow()
+
     private var streamJob: Job? = null
     private var streamingSyncJob: Job? = null
+    private var taskDetailRefreshJob: Job? = null
+    private var openTaskDetailPollJob: Job? = null
+    private var lastTaskDetailFetchedAtMs: Long = 0L
+    private var terminalJob: Job? = null
+    private var terminalHandle: TerminalConnectionHandle? = null
+    private var activeTerminalConfig: ConnectionConfig? = null
+    private var activeTerminalSessionId: String? = null
+    private var lastTerminalSeq: Long = -1L
+    private var terminalOutputVersion: Long = 0L
+    private var terminalAutoConnectActive: Boolean = false
+    private val terminalReconnectSignal = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     private var updateCheckJob: Job? = null
     private var updateDownloadJob: Job? = null
     private var activeSyncConfig: ConnectionConfig? = null
@@ -143,8 +177,15 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         if (saved != prev || streamJob?.isActive != true) {
                             startRealtimeSync(saved)
                         }
+                        if (saved != prev && terminalAutoConnectActive) {
+                            activeTerminalSessionId = null
+                            lastTerminalSeq = -1L
+                            terminalOutputBuffer.clear()
+                            startTerminalConnection(saved)
+                        }
                     } else {
                         stopRealtimeSync()
+                        stopTerminalConnection(resetState = true)
                         _uiState.update {
                             it.copy(
                                 transportState = StreamTransportState.DISCONNECTED,
@@ -283,7 +324,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         if (!cfg.isConfigured) return
         val transport = _uiState.value.transportState
         val staleMs = System.currentTimeMillis() - lastSnapshotReceivedAtMs
-        if (transport != StreamTransportState.CONNECTED_SSE || staleMs > 25_000L) {
+        if (transport != StreamTransportState.CONNECTED_SSE || staleMs > 5_000L) {
             viewModelScope.launch {
                 api.fetchSnapshot(cfg).onSuccess { snap ->
                     applyIncomingSnapshot(snap, fromSse = false)
@@ -293,12 +334,24 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                 nudgeRealtimeSync(cfg)
             }
         }
+        if (terminalAutoConnectActive) {
+            val termState = _terminalUiState.value.connectionState
+            if (termState != TerminalConnectionState.CONNECTED &&
+                termState != TerminalConnectionState.EXITED
+            ) {
+                nudgeTerminalConnection(cfg)
+            }
+        }
     }
 
     fun disconnect() {
         stopRealtimeSync()
+        stopOpenTaskDetailSync()
+        stopTerminalConnection(resetState = true)
         attachmentImageCache.clear()
         imageLoader.clear()
+        videoPlaybackCoordinator.pauseAllInline()
+        videoPreviewCache.clear()
         viewModelScope.launch {
             store.clear()
             _uiState.update {
@@ -306,6 +359,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                     snapshot = null,
                     selectedTaskId = null,
                     selectedTaskDetail = null,
+                    taskDetailError = null,
                     updatingTaskIds = emptySet(),
                     landingTaskIds = emptySet(),
                     selectedMentions = emptyList(),
@@ -336,16 +390,30 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun applyIncomingSnapshot(snap: AppSnapshot, fromSse: Boolean) {
-        lastSnapshotReceivedAtMs = System.currentTimeMillis()
+        var accepted = false
+        var previousSnapshot: AppSnapshot? = null
+        var openTaskId: String? = null
+        var openTaskDetail: TaskDetailResponse? = null
         _uiState.update { state ->
+            if (!SnapshotSyncGuard.shouldAccept(state.snapshot, snap, fromSse)) {
+                return@update state
+            }
+            accepted = true
+            previousSnapshot = state.snapshot
+            openTaskId = state.selectedTaskId
+            openTaskDetail = state.selectedTaskDetail
             state.copy(
                 snapshot = snap,
                 transportState = if (fromSse) StreamTransportState.CONNECTED_SSE else state.transportState,
                 transportDetail = if (fromSse) "SSE リアルタイム接続中" else state.transportDetail,
             )
         }
-        val hasStreaming = snap.activeResponderCount > 0 || snap.messages.any { it.isStreaming }
-        if (hasStreaming) {
+        if (!accepted) return
+        lastSnapshotReceivedAtMs = System.currentTimeMillis()
+        val hasActiveWork = snap.activeResponderCount > 0 ||
+            snap.messages.any { it.isStreaming } ||
+            snap.tasks.any { it.status == TaskStatusActions.STATUS_RUNNING }
+        if (hasActiveWork) {
             val cfg = activeSyncConfig ?: _uiState.value.config
             if (cfg.isConfigured) {
                 ensureStreamingSync(cfg)
@@ -354,11 +422,35 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
             streamingSyncJob?.cancel()
             streamingSyncJob = null
         }
+
+        // Keep the open Task Detail bottom sheet in sync with live activity/output/status updates
+        val activeTaskId = openTaskId
+        if (activeTaskId != null) {
+            val prevTask = previousSnapshot?.tasks?.find { it.id == activeTaskId }
+            val nextTask = snap.tasks.find { it.id == activeTaskId }
+            val refreshPlan = TaskDetailSync.resolveDetailRefreshPlan(
+                previousSnapshotTask = prevTask,
+                incomingSnapshotTask = nextTask,
+                currentDetailTask = openTaskDetail?.task,
+            )
+            when (refreshPlan) {
+                TaskDetailRefreshPlan.FULL_WITH_GIT -> {
+                    taskDetailRefreshJob?.cancel()
+                    refreshTaskDetail(activeTaskId, skipGit = false, silent = true)
+                }
+
+                TaskDetailRefreshPlan.ACTIVITIES_ONLY -> {
+                    scheduleTaskDetailRefresh(activeTaskId, skipGit = true)
+                }
+
+                TaskDetailRefreshPlan.NONE -> Unit
+            }
+        }
     }
 
     /**
-     * Safety net while an assistant response is actively streaming:
-     * if SSE stalls or is temporarily reconnecting, poll /api/snapshot so responses always appear promptly.
+     * Safety net while an assistant response or background worker task is actively running:
+     * if SSE stalls or is temporarily reconnecting, poll /api/snapshot so progress and outputs appear promptly.
      */
     private fun ensureStreamingSync(config: ConnectionConfig) {
         if (streamingSyncJob?.isActive == true) return
@@ -366,10 +458,11 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
             while (isActive) {
                 delay(1_500L)
                 val current = _uiState.value.snapshot
-                val stillStreaming = current == null ||
+                val stillActive = current == null ||
                     current.activeResponderCount > 0 ||
-                    current.messages.any { it.isStreaming }
-                if (!stillStreaming) break
+                    current.messages.any { it.isStreaming } ||
+                    current.tasks.any { it.status == TaskStatusActions.STATUS_RUNNING }
+                if (!stillActive) break
 
                 val sinceLastMs = System.currentTimeMillis() - lastSnapshotReceivedAtMs
                 val sseConnected = _uiState.value.transportState == StreamTransportState.CONNECTED_SSE
@@ -476,20 +569,18 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun addMention(target: ExplicitMentionTarget) {
         _uiState.update { state ->
-            if (state.selectedMentions.any { it.uniqueKey() == target.uniqueKey() }) {
-                state
-            } else {
-                state.copy(selectedMentions = state.selectedMentions + target)
-            }
+            val updated = MentionAutocomplete.addExplicitMentionTarget(state.selectedMentions, target)
+            if (updated === state.selectedMentions) state else state.copy(selectedMentions = updated)
         }
     }
 
     fun removeMention(target: ExplicitMentionTarget) {
         _uiState.update { state ->
             state.copy(
-                selectedMentions = state.selectedMentions.filterNot {
-                    it.uniqueKey() == target.uniqueKey()
-                },
+                selectedMentions = MentionAutocomplete.removeExplicitMentionTarget(
+                    state.selectedMentions,
+                    target,
+                ),
             )
         }
     }
@@ -578,6 +669,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
         val mentions = state.selectedMentions
         val cfg = state.config
+        val expectedSessionId = state.snapshot?.activeChatSessionId?.trim()?.takeIf { it.isNotEmpty() }
         val chatAttachments = pendingImages.map { att ->
             attachmentImageCache.put(att.id, att.previewBytes)
             att.toChatAttachment()
@@ -591,7 +683,13 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
             )
         }
         viewModelScope.launch {
-            api.sendMessage(cfg, text, mentions, chatAttachments)
+            api.sendMessage(
+                config = cfg,
+                text = text,
+                mentions = mentions,
+                attachments = chatAttachments,
+                chatSessionId = expectedSessionId,
+            )
                 .onSuccess { res ->
                     if (res.snapshot != null) {
                         applyIncomingSnapshot(res.snapshot, fromSse = false)
@@ -613,7 +711,27 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                             pendingAttachments = pendingImages,
                         )
                     }
-                    showBanner("送信エラー: ${err.message}")
+                    if (err is ApiHttpException) {
+                        val serverSnap = err.response?.snapshot
+                        val reason = err.response?.reason
+                        if (serverSnap != null) {
+                            applyIncomingSnapshot(serverSnap, fromSse = false)
+                        } else if (reason == "session_not_found" || reason == "session_mismatch") {
+                            api.fetchSnapshot(cfg).onSuccess { snap ->
+                                applyIncomingSnapshot(snap, fromSse = false)
+                            }
+                        }
+                        if (reason == "session_not_found" || reason == "session_mismatch") {
+                            showBanner("チャットセッションが更新されたため最新状態に同期しました。内容を確認して再送信してください。")
+                            if (_uiState.value.transportState != StreamTransportState.CONNECTED_SSE) {
+                                nudgeRealtimeSync(cfg)
+                            }
+                        } else {
+                            showBanner("送信エラー: ${err.message}")
+                        }
+                    } else {
+                        showBanner("送信エラー: ${err.message}")
+                    }
                 }
             _uiState.update { it.copy(isSending = false) }
         }
@@ -654,38 +772,143 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun selectChatSession(sessionId: String) {
+        val cfg = _uiState.value.config
+        val cleanId = sessionId.trim()
+        if (!cfg.isConfigured || cleanId.isEmpty()) return
+        viewModelScope.launch {
+            api.selectChatSession(cfg, cleanId)
+                .onSuccess { res ->
+                    if (res.snapshot != null) {
+                        applyIncomingSnapshot(res.snapshot, fromSse = false)
+                    } else {
+                        api.fetchSnapshot(cfg).onSuccess { snap ->
+                            applyIncomingSnapshot(snap, fromSse = false)
+                        }
+                    }
+                }
+                .onFailure { err ->
+                    if (err is ApiHttpException) {
+                        val serverSnap = err.response?.snapshot
+                        if (serverSnap != null) {
+                            applyIncomingSnapshot(serverSnap, fromSse = false)
+                        } else {
+                            api.fetchSnapshot(cfg).onSuccess { snap ->
+                                applyIncomingSnapshot(snap, fromSse = false)
+                            }
+                        }
+                        if (err.response?.reason == "session_not_found") {
+                            showBanner("選択したチャットセッションは既に存在しないため、最新セッションに同期しました")
+                        } else {
+                            showBanner("セッション切替エラー: ${err.message}")
+                        }
+                    } else {
+                        showBanner("セッション切替エラー: ${err.message}")
+                    }
+                }
+        }
+    }
+
     // --- Task Actions ---
 
     fun openTaskDetail(taskId: String) {
+        stopOpenTaskDetailSync()
         _uiState.update {
             it.copy(
                 selectedTaskId = taskId,
                 selectedTaskDetail = null,
                 isLoadingTaskDetail = true,
+                taskDetailError = null,
             )
         }
-        refreshTaskDetail(taskId)
+        refreshTaskDetail(taskId, skipGit = false, silent = false)
+        startOpenTaskDetailPolling(taskId)
     }
 
     fun closeTaskDetail() {
+        stopOpenTaskDetailSync()
         _uiState.update {
             it.copy(
                 selectedTaskId = null,
                 selectedTaskDetail = null,
                 isLoadingTaskDetail = false,
+                taskDetailError = null,
             )
         }
     }
 
-    fun refreshTaskDetail(taskId: String) {
+    fun refreshSelectedTaskDetail() {
+        val taskId = _uiState.value.selectedTaskId ?: return
+        _uiState.update { it.copy(isLoadingTaskDetail = true) }
+        refreshTaskDetail(taskId, skipGit = false, silent = false)
+    }
+
+    fun clearTaskDetailError() {
+        _uiState.update { it.copy(taskDetailError = null) }
+    }
+
+    private fun stopOpenTaskDetailSync() {
+        taskDetailRefreshJob?.cancel()
+        taskDetailRefreshJob = null
+        openTaskDetailPollJob?.cancel()
+        openTaskDetailPollJob = null
+    }
+
+    private fun scheduleTaskDetailRefresh(taskId: String, skipGit: Boolean) {
+        if (taskDetailRefreshJob?.isActive == true) return
+        taskDetailRefreshJob = viewModelScope.launch {
+            delay(700L)
+            if (_uiState.value.selectedTaskId == taskId) {
+                refreshTaskDetail(taskId, skipGit = skipGit, silent = true)
+            }
+            taskDetailRefreshJob = null
+        }
+    }
+
+    private fun startOpenTaskDetailPolling(taskId: String) {
+        openTaskDetailPollJob?.cancel()
+        openTaskDetailPollJob = viewModelScope.launch {
+            while (isActive) {
+                delay(2_500L)
+                val state = _uiState.value
+                if (state.selectedTaskId != taskId) break
+                val merged = TaskDetailSync.mergeLiveTask(
+                    snapshotTask = state.snapshot?.tasks?.find { it.id == taskId },
+                    detailTask = state.selectedTaskDetail?.task,
+                )
+                if (merged?.status == TaskStatusActions.STATUS_RUNNING) {
+                    val sinceFetch = System.currentTimeMillis() - lastTaskDetailFetchedAtMs
+                    if (sinceFetch >= 2_200L) {
+                        refreshTaskDetail(taskId, skipGit = true, silent = true)
+                    }
+                }
+            }
+            openTaskDetailPollJob = null
+        }
+    }
+
+    fun refreshTaskDetail(
+        taskId: String,
+        skipGit: Boolean = false,
+        silent: Boolean = false,
+    ) {
         val cfg = _uiState.value.config
         if (!cfg.isConfigured) return
+        if (!silent && _uiState.value.selectedTaskId == taskId) {
+            _uiState.update { it.copy(isLoadingTaskDetail = true) }
+        }
         viewModelScope.launch {
-            api.getTaskDetail(cfg, taskId)
+            api.getTaskDetail(cfg, taskId, skipGit = skipGit)
                 .onSuccess { detail ->
+                    lastTaskDetailFetchedAtMs = System.currentTimeMillis()
                     if (_uiState.value.selectedTaskId == taskId) {
-                        _uiState.update {
-                            it.copy(selectedTaskDetail = detail, isLoadingTaskDetail = false)
+                        _uiState.update { current ->
+                            val mergedDetail = TaskDetailSync.mergeDetailResponse(
+                                previous = current.selectedTaskDetail,
+                                incoming = detail,
+                                skipGit = skipGit,
+                            )
+                            current.copy(selectedTaskDetail = mergedDetail, isLoadingTaskDetail = false)
                         }
                     }
                 }
@@ -697,7 +920,12 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun updateTaskStatus(taskId: String, nextStatus: String, isUndo: Boolean = false) {
+    fun updateTaskStatus(
+        taskId: String,
+        nextStatus: String,
+        isUndo: Boolean = false,
+        force: Boolean = false,
+    ) {
         val state = _uiState.value
         val cfg = state.config
         if (!cfg.isConfigured || taskId in state.updatingTaskIds || taskId in state.landingTaskIds) {
@@ -706,7 +934,23 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         val currentTask = state.snapshot?.tasks?.find { it.id == taskId }
             ?: state.selectedTaskDetail?.task?.takeIf { it.id == taskId }
         if (nextStatus == TaskStatusActions.STATUS_DONE && currentTask != null) {
-            TaskStatusActions.getMarkDoneBlockedReason(currentTask)?.let { blockedReason ->
+            val blockedReason = if (force) {
+                if (currentTask.status == TaskStatusActions.STATUS_RUNNING) {
+                    TaskStatusActions.RUNNING_DONE_BLOCKED_REASON
+                } else {
+                    null
+                }
+            } else {
+                TaskStatusActions.getMarkDoneBlockedReason(currentTask)
+            }
+            if (blockedReason != null) {
+                _uiState.update { current ->
+                    if (current.selectedTaskId == taskId) {
+                        current.copy(taskDetailError = blockedReason)
+                    } else {
+                        current
+                    }
+                }
                 showBanner(blockedReason)
                 return
             }
@@ -714,28 +958,51 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         val previousStatus = currentTask?.status
 
         viewModelScope.launch {
-            _uiState.update { it.copy(updatingTaskIds = it.updatingTaskIds + taskId) }
+            _uiState.update { current ->
+                current.copy(
+                    updatingTaskIds = current.updatingTaskIds + taskId,
+                    taskDetailError = if (current.selectedTaskId == taskId) null else current.taskDetailError,
+                )
+            }
             try {
-                api.updateTaskStatus(cfg, taskId, nextStatus)
+                api.updateTaskStatus(cfg, taskId, nextStatus, force = force)
                     .onSuccess { res ->
-                        val updatedTask = res.task
-                        _uiState.update { current ->
-                            val nextSnapshot = TaskStatusActions.applyTaskUpdate(
-                                snapshot = current.snapshot,
-                                taskId = taskId,
-                                updatedTask = updatedTask,
-                                fallbackStatus = nextStatus,
-                            )
-                            val nextDetail = if (current.selectedTaskId == taskId && current.selectedTaskDetail != null) {
-                                val patchedTask = updatedTask
-                                    ?: current.selectedTaskDetail.task?.copy(status = nextStatus)
-                                current.selectedTaskDetail.copy(task = patchedTask)
-                            } else {
-                                current.selectedTaskDetail
+                        if (!res.ok) {
+                            val errorMessage = res.error ?: res.message ?: "ステータス更新に失敗しました"
+                            _uiState.update { current ->
+                                if (current.selectedTaskId == taskId) {
+                                    current.copy(taskDetailError = errorMessage)
+                                } else {
+                                    current
+                                }
                             }
+                            showBanner(errorMessage)
+                            return@onSuccess
+                        }
+                        val updatedTask = res.task
+                        var shouldRefreshDetail = false
+                        _uiState.update { current ->
+                            val outcome = TaskStatusActions.applyStatusUpdateSuccess(
+                                snapshot = current.snapshot,
+                                selectedTaskId = current.selectedTaskId,
+                                selectedTaskDetail = current.selectedTaskDetail,
+                                isLoadingTaskDetail = current.isLoadingTaskDetail,
+                                taskId = taskId,
+                                nextStatus = nextStatus,
+                                updatedTask = updatedTask,
+                                isUndo = isUndo,
+                            )
+                            shouldRefreshDetail = outcome.shouldRefreshDetail
                             current.copy(
-                                snapshot = nextSnapshot,
-                                selectedTaskDetail = nextDetail,
+                                snapshot = outcome.snapshot,
+                                selectedTaskId = outcome.selectedTaskId,
+                                selectedTaskDetail = outcome.selectedTaskDetail,
+                                isLoadingTaskDetail = outcome.isLoadingTaskDetail,
+                                taskDetailError = if (outcome.shouldCloseDetail || current.selectedTaskId == taskId) {
+                                    null
+                                } else {
+                                    current.taskDetailError
+                                },
                             )
                         }
                         val feedback = TaskStatusActions.formatStatusFeedback(
@@ -757,7 +1024,7 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         } else {
                             showBanner(feedback)
                         }
-                        if (_uiState.value.selectedTaskId == taskId) {
+                        if (shouldRefreshDetail) {
                             refreshTaskDetail(taskId)
                         }
                         if (_uiState.value.transportState != StreamTransportState.CONNECTED_SSE) {
@@ -767,7 +1034,15 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                     }
                     .onFailure { err ->
-                        showBanner(err.message ?: "ステータス更新に失敗しました")
+                        val errorMessage = err.message ?: "ステータス更新に失敗しました"
+                        _uiState.update { current ->
+                            if (current.selectedTaskId == taskId) {
+                                current.copy(taskDetailError = errorMessage)
+                            } else {
+                                current
+                            }
+                        }
+                        showBanner(errorMessage)
                     }
             } finally {
                 _uiState.update { it.copy(updatingTaskIds = it.updatingTaskIds - taskId) }
@@ -831,6 +1106,51 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                     .onFailure { err ->
                         showBanner(err.message ?: "Land に失敗しました")
+                    }
+            } finally {
+                _uiState.update { it.copy(landingTaskIds = it.landingTaskIds - taskId) }
+            }
+        }
+    }
+
+    fun syncTaskLandStatus(taskId: String) {
+        val state = _uiState.value
+        val cfg = state.config
+        if (!cfg.isConfigured || taskId in state.updatingTaskIds || taskId in state.landingTaskIds) {
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(landingTaskIds = it.landingTaskIds + taskId) }
+            try {
+                api.syncTaskLandStatus(cfg, taskId)
+                    .onSuccess { res ->
+                        res.task?.let { updatedTask ->
+                            _uiState.update { current ->
+                                current.copy(
+                                    snapshot = TaskStatusActions.applyTaskUpdate(
+                                        snapshot = current.snapshot,
+                                        taskId = taskId,
+                                        updatedTask = updatedTask,
+                                    ),
+                                    selectedTaskDetail = if (current.selectedTaskId == taskId && current.selectedTaskDetail != null) {
+                                        current.selectedTaskDetail.copy(task = updatedTask)
+                                    } else {
+                                        current.selectedTaskDetail
+                                    },
+                                    taskDetailError = if (res.updated && current.selectedTaskId == taskId) null else current.taskDetailError,
+                                )
+                            }
+                        }
+                        showBanner(res.message ?: "Land 状態を再確認しました")
+                        api.fetchSnapshot(cfg).onSuccess { snap ->
+                            applyIncomingSnapshot(snap, fromSse = false)
+                        }
+                        if (_uiState.value.selectedTaskId == taskId) {
+                            refreshTaskDetail(taskId)
+                        }
+                    }
+                    .onFailure { err ->
+                        showBanner(err.message ?: "Land 状態の再確認に失敗しました")
                     }
             } finally {
                 _uiState.update { it.copy(landingTaskIds = it.landingTaskIds - taskId) }
@@ -1140,12 +1460,366 @@ class ConductorViewModel(application: Application) : AndroidViewModel(applicatio
         launchApkInstaller(file)
     }
 
+    // --- Remote Terminal (WebSocket PTY) ---
+
+    fun ensureTerminalConnected() {
+        terminalAutoConnectActive = true
+        val cfg = _uiState.value.config
+        if (!cfg.isConfigured) return
+        val currentState = _terminalUiState.value.connectionState
+        if (terminalJob?.isActive != true || activeTerminalConfig != cfg) {
+            startTerminalConnection(cfg)
+        } else if (currentState == TerminalConnectionState.ERROR ||
+            currentState == TerminalConnectionState.DISCONNECTED
+        ) {
+            nudgeTerminalConnection(cfg)
+        }
+    }
+
+    fun reconnectTerminal() {
+        terminalAutoConnectActive = true
+        val cfg = _uiState.value.config
+        if (!cfg.isConfigured) return
+        startTerminalConnection(cfg)
+    }
+
+    fun updateTerminalCommandInput(text: String) {
+        _terminalUiState.update { it.copy(commandInput = text) }
+    }
+
+    fun submitTerminalCommand() {
+        val current = _terminalUiState.value
+        val command = current.commandInput
+        val sent = terminalHandle?.sendInput("$command\r") == true
+        if (sent) {
+            _terminalUiState.update { it.copy(commandInput = "") }
+        } else {
+            showBanner("ターミナルが未接続です。再接続してください。")
+            reconnectTerminal()
+        }
+    }
+
+    fun sendTerminalAuxKey(key: TerminalAuxKey) {
+        when (key.kind) {
+            TerminalAuxKeyKind.INSERT -> {
+                _terminalUiState.update { it.copy(commandInput = it.commandInput + key.payload) }
+            }
+
+            TerminalAuxKeyKind.CONTROL -> {
+                val handle = terminalHandle
+                if (handle == null || _terminalUiState.value.connectionState != TerminalConnectionState.CONNECTED) {
+                    return
+                }
+                if (key.payload == "\t" && _terminalUiState.value.commandInput.isNotEmpty()) {
+                    val typed = _terminalUiState.value.commandInput
+                    if (handle.sendInput(typed + "\t")) {
+                        _terminalUiState.update { it.copy(commandInput = "") }
+                    }
+                } else {
+                    handle.sendInput(key.payload)
+                }
+            }
+        }
+    }
+
+    fun selectTerminalProject(projectPath: String?, projectName: String?) {
+        val cleanPath = projectPath?.trim()?.takeIf { it.isNotEmpty() }
+        val cleanName = projectName?.trim()?.takeIf { it.isNotEmpty() }
+        terminalOutputBuffer.clear()
+        lastTerminalSeq = -1L
+        terminalOutputVersion += 1L
+        _terminalUiState.update {
+            it.copy(
+                selectedProjectPath = cleanPath,
+                selectedProjectName = cleanName,
+                lines = emptyList(),
+                outputVersion = terminalOutputVersion,
+                lastError = null,
+            )
+        }
+        val handle = terminalHandle
+        val dims = _terminalUiState.value
+        if (handle != null &&
+            (dims.connectionState == TerminalConnectionState.CONNECTED ||
+                dims.connectionState == TerminalConnectionState.EXITED)
+        ) {
+            activeTerminalSessionId = null
+            _terminalUiState.update {
+                it.copy(
+                    connectionState = TerminalConnectionState.CONNECTING,
+                    statusDetail = "ディレクトリを切り替え中...",
+                )
+            }
+            if (!handle.sendRestart(cleanPath, dims.cols, dims.rows)) {
+                reconnectTerminal()
+            }
+        } else {
+            activeTerminalSessionId = null
+            reconnectTerminal()
+        }
+    }
+
+    fun clearTerminalOutput() {
+        terminalOutputBuffer.clear()
+        terminalOutputVersion += 1L
+        _terminalUiState.update {
+            it.copy(
+                lines = emptyList(),
+                outputVersion = terminalOutputVersion,
+            )
+        }
+    }
+
+    fun restartTerminalSession() {
+        terminalOutputBuffer.clear()
+        lastTerminalSeq = -1L
+        terminalOutputVersion += 1L
+        val current = _terminalUiState.value
+        _terminalUiState.update {
+            it.copy(
+                lines = emptyList(),
+                outputVersion = terminalOutputVersion,
+                lastError = null,
+            )
+        }
+        val handle = terminalHandle
+        if (handle != null &&
+            (current.connectionState == TerminalConnectionState.CONNECTED ||
+                current.connectionState == TerminalConnectionState.EXITED)
+        ) {
+            activeTerminalSessionId = null
+            _terminalUiState.update {
+                it.copy(
+                    connectionState = TerminalConnectionState.CONNECTING,
+                    statusDetail = "シェルを再起動中...",
+                )
+            }
+            if (!handle.sendRestart(current.selectedProjectPath, current.cols, current.rows)) {
+                reconnectTerminal()
+            }
+        } else {
+            activeTerminalSessionId = null
+            reconnectTerminal()
+        }
+    }
+
+    fun updateTerminalDimensions(cols: Int, rows: Int) {
+        val current = _terminalUiState.value
+        if (current.cols == cols && current.rows == rows) return
+        _terminalUiState.update { it.copy(cols = cols, rows = rows) }
+        if (current.connectionState == TerminalConnectionState.CONNECTED) {
+            terminalHandle?.sendResize(cols, rows)
+        }
+    }
+
+    private fun stopTerminalConnection(resetState: Boolean) {
+        terminalJob?.cancel()
+        terminalJob = null
+        terminalHandle?.disconnect()
+        terminalHandle = null
+        activeTerminalConfig = null
+        if (resetState) {
+            terminalAutoConnectActive = false
+            activeTerminalSessionId = null
+            lastTerminalSeq = -1L
+            terminalOutputBuffer.clear()
+            terminalOutputVersion += 1L
+            _terminalUiState.value = TerminalUiState(outputVersion = terminalOutputVersion)
+        }
+    }
+
+    private fun nudgeTerminalConnection(config: ConnectionConfig) {
+        if (terminalJob?.isActive == true && activeTerminalConfig == config) {
+            terminalReconnectSignal.tryEmit(Unit)
+        } else {
+            startTerminalConnection(config)
+        }
+    }
+
+    private fun startTerminalConnection(config: ConnectionConfig) {
+        stopTerminalConnection(resetState = false)
+        activeTerminalConfig = config
+        terminalJob = viewModelScope.launch {
+            var backoffMs = 1_000L
+            while (isActive) {
+                val snapState = _terminalUiState.value
+                val isReconnecting = activeTerminalSessionId != null
+                _terminalUiState.update {
+                    it.copy(
+                        connectionState = if (isReconnecting) {
+                            TerminalConnectionState.RECONNECTING
+                        } else {
+                            TerminalConnectionState.CONNECTING
+                        },
+                        statusDetail = if (isReconnecting) "再接続中..." else "シェルに接続中...",
+                        lastError = null,
+                    )
+                }
+
+                val handleResult = runCatching {
+                    terminalWsClient.connect(
+                        config = config,
+                        sessionId = activeTerminalSessionId,
+                        projectPath = snapState.selectedProjectPath,
+                        cols = snapState.cols,
+                        rows = snapState.rows,
+                        afterSeq = if (activeTerminalSessionId != null && lastTerminalSeq >= 0L) {
+                            lastTerminalSeq
+                        } else {
+                            null
+                        },
+                    )
+                }
+                if (handleResult.isFailure) {
+                    val err = handleResult.exceptionOrNull()
+                    _terminalUiState.update {
+                        it.copy(
+                            connectionState = TerminalConnectionState.ERROR,
+                            statusDetail = "接続エラー",
+                            lastError = err?.message ?: "ターミナル URL が不正です",
+                        )
+                    }
+                    break
+                }
+                val handle = handleResult.getOrThrow()
+                terminalHandle = handle
+
+                var unauthorized = false
+                var receivedReadyInAttempt = false
+                var stopLoop = false
+
+                try {
+                    handle.events.collect { event ->
+                        when (event) {
+                            is TerminalWsEvent.Opened -> {
+                                backoffMs = 1_000L
+                            }
+
+                            is TerminalWsEvent.Ready -> {
+                                backoffMs = 1_000L
+                                receivedReadyInAttempt = true
+                                activeTerminalSessionId = event.session.id
+                                lastTerminalSeq = event.seq
+                                if (event.replayMode == "full" || event.recreated) {
+                                    terminalOutputBuffer.replaceAll(event.replay)
+                                } else if (event.replay.isNotEmpty()) {
+                                    terminalOutputBuffer.append(event.replay)
+                                }
+                                terminalOutputVersion += 1L
+                                val isExited = event.session.status == "exited"
+                                _terminalUiState.update {
+                                    it.copy(
+                                        connectionState = if (isExited) {
+                                            TerminalConnectionState.EXITED
+                                        } else {
+                                            TerminalConnectionState.CONNECTED
+                                        },
+                                        statusDetail = if (isExited) {
+                                            "プロセス終了"
+                                        } else {
+                                            "${event.session.shellName} 接続中"
+                                        },
+                                        session = event.session,
+                                        lines = terminalOutputBuffer.snapshotLines(),
+                                        outputVersion = terminalOutputVersion,
+                                        lastError = null,
+                                    )
+                                }
+                            }
+
+                            is TerminalWsEvent.Output -> {
+                                if (event.seq > lastTerminalSeq) {
+                                    lastTerminalSeq = event.seq
+                                }
+                                terminalOutputBuffer.append(event.data)
+                                terminalOutputVersion += 1L
+                                _terminalUiState.update {
+                                    it.copy(
+                                        lines = terminalOutputBuffer.snapshotLines(),
+                                        outputVersion = terminalOutputVersion,
+                                    )
+                                }
+                            }
+
+                            is TerminalWsEvent.Exit -> {
+                                _terminalUiState.update { state ->
+                                    state.copy(
+                                        connectionState = TerminalConnectionState.EXITED,
+                                        statusDetail = "プロセス終了",
+                                        session = state.session?.copy(
+                                            status = "exited",
+                                            exitCode = event.exitCode,
+                                            signal = event.signal,
+                                        ),
+                                    )
+                                }
+                            }
+
+                            is TerminalWsEvent.ServerError -> {
+                                _terminalUiState.update {
+                                    it.copy(lastError = event.message)
+                                }
+                                showBanner("ターミナル: ${event.message}")
+                            }
+
+                            is TerminalWsEvent.Disconnected -> {
+                                unauthorized = event.unauthorized
+                                stopLoop = event.normalClose || event.unauthorized
+                                _terminalUiState.update { state ->
+                                    if (state.connectionState == TerminalConnectionState.EXITED && event.normalClose) {
+                                        state
+                                    } else {
+                                        state.copy(
+                                            connectionState = if (unauthorized) {
+                                                TerminalConnectionState.ERROR
+                                            } else if (event.normalClose) {
+                                                TerminalConnectionState.DISCONNECTED
+                                            } else {
+                                                TerminalConnectionState.RECONNECTING
+                                            },
+                                            statusDetail = event.reason,
+                                            lastError = if (unauthorized) event.reason else state.lastError,
+                                        )
+                                    }
+                                }
+                                throw CancellationException("Terminal socket closed")
+                            }
+                        }
+                    }
+                } catch (_: CancellationException) {
+                    if (!isActive) {
+                        handle.disconnect()
+                        throw CancellationException("Terminal coroutine cancelled")
+                    }
+                } finally {
+                    if (terminalHandle === handle) {
+                        terminalHandle = null
+                    }
+                }
+
+                if (unauthorized || stopLoop) {
+                    break
+                }
+
+                val waitMs = if (receivedReadyInAttempt) 1_000L else backoffMs
+                withTimeoutOrNull(waitMs) {
+                    terminalReconnectSignal.first()
+                }
+                backoffMs = (backoffMs * 2).coerceAtMost(8_000L)
+            }
+        }
+    }
+
     override fun onCleared() {
         stopRealtimeSync()
+        stopTerminalConnection(resetState = false)
+        terminalWsClient.close()
         updateCheckJob?.cancel()
         updateDownloadJob?.cancel()
         updateClient.close()
         imageLoader.clear()
+        videoPlaybackCoordinator.pauseAllInline()
+        videoPreviewCache.clear()
         api.close()
         super.onCleared()
     }

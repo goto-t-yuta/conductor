@@ -46,6 +46,31 @@ export type ResolvedVideoPath =
   | { ok: true; filePath: string }
   | { ok: false; error: string };
 
+export type LocalVideoErrorCode =
+  | "invalid"
+  | "not_found"
+  | "forbidden"
+  | "too_large"
+  | "io_error";
+
+export type InspectedLocalVideo =
+  | {
+      ok: true;
+      filePath: string;
+      realPath: string;
+      fileName: string;
+      mimeType: string;
+      playbackContentType: string;
+      sizeBytes: number;
+      mtimeMs: number;
+    }
+  | {
+      ok: false;
+      filePath: string;
+      error: string;
+      errorCode: LocalVideoErrorCode;
+    };
+
 function expandHomePath(rawPath: string): string {
   if (rawPath === "~") {
     return os.homedir();
@@ -59,6 +84,7 @@ function expandHomePath(rawPath: string): string {
 function resolveBaseDirectory(baseFilePath?: string): string | null {
   const trimmed = baseFilePath?.trim();
   if (!trimmed || trimmed.includes("\0")) return null;
+  let candidate: string;
   if (/^file:\/\//i.test(trimmed)) {
     try {
       const parsed = new URL(trimmed);
@@ -66,14 +92,23 @@ function resolveBaseDirectory(baseFilePath?: string): string | null {
       parsed.search = "";
       const filePath = fileURLToPath(parsed);
       if (filePath.includes("\0")) return null;
-      return path.dirname(path.resolve(filePath));
+      candidate = path.resolve(filePath);
     } catch {
       return null;
     }
+  } else {
+    const expanded = expandHomePath(trimmed);
+    if (!path.isAbsolute(expanded)) return null;
+    candidate = path.resolve(expanded);
   }
-  const expanded = expandHomePath(trimmed);
-  if (!path.isAbsolute(expanded)) return null;
-  return path.dirname(path.resolve(expanded));
+  try {
+    if (fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+  } catch {
+    // Non-existent path: treat as a file path and use its parent directory
+  }
+  return path.dirname(candidate);
 }
 
 function stripQueryAndHashIfNotLiteral(rawPath: string, baseDir: string | null): string {
@@ -230,13 +265,13 @@ export function resolveLocalVideoPath(
   return { ok: true, filePath: resolved };
 }
 
-export function readLocalVideoFile(
+export function inspectLocalVideoFile(
   input: string,
   baseFilePath?: string,
-): VideoReadResult {
+): InspectedLocalVideo {
   const resolved = resolveLocalVideoPath(input, baseFilePath);
   if (!resolved.ok) {
-    return { ok: false, filePath: input, error: resolved.error };
+    return { ok: false, filePath: input, error: resolved.error, errorCode: "invalid" };
   }
 
   let targetPath = resolved.filePath;
@@ -252,31 +287,41 @@ export function readLocalVideoFile(
         try {
           realPath = fs.realpathSync(targetPath);
         } catch (fallbackErr) {
+          const fallbackCode = (fallbackErr as NodeJS.ErrnoException)?.code;
           return {
             ok: false,
             filePath: targetPath,
             error: `動画ファイルにアクセスできません: ${(fallbackErr as Error).message}`,
+            errorCode: fallbackCode === "EACCES" || fallbackCode === "EPERM" ? "forbidden" : "io_error",
           };
         }
       } else {
-        return { ok: false, filePath: targetPath, error: "動画ファイルが見つかりません。" };
+        return {
+          ok: false,
+          filePath: targetPath,
+          error: "動画ファイルが見つかりません。",
+          errorCode: "not_found",
+        };
       }
     } else {
       return {
         ok: false,
         filePath: targetPath,
         error: `動画ファイルにアクセスできません: ${(err as Error).message}`,
+        errorCode: code === "EACCES" || code === "EPERM" ? "forbidden" : "io_error",
       };
     }
   }
 
   // Defense in depth: block symlinks pointing to non-video files
   const mimeType = getMimeTypeForVideoPath(realPath);
-  if (!mimeType) {
+  const playbackContentType = getPlaybackContentTypeForVideoPath(realPath);
+  if (!mimeType || !playbackContentType) {
     return {
       ok: false,
       filePath: targetPath,
       error: "リンク先が動画ファイルではないため読み込みを拒否しました。",
+      errorCode: "forbidden",
     };
   }
 
@@ -284,15 +329,22 @@ export function readLocalVideoFile(
   try {
     stat = fs.statSync(realPath);
   } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
     return {
       ok: false,
       filePath: targetPath,
       error: `動画情報を取得できません: ${(err as Error).message}`,
+      errorCode: code === "EACCES" || code === "EPERM" ? "forbidden" : "io_error",
     };
   }
 
   if (!stat.isFile()) {
-    return { ok: false, filePath: targetPath, error: "指定されたパスは通常ファイルではありません。" };
+    return {
+      ok: false,
+      filePath: targetPath,
+      error: "指定されたパスは通常ファイルではありません。",
+      errorCode: "invalid",
+    };
   }
 
   if (stat.size > MAX_VIDEO_FILE_BYTES) {
@@ -300,16 +352,38 @@ export function readLocalVideoFile(
       ok: false,
       filePath: targetPath,
       error: `動画サイズが大きすぎます (上限 ${(MAX_VIDEO_FILE_BYTES / (1024 * 1024)).toFixed(0)}MB)。`,
+      errorCode: "too_large",
     };
   }
 
   return {
     ok: true,
     filePath: targetPath,
+    realPath,
     fileName: path.basename(targetPath),
-    mediaUrl: buildConductorMediaUrl(realPath),
     mimeType,
+    playbackContentType,
     sizeBytes: stat.size,
+    mtimeMs: stat.mtimeMs,
+  };
+}
+
+export function readLocalVideoFile(
+  input: string,
+  baseFilePath?: string,
+): VideoReadResult {
+  const inspected = inspectLocalVideoFile(input, baseFilePath);
+  if (!inspected.ok) {
+    return { ok: false, filePath: inspected.filePath, error: inspected.error };
+  }
+
+  return {
+    ok: true,
+    filePath: inspected.filePath,
+    fileName: inspected.fileName,
+    mediaUrl: buildConductorMediaUrl(inspected.realPath),
+    mimeType: inspected.mimeType,
+    sizeBytes: inspected.sizeBytes,
   };
 }
 

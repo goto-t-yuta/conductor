@@ -800,7 +800,11 @@ export class BrowserManager {
     const wc = managed.view.webContents;
 
     wc.setWindowOpenHandler(({ url }) => {
-      if (url && /^https?:\/\//i.test(url)) {
+      if (
+        url &&
+        (/^https?:\/\//i.test(url) ||
+          (/^file:\/\//i.test(url) && /^file:\/\//i.test(wc.getURL())))
+      ) {
         this.createTab(url, undefined, undefined, true, managed.meta.projectId ?? null);
       }
       return { action: "deny" };

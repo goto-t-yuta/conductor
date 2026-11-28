@@ -6,6 +6,7 @@ import { UNLANDED_TASK_DONE_BLOCKED_REASON } from "../src/shared/task-status.js"
 import { resolveTaskForTaskEvent } from "../src/renderer/lib/task-event.js";
 import { REOPEN_TARGET_STATUS } from "../src/renderer/lib/task-sidebar.js";
 import {
+  executeTaskInspectorStatusUpdate,
   TaskInspectorModal,
   TaskInspectorQuickStatusButton,
   TaskStatusSelect,
@@ -789,6 +790,62 @@ describe("Unlanded worktree Done guard across TaskSidebar, TaskInspectorModal, a
     expect(onUpdateStatus).toHaveBeenCalledWith("done");
   });
 
+  it("renders Re-check Land and Force Done recovery actions in TaskInspectorModal for unlanded/error tasks (even if worktreePath is missing)", () => {
+    const onSyncLandStatus = vi.fn();
+    const onForceMarkDone = vi.fn().mockReturnValue({ ok: true });
+    const stuckErrorTask = makeTask({
+      id: "wt-ui-stuck-error",
+      taskNumber: 35,
+      title: "Stuck error task",
+      status: "needs_review",
+      worktreePath: null,
+      worktreeBranch: null,
+      landStatus: "error",
+      landError: "親リポジトリに未コミットの変更があります",
+    });
+
+    const html = renderToStaticMarkup(
+      <TaskInspectorModal
+        task={stuckErrorTask}
+        project={SAMPLE_PROJECTS[0]}
+        projectColorHex="#3B82F6"
+        onClose={vi.fn()}
+        onUpdateStatus={vi.fn()}
+        onOpenPreviewUrl={vi.fn()}
+        onMentionInChat={vi.fn()}
+        onStopWorker={vi.fn()}
+        onLandTask={vi.fn()}
+        onSyncLandStatus={onSyncLandStatus}
+        onForceMarkDone={onForceMarkDone}
+      />,
+    );
+
+    expect(html).toContain('data-testid="worktree-panel"');
+    expect(html).toContain('data-testid="inspector-recheck-land-btn"');
+    expect(html).toContain('data-testid="inspector-force-done-btn"');
+    expect(html).toContain("状態を再確認");
+    expect(html).toContain("強制完了");
+
+    // Once landed, recovery buttons are hidden
+    const landedHtml = renderToStaticMarkup(
+      <TaskInspectorModal
+        task={{ ...unlandedTask, landStatus: "landed", worktreePath: null, worktreeBranch: null, landedBranch: "main" }}
+        project={SAMPLE_PROJECTS[0]}
+        projectColorHex="#3B82F6"
+        onClose={vi.fn()}
+        onUpdateStatus={vi.fn()}
+        onOpenPreviewUrl={vi.fn()}
+        onMentionInChat={vi.fn()}
+        onStopWorker={vi.fn()}
+        onLandTask={vi.fn()}
+        onSyncLandStatus={onSyncLandStatus}
+        onForceMarkDone={onForceMarkDone}
+      />,
+    );
+    expect(landedHtml).not.toContain('data-testid="inspector-recheck-land-btn"');
+    expect(landedHtml).not.toContain('data-testid="inspector-force-done-btn"');
+  });
+
   it("blocks Done and surfaces 未Land + Land button on UnifiedChat TaskEventCard for unlanded worktree tasks", () => {
     const onUpdateTaskStatus = vi.fn();
     const onLandTask = vi.fn();
@@ -869,5 +926,142 @@ describe("Unlanded worktree Done guard across TaskSidebar, TaskInspectorModal, a
       stopPropagation: vi.fn(),
     });
     expect(onUpdateTaskStatus).toHaveBeenCalledWith(pushedTask.id, "done");
+  });
+});
+
+describe("TaskInspectorModal auto-close on Done & error handling", () => {
+  it("closes modal after async onUpdateStatus('done') resolves with { ok: true } or void", async () => {
+    let resolveUpdate!: (value: { ok: boolean }) => void;
+    const onUpdateStatus = vi.fn(
+      () =>
+        new Promise<{ ok: boolean }>((resolve) => {
+          resolveUpdate = resolve;
+        }),
+    );
+    const onClose = vi.fn();
+
+    const pending = executeTaskInspectorStatusUpdate({
+      nextStatus: "done",
+      onUpdateStatus,
+      onClose,
+      fallbackErrorMessage: "ステータスの更新に失敗しました",
+    });
+
+    expect(onUpdateStatus).toHaveBeenCalledWith("done");
+    expect(onClose).not.toHaveBeenCalled();
+
+    resolveUpdate({ ok: true });
+    const outcome = await pending;
+    expect(outcome).toEqual({ ok: true, error: null, closed: true });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    // Also supports void-returning handlers (legacy callers / mocks)
+    const voidClose = vi.fn();
+    const voidOutcome = await executeTaskInspectorStatusUpdate({
+      nextStatus: "done",
+      onUpdateStatus: vi.fn(),
+      onClose: voidClose,
+      fallbackErrorMessage: "ステータスの更新に失敗しました",
+    });
+    expect(voidOutcome).toEqual({ ok: true, error: null, closed: true });
+    expect(voidClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps modal open and returns error when updating to done fails or rejects", async () => {
+    const onClose = vi.fn();
+
+    const blockedOutcome = await executeTaskInspectorStatusUpdate({
+      nextStatus: "done",
+      onUpdateStatus: vi.fn(async () => ({
+        ok: false,
+        error: UNLANDED_TASK_DONE_BLOCKED_REASON,
+      })),
+      onClose,
+      fallbackErrorMessage: "ステータスの更新に失敗しました",
+    });
+    expect(blockedOutcome).toEqual({
+      ok: false,
+      error: UNLANDED_TASK_DONE_BLOCKED_REASON,
+      closed: false,
+    });
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Missing error string falls back cleanly
+    const fallbackOutcome = await executeTaskInspectorStatusUpdate({
+      nextStatus: "done",
+      onUpdateStatus: vi.fn(async () => ({ ok: false })),
+      onClose,
+      fallbackErrorMessage: "Failed to update task status",
+    });
+    expect(fallbackOutcome).toEqual({
+      ok: false,
+      error: "Failed to update task status",
+      closed: false,
+    });
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Rejected promise keeps modal open and surfaces exception message
+    const rejectedOutcome = await executeTaskInspectorStatusUpdate({
+      nextStatus: "done",
+      onUpdateStatus: vi.fn(async () => {
+        throw new Error("IPC channel unavailable");
+      }),
+      onClose,
+      fallbackErrorMessage: "Failed to update task status",
+    });
+    expect(rejectedOutcome).toEqual({
+      ok: false,
+      error: "IPC channel unavailable",
+      closed: false,
+    });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps modal open on Reopen (needs_review) and other non-done transitions", async () => {
+    const onClose = vi.fn();
+    for (const status of ["needs_review", "queued", "running", "failed"] as AgentTaskStatus[]) {
+      const outcome = await executeTaskInspectorStatusUpdate({
+        nextStatus: status,
+        onUpdateStatus: vi.fn(async () => ({ ok: true })),
+        onClose,
+        fallbackErrorMessage: "ステータスの更新に失敗しました",
+      });
+      expect(outcome).toEqual({ ok: true, error: null, closed: false });
+    }
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("disables quick status button and status select while an update is in flight", () => {
+    const onUpdateStatus = vi.fn();
+
+    const quickBtn = findElementByTestId(
+      TaskInspectorQuickStatusButton({
+        task: { title: "Review item", status: "needs_review" },
+        disabled: true,
+        onUpdateStatus,
+      }),
+      "inspector-quick-done",
+    );
+    expect(quickBtn).not.toBeNull();
+    expect(quickBtn!.props.disabled).toBe(true);
+    (quickBtn!.props.onClick as (e: { stopPropagation: () => void }) => void)({
+      stopPropagation: vi.fn(),
+    });
+    expect(onUpdateStatus).not.toHaveBeenCalled();
+
+    const selectEl = findElementByTestId(
+      TaskStatusSelect({
+        status: "needs_review",
+        disabled: true,
+        onUpdateStatus,
+      }),
+      "inspector-status-select",
+    );
+    expect(selectEl).not.toBeNull();
+    expect(selectEl!.props.disabled).toBe(true);
+    (selectEl!.props.onChange as (e: { target: { value: string } }) => void)({
+      target: { value: "done" },
+    });
+    expect(onUpdateStatus).not.toHaveBeenCalled();
   });
 });

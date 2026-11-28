@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -39,12 +40,14 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AlternateEmail
@@ -57,6 +60,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Stop
@@ -92,9 +96,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -107,11 +113,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import dev.conductor.mobile.data.AndroidImageAttachmentProcessor
 import dev.conductor.mobile.data.ImageAttachmentLogic
+import dev.conductor.mobile.model.ActiveMentionMode
+import dev.conductor.mobile.model.ActiveMentionQuery
 import dev.conductor.mobile.model.AgentTask
 import dev.conductor.mobile.model.AppSnapshot
 import dev.conductor.mobile.model.ChatAttachment
 import dev.conductor.mobile.model.ChatMessage
+import dev.conductor.mobile.model.DraftMentionChip
 import dev.conductor.mobile.model.ExplicitMentionTarget
+import dev.conductor.mobile.model.MentionAutocomplete
+import dev.conductor.mobile.model.MentionSuggestion
 import dev.conductor.mobile.model.PendingImageAttachment
 import dev.conductor.mobile.model.Project
 import dev.conductor.mobile.model.StreamTransportState
@@ -123,6 +134,7 @@ import dev.conductor.mobile.ui.components.MentionBadgeChip
 import dev.conductor.mobile.ui.components.ProjectPill
 import dev.conductor.mobile.ui.components.TaskCodeBadge
 import dev.conductor.mobile.ui.components.TaskStatusBadge
+import dev.conductor.mobile.ui.components.TaskStatusIcon
 import dev.conductor.mobile.ui.components.formatProviderLabel
 import dev.conductor.mobile.ui.components.parseConductorHexColor
 import dev.conductor.mobile.ui.components.transportStatusColor
@@ -178,6 +190,126 @@ fun ChatScreen(
     var isScrollingToBottom by remember { mutableStateOf(false) }
     var isProgrammaticScrolling by remember { mutableStateOf(false) }
     var hasHandledInitialCompositionEffect by remember { mutableStateOf(false) }
+
+    // Synchronize cursor-aware TextFieldValue with hoisted composerText
+    var composerValue by remember {
+        mutableStateOf(
+            TextFieldValue(
+                text = composerText,
+                selection = TextRange(composerText.length),
+            ),
+        )
+    }
+    var lastKnownExternalText by remember { mutableStateOf(composerText) }
+    if (composerText != lastKnownExternalText) {
+        lastKnownExternalText = composerText
+        if (composerValue.text != composerText) {
+            composerValue = TextFieldValue(
+                text = composerText,
+                selection = TextRange(composerText.length),
+            )
+        }
+    }
+
+    var dismissedMentionKey by remember { mutableStateOf<String?>(null) }
+    val activeMention = remember(composerValue.text, composerValue.selection) {
+        if (!composerValue.text.contains('@')) {
+            null
+        } else {
+            MentionAutocomplete.detectActiveMention(
+                text = composerValue.text,
+                caretIndex = composerValue.selection.end,
+            )
+        }
+    }
+    val mentionSuggestionsResult = remember(activeMention, projects, tasks) {
+        if (activeMention == null) {
+            null
+        } else {
+            MentionAutocomplete.getMentionSuggestions(activeMention, projects, tasks)
+        }
+    }
+    val mentionSuggestions = mentionSuggestionsResult?.suggestions.orEmpty()
+    val scopedMentionProject = mentionSuggestionsResult?.scopedProject
+    val showMentionAutocomplete = activeMention != null &&
+        activeMention.key != dismissedMentionKey &&
+        (mentionSuggestions.isNotEmpty() || activeMention.mode == ActiveMentionMode.PROJECT_TASKS)
+
+    val draftMentionChips = remember(composerValue.text, projects, tasks, selectedMentions) {
+        MentionAutocomplete.extractDraftMentionChips(
+            text = composerValue.text,
+            projects = projects,
+            tasks = tasks,
+            selectedMentions = selectedMentions,
+        )
+    }
+
+    val handleComposerValueChange: (TextFieldValue) -> Unit = { nextValue ->
+        val textChanged = nextValue.text != composerValue.text
+        composerValue = nextValue
+        if (textChanged) {
+            dismissedMentionKey = null
+            lastKnownExternalText = nextValue.text
+            onComposerTextChange(nextValue.text)
+        }
+    }
+
+    val handleSelectMentionSuggestion: (MentionSuggestion) -> Unit = { suggestion ->
+        val currentQuery = activeMention
+        if (currentQuery != null) {
+            onAddMention(MentionAutocomplete.suggestionToExplicitMentionTarget(suggestion))
+            val edit = MentionAutocomplete.removeActiveMentionQuery(composerValue.text, currentQuery)
+            val postMention = MentionAutocomplete.detectActiveMention(edit.nextText, edit.nextCaret)
+            dismissedMentionKey = postMention?.key
+            composerValue = TextFieldValue(
+                text = edit.nextText,
+                selection = TextRange(edit.nextCaret),
+                composition = null,
+            )
+            lastKnownExternalText = edit.nextText
+            onComposerTextChange(edit.nextText)
+        }
+    }
+
+    val handleScopeProjectTasks: (Project) -> Unit = { project ->
+        val currentQuery = activeMention
+        if (currentQuery != null) {
+            val edit = MentionAutocomplete.applyProjectTaskScope(
+                text = composerValue.text,
+                query = currentQuery,
+                projectName = project.name,
+            )
+            dismissedMentionKey = null
+            composerValue = TextFieldValue(
+                text = edit.nextText,
+                selection = TextRange(edit.nextCaret),
+                composition = null,
+            )
+            lastKnownExternalText = edit.nextText
+            onComposerTextChange(edit.nextText)
+        }
+    }
+
+    val handleRemoveDraftChip: (DraftMentionChip) -> Unit = { chip ->
+        onRemoveMention(chip.removalTarget)
+        val edit = MentionAutocomplete.removeResolvedInlineMentions(
+            text = composerValue.text,
+            target = chip.removalTarget,
+            projects = projects,
+            tasks = tasks,
+            caretPos = composerValue.selection.end,
+        )
+        dismissedMentionKey = null
+        if (edit.removedCount > 0) {
+            composerValue = TextFieldValue(
+                text = edit.nextText,
+                selection = TextRange(edit.nextCaret),
+                composition = null,
+            )
+            lastKnownExternalText = edit.nextText
+            onComposerTextChange(edit.nextText)
+        }
+    }
 
     val fallbackDocPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
@@ -388,7 +520,7 @@ fun ChatScreen(
             }
 
             ScrollToBottomFloatingButton(
-                visible = showScrollToBottom,
+                visible = showScrollToBottom && !showMentionAutocomplete,
                 onClick = {
                     val targetIndex = messages.size
                     if (targetIndex <= 0) return@ScrollToBottomFloatingButton
@@ -406,25 +538,49 @@ fun ChatScreen(
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 12.dp),
             )
+
+            // Floating @mention autocomplete list directly above the composer (never occluded by IME)
+            androidx.compose.animation.AnimatedVisibility(
+                visible = showMentionAutocomplete,
+                enter = fadeIn(animationSpec = tween(durationMillis = 120)) +
+                    slideInVertically(animationSpec = tween(durationMillis = 140)) { it / 6 },
+                exit = fadeOut(animationSpec = tween(durationMillis = 100)),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                activeMention?.let { query ->
+                    MentionAutocompletePopup(
+                        query = query,
+                        suggestions = mentionSuggestions,
+                        scopedProject = scopedMentionProject,
+                        onSelectSuggestion = handleSelectMentionSuggestion,
+                        onScopeProjectTasks = handleScopeProjectTasks,
+                        onDismiss = { dismissedMentionKey = query.key },
+                    )
+                }
+            }
         }
 
         // Desktop-aligned floating rounded composer
         ChatComposerBar(
-            composerText = composerText,
-            selectedMentions = selectedMentions,
+            composerValue = composerValue,
+            draftMentionChips = draftMentionChips,
             pendingAttachments = pendingAttachments,
             isProcessingImages = isProcessingImages,
             isSending = isSending,
-            onComposerTextChange = onComposerTextChange,
+            onComposerValueChange = handleComposerValueChange,
             onOpenMentionPicker = { showMentionSheet = true },
-            onRemoveMention = onRemoveMention,
+            onRemoveDraftChip = handleRemoveDraftChip,
             onOpenImagePicker = launchImagePicker,
             onRemoveAttachment = onRemoveAttachment,
             onPreviewPendingAttachment = { att ->
                 previewImage = PreviewImageRequest(label = att.label, bytes = att.previewBytes)
             },
             onSend = {
-                if (composerText.isNotBlank() || pendingAttachments.isNotEmpty()) {
+                dismissedMentionKey = null
+                if (composerValue.text.isNotBlank() || pendingAttachments.isNotEmpty()) {
                     scrollSessionState.updatePinnedToBottom(true)
                 }
                 onSend()
@@ -626,7 +782,7 @@ private fun EmptyChatWelcome(
             )
 
             Text(
-                text = "複数のリポジトリやタスクを横断して指示できます。下の @ ボタンからプロジェクトや T# タスクを指定できます。",
+                text = "複数のリポジトリやタスクを横断して指示できます。入力欄で @ を入力するか、下の @ ボタンからプロジェクトや T# タスクを指定できます。",
                 fontSize = 13.sp,
                 lineHeight = 20.sp,
                 color = colors.textMuted,
@@ -693,7 +849,11 @@ private fun ChatMessageRow(
         )
 
         "system" -> SystemMessageItem(message = message)
-        else -> AssistantMessageItem(message = message, onStop = onStop)
+        else -> AssistantMessageItem(
+            message = message,
+            basePath = linkedTask?.worktreePath ?: linkedTask?.projectPath,
+            onStop = onStop,
+        )
     }
 }
 
@@ -903,6 +1063,7 @@ private fun RemoteAttachmentImageCard(
 @Composable
 private fun AssistantMessageItem(
     message: ChatMessage,
+    basePath: String? = null,
     onStop: () -> Unit,
 ) {
     val colors = ConductorTheme.colors
@@ -1083,6 +1244,7 @@ private fun AssistantMessageItem(
                 markdown = message.text,
                 variant = MarkdownVariant.DEFAULT,
                 textColor = colors.textPrimary,
+                basePath = basePath,
                 modifier = Modifier.fillMaxWidth(),
             )
         } else if (message.isStreaming) {
@@ -1296,14 +1458,14 @@ private fun SystemMessageItem(message: ChatMessage) {
 
 @Composable
 private fun ChatComposerBar(
-    composerText: String,
-    selectedMentions: List<ExplicitMentionTarget>,
+    composerValue: TextFieldValue,
+    draftMentionChips: List<DraftMentionChip>,
     pendingAttachments: List<PendingImageAttachment>,
     isProcessingImages: Boolean,
     isSending: Boolean,
-    onComposerTextChange: (String) -> Unit,
+    onComposerValueChange: (TextFieldValue) -> Unit,
     onOpenMentionPicker: () -> Unit,
-    onRemoveMention: (ExplicitMentionTarget) -> Unit,
+    onRemoveDraftChip: (DraftMentionChip) -> Unit,
     onOpenImagePicker: () -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onPreviewPendingAttachment: (PendingImageAttachment) -> Unit,
@@ -1311,6 +1473,7 @@ private fun ChatComposerBar(
 ) {
     val colors = ConductorTheme.colors
     var isFocused by remember { mutableStateOf(false) }
+    val composerText = composerValue.text
     val canSend = (composerText.isNotBlank() || pendingAttachments.isNotEmpty()) &&
         !isSending &&
         !isProcessingImages
@@ -1375,8 +1538,8 @@ private fun ChatComposerBar(
                     }
                 }
 
-                // Selected @mention chips inside composer
-                if (selectedMentions.isNotEmpty()) {
+                // Selected & inline resolved @mention chips inside composer (desktop DraftMentionContextBar parity)
+                if (draftMentionChips.isNotEmpty()) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1384,48 +1547,11 @@ private fun ChatComposerBar(
                             .padding(start = 10.dp, end = 10.dp, top = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        selectedMentions.forEach { mention ->
-                            val isTask = mention.kind == "task"
-                            Surface(
-                                color = if (isTask) colors.indigoBg else colors.surfaceSubtle,
-                                shape = RoundedCornerShape(8.dp),
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isTask) colors.indigoBorder else colors.border,
-                                ),
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .clickable { onRemoveMention(mention) }
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                ) {
-                                    if (!isTask) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(6.dp)
-                                                .clip(CircleShape)
-                                                .background(parseConductorHexColor(mention.projectColorHex)),
-                                        )
-                                    }
-                                    Text(
-                                        text = mention.chipLabel(),
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = if (isTask) colors.indigoText else colors.textPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.widthIn(max = 180.dp),
-                                    )
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "削除",
-                                        tint = colors.textMuted,
-                                        modifier = Modifier.size(13.dp),
-                                    )
-                                }
-                            }
+                        draftMentionChips.forEach { chip ->
+                            DraftMentionChipItem(
+                                chip = chip,
+                                onRemove = { onRemoveDraftChip(chip) },
+                            )
                         }
                     }
                 }
@@ -1441,15 +1567,15 @@ private fun ChatComposerBar(
                             text = if (pendingAttachments.isNotEmpty()) {
                                 "画像について指示を入力（任意）..."
                             } else {
-                                "Conductor に指示を送る..."
+                                "Conductor に指示を送る... (@でメンション)"
                             },
                             fontSize = 14.sp,
                             color = colors.textSubtle,
                         )
                     }
                     BasicTextField(
-                        value = composerText,
-                        onValueChange = onComposerTextChange,
+                        value = composerValue,
+                        onValueChange = onComposerValueChange,
                         textStyle = TextStyle(
                             color = colors.textPrimary,
                             fontSize = 14.sp,
@@ -1750,6 +1876,431 @@ private fun ImagePreviewDialog(
     }
 }
 
+@Composable
+private fun DraftMentionChipItem(
+    chip: DraftMentionChip,
+    onRemove: () -> Unit,
+) {
+    val colors = ConductorTheme.colors
+    when (chip) {
+        is DraftMentionChip.TaskChip -> {
+            Surface(
+                color = colors.indigoBg,
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, colors.indigoBorder),
+                modifier = Modifier.semantics {
+                    contentDescription = "選択中のタスクメンション ${chip.taskCode} ${chip.taskTitle}"
+                },
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clickable(onClick = onRemove)
+                        .padding(start = 6.dp, end = 7.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    TaskCodeBadge(taskNumber = chip.taskNumber)
+                    if (chip.projectName.isNotBlank()) {
+                        ProjectPill(
+                            name = chip.projectName,
+                            colorHex = chip.projectColorHex,
+                            showDot = false,
+                            modifier = Modifier.widthIn(max = 96.dp),
+                        )
+                    }
+                    if (chip.taskTitle.isNotBlank()) {
+                        Text(
+                            text = chip.taskTitle,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = colors.textPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 150.dp),
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "${chip.taskCode} を削除",
+                        tint = colors.textMuted,
+                        modifier = Modifier.size(13.dp),
+                    )
+                }
+            }
+        }
+
+        is DraftMentionChip.ProjectChip -> {
+            Surface(
+                color = colors.surfaceSubtle,
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, colors.border),
+                modifier = Modifier.semantics {
+                    contentDescription = "選択中のプロジェクトメンション @${chip.projectName}"
+                },
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clickable(onClick = onRemove)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(parseConductorHexColor(chip.projectColorHex)),
+                    )
+                    Text(
+                        text = "@${chip.projectName}",
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 160.dp),
+                    )
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "@${chip.projectName} を削除",
+                        tint = colors.textMuted,
+                        modifier = Modifier.size(13.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MentionAutocompletePopup(
+    query: ActiveMentionQuery,
+    suggestions: List<MentionSuggestion>,
+    scopedProject: Project?,
+    onSelectSuggestion: (MentionSuggestion) -> Unit,
+    onScopeProjectTasks: (Project) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = ConductorTheme.colors
+    val popupListState = rememberLazyListState()
+    LaunchedEffect(query.start, query.rawQuery, query.mode) {
+        if (suggestions.isNotEmpty()) {
+            popupListState.scrollToItem(0)
+        }
+    }
+
+    val headerTitle = if (query.mode == ActiveMentionMode.PROJECT_TASKS) {
+        "@${scopedProject?.name ?: query.projectQuery} のタスク"
+    } else {
+        "メンション候補"
+    }
+
+    Surface(
+        color = colors.card,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, colors.borderStrong),
+        shadowElevation = 8.dp,
+        tonalElevation = 0.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 264.dp)
+            .semantics { contentDescription = "メンション候補一覧" },
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Compact desktop-aligned header bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(colors.surfaceSecondary)
+                    .padding(start = 12.dp, end = 8.dp, top = 7.dp, bottom = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = headerTitle,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.textSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Surface(
+                        color = colors.surfaceSubtle,
+                        shape = RoundedCornerShape(99.dp),
+                    ) {
+                        Text(
+                            text = "${suggestions.size}",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.textMuted,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                        )
+                    }
+                }
+                Text(
+                    text = if (query.mode == ActiveMentionMode.PROJECT_TASKS) "@project/T#" else "@project · @T#",
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = colors.textSubtle,
+                    maxLines = 1,
+                )
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onDismiss)
+                        .semantics { contentDescription = "メンション候補を閉じる" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = null,
+                        tint = colors.textMuted,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
+            HorizontalDivider(thickness = 1.dp, color = colors.borderSubtle)
+
+            if (suggestions.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 18.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (query.mode == ActiveMentionMode.PROJECT_TASKS) {
+                            "@${scopedProject?.name ?: query.projectQuery} に一致するタスクがありません"
+                        } else {
+                            "一致する候補がありません"
+                        },
+                        fontSize = 12.sp,
+                        color = colors.textMuted,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    state = popupListState,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(vertical = 4.dp),
+                ) {
+                    itemsIndexed(
+                        items = suggestions,
+                        key = { _, item -> item.id },
+                    ) { index, suggestion ->
+                        val prevKind = if (index > 0) suggestions[index - 1]::class else null
+                        val showGroupDivider = query.mode == ActiveMentionMode.ALL &&
+                            prevKind != null &&
+                            prevKind != suggestion::class
+                        if (showGroupDivider) {
+                            HorizontalDivider(
+                                thickness = 1.dp,
+                                color = colors.borderSubtle,
+                                modifier = Modifier.padding(vertical = 3.dp, horizontal = 12.dp),
+                            )
+                        }
+                        when (suggestion) {
+                            is MentionSuggestion.TaskSuggestion -> MentionTaskSuggestionRow(
+                                suggestion = suggestion,
+                                onClick = { onSelectSuggestion(suggestion) },
+                            )
+
+                            is MentionSuggestion.ProjectSuggestion -> MentionProjectSuggestionRow(
+                                suggestion = suggestion,
+                                onClick = { onSelectSuggestion(suggestion) },
+                                onScopeTasks = { onScopeProjectTasks(suggestion.project) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MentionTaskSuggestionRow(
+    suggestion: MentionSuggestion.TaskSuggestion,
+    onClick: () -> Unit,
+) {
+    val colors = ConductorTheme.colors
+    val task = suggestion.task
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 9.dp)
+            .semantics {
+                contentDescription = "タスク候補 ${suggestion.insertText} ${task.title}"
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        TaskStatusIcon(status = task.status)
+        TaskCodeBadge(taskNumber = task.taskNumber)
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = task.title,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                color = colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (task.projectName.isNotBlank()) {
+                    ProjectPill(
+                        name = task.projectName,
+                        colorHex = suggestion.projectColorHex,
+                        modifier = Modifier.widthIn(max = 120.dp),
+                    )
+                }
+                if (suggestion.scopedProjectName != null) {
+                    Text(
+                        text = suggestion.insertText,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = colors.textSubtle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        TaskStatusBadge(status = task.status)
+    }
+}
+
+@Composable
+private fun MentionProjectSuggestionRow(
+    suggestion: MentionSuggestion.ProjectSuggestion,
+    onClick: () -> Unit,
+    onScopeTasks: () -> Unit,
+) {
+    val colors = ConductorTheme.colors
+    val project = suggestion.project
+    val compactPath = remember(project.path) {
+        MentionAutocomplete.compactProjectPath(project.path)
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 9.dp)
+            .semantics {
+                contentDescription = "プロジェクト候補 @${project.name}"
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(parseConductorHexColor(project.colorHex)),
+        )
+        Icon(
+            imageVector = Icons.Default.Folder,
+            contentDescription = null,
+            tint = colors.textSubtle,
+            modifier = Modifier.size(15.dp),
+        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = "@${project.name}",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.textPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (!project.gitBranch.isNullOrBlank()) {
+                    Surface(
+                        color = colors.surfaceSubtle,
+                        shape = RoundedCornerShape(4.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AccountTree,
+                                contentDescription = null,
+                                tint = colors.textSubtle,
+                                modifier = Modifier.size(10.dp),
+                            )
+                            Text(
+                                text = project.gitBranch,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 9.5.sp,
+                                color = colors.textMuted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 84.dp),
+                            )
+                        }
+                    }
+                }
+            }
+            if (compactPath.isNotBlank()) {
+                Text(
+                    text = compactPath,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.5.sp,
+                    color = colors.textSubtle,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (suggestion.taskCount > 0) {
+            Surface(
+                color = colors.indigoBg,
+                shape = RoundedCornerShape(6.dp),
+                border = BorderStroke(1.dp, colors.indigoBorder),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(onClick = onScopeTasks)
+                    .semantics {
+                        contentDescription = "@${project.name} のタスク一覧を表示"
+                    },
+            ) {
+                Text(
+                    text = "${suggestion.taskCount} タスク /",
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.indigoText,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MentionPickerSheet(
@@ -1857,6 +2408,7 @@ private fun MentionPickerSheet(
                     ConductorCard(
                         cornerRadius = 12.dp,
                         onClick = {
+                            val colorHex = MentionAutocomplete.getProjectColorForTask(projects, task)
                             onSelect(
                                 ExplicitMentionTarget(
                                     kind = "task",
@@ -1866,6 +2418,8 @@ private fun MentionPickerSheet(
                                     taskStatus = task.status,
                                     projectId = task.projectId,
                                     projectName = task.projectName,
+                                    projectPath = task.projectPath,
+                                    projectColorHex = colorHex,
                                 ),
                             )
                         },

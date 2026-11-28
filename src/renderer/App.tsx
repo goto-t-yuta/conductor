@@ -26,6 +26,7 @@ import {
   createInitialVoiceReadbackTracker,
 } from "../shared/voice.js";
 import { speakTextWithFallback, stopAllVoicePlayback } from "./lib/voice-client.js";
+import { ImageLightboxModal } from "./components/ImageLightboxModal.js";
 import type { MarkdownOpenedImage } from "./components/MarkdownView.js";
 import type { MarkdownViewerTab } from "./components/MarkdownViewerPane.js";
 import { SettingsModal, type SettingsModalTab } from "./components/SettingsModal.js";
@@ -35,9 +36,10 @@ import { UnifiedChat, type ChatJumpRequest } from "./components/UnifiedChat.js";
 import { UnifiedRightPane } from "./components/UnifiedRightPane.js";
 import { hideBrowserBounds } from "./lib/browser-bounds-client.js";
 import {
+  buildAttachmentFromMarkdownImage,
   buildImageTabFromAttachment,
-  extractImageFileName,
   isViewableImageAttachment,
+  mergeLoadedImageIntoAttachment,
   upsertImageTab,
   type ImageViewerTab,
 } from "./lib/image-viewer.js";
@@ -273,6 +275,21 @@ export const App: React.FC = () => {
   const imageDiskFallbackAttemptedRef = useRef<Set<string>>(new Set());
   imageTabsRef.current = imageTabs;
 
+  // Center-screen Image Lightbox modal state (default destination on image click)
+  const [lightboxImage, setLightboxImage] = useState<{
+    requestId: number;
+    attachment: ChatAttachment;
+    context?: {
+      message?: ChatMessage;
+      draftText?: string;
+      draftMentions?: ExplicitMentionTarget[];
+      projectId?: string | null;
+    };
+    tab: ImageViewerTab;
+    diskFallbackAttempted: boolean;
+  } | null>(null);
+  const lightboxRequestIdRef = useRef(0);
+
   // Right-pane Code/Text Viewer state (opened from Project File Tree)
   const [codeTabs, setCodeTabs] = useState<CodeViewerTab[]>([]);
 
@@ -415,11 +432,12 @@ export const App: React.FC = () => {
   );
 
   useEffect(() => {
-    const applyIncomingSnapshot = (incoming: AppSnapshot) => {
+    const applyIncomingSnapshot = (incoming: AppSnapshot | null | undefined) => {
+      if (!incoming) return;
       setSnapshot((prev) => reconcileAppSnapshot(prev, incoming));
     };
-    void window.conductor.getSnapshot().then(applyIncomingSnapshot);
     const unsubSnap = window.conductor.onSnapshot(applyIncomingSnapshot);
+    void window.conductor.getSnapshot().then(applyIncomingSnapshot);
     const unsubAtt = window.conductor.onAttachmentFromBrowser((att) => {
       updateAttachments((prev) => [...prev, att]);
     });
@@ -1043,7 +1061,7 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  const handleOpenImageAttachment = useCallback(
+  const openImageAttachmentInRightPane = useCallback(
     (
       attachment: ChatAttachment,
       context?: {
@@ -1104,6 +1122,134 @@ export const App: React.FC = () => {
     [loadImageTabFromDisk],
   );
 
+  const loadLightboxImageFromDisk = useCallback(async (requestId: number, pathOrUrl: string) => {
+    setLightboxImage((prev) =>
+      prev && prev.requestId === requestId
+        ? {
+            ...prev,
+            diskFallbackAttempted: true,
+            tab: { ...prev.tab, isLoading: true, error: null },
+          }
+        : prev,
+    );
+    try {
+      const res = await window.conductor.imageReadFile(pathOrUrl);
+      if (res.ok && res.dataUrl) {
+        setLightboxImage((prev) =>
+          prev && prev.requestId === requestId
+            ? {
+                ...prev,
+                tab: {
+                  ...prev.tab,
+                  src: res.dataUrl!,
+                  fileName: res.fileName ?? prev.tab.fileName,
+                  imagePath: res.filePath || prev.tab.imagePath,
+                  isLoading: false,
+                  error: null,
+                },
+              }
+            : prev,
+        );
+      } else {
+        setLightboxImage((prev) =>
+          prev && prev.requestId === requestId
+            ? {
+                ...prev,
+                tab: {
+                  ...prev.tab,
+                  isLoading: false,
+                  error: res.error ?? "画像を読み込めませんでした。",
+                },
+              }
+            : prev,
+        );
+      }
+    } catch (err) {
+      setLightboxImage((prev) =>
+        prev && prev.requestId === requestId
+          ? {
+              ...prev,
+              tab: {
+                ...prev.tab,
+                isLoading: false,
+                error: err instanceof Error ? err.message : "画像を読み込めませんでした。",
+              },
+            }
+          : prev,
+      );
+    }
+  }, []);
+
+  const handleOpenImageAttachment = useCallback(
+    (
+      attachment: ChatAttachment,
+      context?: {
+        message?: ChatMessage;
+        draftText?: string;
+        draftMentions?: ExplicitMentionTarget[];
+        projectId?: string | null;
+      },
+    ) => {
+      if (!isViewableImageAttachment(attachment)) return;
+      const { tab, localPathToLoad } = buildImageTabFromAttachment(attachment);
+      const requestId = lightboxRequestIdRef.current + 1;
+      lightboxRequestIdRef.current = requestId;
+      const needsDiskLoad = Boolean(!tab.src && localPathToLoad);
+
+      setLightboxImage({
+        requestId,
+        attachment,
+        context,
+        tab,
+        diskFallbackAttempted: needsDiskLoad,
+      });
+
+      if (needsDiskLoad && localPathToLoad) {
+        void loadLightboxImageFromDisk(requestId, localPathToLoad);
+      }
+    },
+    [loadLightboxImageFromDisk],
+  );
+
+  const handleCloseLightbox = useCallback(() => {
+    lightboxRequestIdRef.current += 1;
+    setLightboxImage(null);
+  }, []);
+
+  const handleOpenLightboxInRightPane = useCallback(() => {
+    if (!lightboxImage) return;
+    const mergedAttachment = mergeLoadedImageIntoAttachment(
+      lightboxImage.attachment,
+      lightboxImage.tab,
+    );
+    const context = lightboxImage.context;
+    lightboxRequestIdRef.current += 1;
+    setLightboxImage(null);
+    setSelectedTaskId(null);
+    openImageAttachmentInRightPane(mergedAttachment, context);
+  }, [lightboxImage, openImageAttachmentInRightPane]);
+
+  const handleRetryLightboxImage = useCallback(() => {
+    if (!lightboxImage?.tab.imagePath) return;
+    void loadLightboxImageFromDisk(lightboxImage.requestId, lightboxImage.tab.imagePath);
+  }, [lightboxImage, loadLightboxImageFromDisk]);
+
+  const handleLightboxImageLoadError = useCallback(() => {
+    if (!lightboxImage) return;
+    if (lightboxImage.tab.imagePath && !lightboxImage.diskFallbackAttempted) {
+      void loadLightboxImageFromDisk(lightboxImage.requestId, lightboxImage.tab.imagePath);
+      return;
+    }
+    setLightboxImage((prev) =>
+      prev && prev.requestId === lightboxImage.requestId
+        ? {
+            ...prev,
+            tab: { ...prev.tab, isLoading: false, error: "画像データの読み込みに失敗しました。" },
+          }
+        : prev,
+    );
+  }, [lightboxImage, loadLightboxImageFromDisk]);
+
   const handleRetryImageTab = useCallback(
     (tabId: string) => {
       const target = imageTabs.find((t) => t.id === tabId);
@@ -1119,21 +1265,10 @@ export const App: React.FC = () => {
       context?: { message?: ChatMessage; projectId?: string | null },
     ) => {
       const fallbackProjectId = context?.projectId ?? activeProjectItem.project?.id ?? null;
-      const fileName = extractImageFileName(image.filePath ?? image.src);
-      const label = image.alt?.trim() || fileName || "Image";
-      const id = image.filePath
-        ? `md-image:${image.filePath}`
-        : `md-image:${image.src.slice(0, 120)}`;
-      handleOpenImageAttachment(
-        {
-          id,
-          kind: "image",
-          label,
-          imagePath: image.filePath,
-          imageDataUrl: image.src,
-        },
-        { message: context?.message, projectId: fallbackProjectId },
-      );
+      handleOpenImageAttachment(buildAttachmentFromMarkdownImage(image), {
+        message: context?.message,
+        projectId: fallbackProjectId,
+      });
     },
     [activeProjectItem.project?.id, handleOpenImageAttachment],
   );
@@ -1286,7 +1421,7 @@ export const App: React.FC = () => {
         return;
       }
       if (kind === "image") {
-        handleOpenImageAttachment(
+        openImageAttachmentInRightPane(
           {
             id: `file-image:${entry.path}`,
             kind: "image",
@@ -1308,7 +1443,7 @@ export const App: React.FC = () => {
       activeProjectItem.path,
       activeProjectItem.project?.id,
       handleOpenMarkdownFile,
-      handleOpenImageAttachment,
+      openImageAttachmentInRightPane,
       loadCodeFileIntoTab,
     ],
   );
@@ -1544,11 +1679,15 @@ export const App: React.FC = () => {
       const explicitScope = options?.projectId
         ? toProjectScopeKey(options.projectId, projects)
         : null;
+      const filePathProject = /^file:\/\//i.test(url.trim())
+        ? inferProjectFromFilePath(url, projects, tasks)
+        : null;
       const taskProject = inferProjectFromTask(options?.task, projects);
       const messageProject = inferProjectFromMessage(options?.message, projects, tasks);
 
       const targetScope: ProjectScopeKey =
         (explicitScope && explicitScope !== GENERAL_PROJECT_SCOPE ? explicitScope : null) ??
+        filePathProject?.id ??
         taskProject?.id ??
         messageProject?.id ??
         workspaceStateRef.current.activeProjectScope;
@@ -1931,9 +2070,11 @@ export const App: React.FC = () => {
     [handleAddMention],
   );
 
-  const handleUpdateTaskStatus = useCallback((taskId: string, status: AgentTaskStatus) => {
-    void window.conductor.updateTaskStatus(taskId, status);
-  }, []);
+  const handleUpdateTaskStatus = useCallback(
+    (taskId: string, status: AgentTaskStatus, options?: { force?: boolean }) =>
+      window.conductor.updateTaskStatus(taskId, status, options),
+    [],
+  );
 
   const handleAddProjectDialog = useCallback(() => {
     void window.conductor.addProjectDialog();
@@ -2396,7 +2537,9 @@ export const App: React.FC = () => {
               projectRecentMdFiles={projectRecentMdFiles}
               locale={uiLocale}
               isPickingElement={snapshot.isPickingElement}
-              hideNativeView={Boolean(selectedTask || settingsModalTab !== null)}
+              hideNativeView={Boolean(
+                selectedTask || settingsModalTab !== null || lightboxImage !== null,
+              )}
               onNavigateBrowser={handleNavigateBrowserProp}
               onNewBrowserTab={handleNewBrowserTabClick}
               onBrowserBack={handleBrowserBack}
@@ -2466,6 +2609,8 @@ export const App: React.FC = () => {
           onMentionInChat={() => handleMentionTask(selectedTask)}
           onStopWorker={() => void window.conductor.stopTaskWorker(selectedTask.id)}
           onLandTask={(opts) => window.conductor.landTask(selectedTask.id, opts)}
+          onSyncLandStatus={() => window.conductor.syncTaskLandStatus(selectedTask.id)}
+          onForceMarkDone={() => handleUpdateTaskStatus(selectedTask.id, "done", { force: true })}
           onResolveConflictWithAI={() => window.conductor.resolveTaskConflictWithAI(selectedTask.id)}
           onCleanupWorktree={async () => {
             await window.conductor.cleanupTaskWorktree(selectedTask.id);
@@ -2532,6 +2677,19 @@ export const App: React.FC = () => {
           onOpenUpdateReleasePage={handleOpenUpdateReleasePage}
           onInstallAndRestartUpdate={handleInstallAndRestartUpdate}
           onSetApplyUpdateOnQuit={handleSetApplyUpdateOnQuit}
+        />
+      )}
+      {/* Center Image Lightbox Modal (automatically hides WebContentsView while open) */}
+      {lightboxImage && (
+        <ImageLightboxModal
+          image={lightboxImage.tab}
+          locale={uiLocale}
+          onClose={handleCloseLightbox}
+          onOpenInRightPane={handleOpenLightboxInRightPane}
+          onRetryLoad={handleRetryLightboxImage}
+          onImageLoadError={handleLightboxImageLoadError}
+          onOpenUrl={(url) => void handleOpenUrlInBrowser(url)}
+          onRevealInFinder={handleRevealInFinder}
         />
       )}
     </div>
